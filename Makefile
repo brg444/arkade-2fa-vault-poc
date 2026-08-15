@@ -1,4 +1,4 @@
-.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-demo vault-demo-down
+.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-browser-fixture vault-demo vault-demo-down
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 LDFLAGS := -s -w -X 'main.Version=$(VERSION)'
@@ -44,6 +44,11 @@ docker-stop:
 # vault-demo: detached one-command POC (Nigiri + private emulator + UI).
 vault-demo:
 	@./poc/2fa-vault/scripts/regtest-up.sh
+
+# vault-browser-fixture: genuine Chrome virtual-authenticator assertion + PRF proof.
+vault-browser-fixture:
+	@bun poc/2fa-vault/web/e2e/capture.mjs
+	@go test -count=1 ./poc/2fa-vault/internal/webauthn ./poc/2fa-vault/internal/vault
 
 # vault-demo-down: stop the POC stack but keep vault-provider-data.
 vault-demo-down:

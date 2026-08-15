@@ -21,11 +21,13 @@ be `http://localhost:8787` or WebAuthn/origin checks fail.
 ## What is not yet a complete E2E proof
 
 Automated `go test ./poc/2fa-vault/...` still uses `webauthn.Synth` for
-authorization paths. That is a Go security harness, not a substitute for a
-captured browser assertion. `web/e2e/capture.mjs` is **assertion capture
-only**: it writes `testdata/webauthn_get.json` from a Chrome virtual
-authenticator when that path works, and `TestBrowserAssertionFixture`
-consumes the file. It does **not** exercise PRF derivation or the
+authorization paths. The dependency-free `web/e2e/capture.mjs` drives a
+real Chrome virtual authenticator through CDP, requires a 32-byte PRF result
+to remain inside the page, writes only the public ES256 assertion to
+`testdata/webauthn_get.json`, and lets `TestBrowserAssertionFixture` verify
+that assertion in Go. Run it with `make vault-browser-fixture` (set
+`CHROME_BIN` when Chrome is not in a standard location). It proves the
+browser WebAuthn/PRF primitive, but it does **not** yet drive the complete
 draft → bind → authorize app flow.
 
 `-unsafe-local-signer` is test-only and does not prove the deployment boundary.
@@ -160,6 +162,9 @@ because Compose resolves relative paths from the first `-f` file.
 make vault-demo
 # Open http://localhost:8787
 make vault-demo-down
+
+# Independent browser primitive check (Chrome + Bun; no Playwright):
+make vault-browser-fixture
 ```
 
 `scripts/regtest-up.sh` is a detached launcher: it polls Nigiri
