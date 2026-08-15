@@ -12,6 +12,7 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 )
@@ -280,5 +281,9 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 	wantDirect := hex.EncodeToString(webauthn.CompressedP256(direct))
 	if st.DirectP256 != wantDirect {
 		t.Fatalf("status directP256 = %q, want persisted %q", st.DirectP256, wantDirect)
+	}
+	wantProvider := hex.EncodeToString(schnorr.SerializePubKey(svc.Operational.TweakedProvider))
+	if st.TweakedProviderXOnly != wantProvider {
+		t.Fatalf("status tweakedProviderXOnly = %q, want persisted %q", st.TweakedProviderXOnly, wantProvider)
 	}
 }

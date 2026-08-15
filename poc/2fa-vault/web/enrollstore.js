@@ -4,7 +4,9 @@ export const STORE = "vault-hot-v1";
 export const STORE_PENDING = "vault-hot-v1-pending";
 
 export function loadMain(storage) {
-  return readJSON(storage, STORE);
+  const rec = readJSON(storage, STORE);
+  if (rec) requireCompleteRecord(rec);
+  return rec;
 }
 
 export function loadPending(storage) {
@@ -12,7 +14,7 @@ export function loadPending(storage) {
 }
 
 export function stagePending(storage, rec) {
-  requireCompleteRecord(rec);
+  requireRegistrationRecord(rec);
   storage.setItem(STORE_PENDING, JSON.stringify(rec));
 }
 
@@ -37,7 +39,8 @@ export function sameEnrollmentTuple(a, b) {
   return hexEq(a?.credId, b?.credId) &&
     hexEq(a?.webauthnP256, b?.webauthnP256) &&
     hexEq(a?.directP256, b?.directP256) &&
-    hexEq(a?.hotPub, b?.hotPub);
+    hexEq(a?.hotPub, b?.hotPub) &&
+    hexEq(a?.tweakedProviderXOnly, b?.tweakedProviderXOnly);
 }
 
 export async function recoverEnrollment({ storage, register, status }) {
@@ -60,10 +63,12 @@ export async function recoverEnrollment({ storage, register, status }) {
   const st = await status();
   assertHotPub(pending.hotPub, pending.hotPub, st.hotPub);
   assertDirectP256(pending.directP256, pending.directP256, st.directP256);
+  assertTweakedProvider(pending.tweakedProviderXOnly, st.tweakedProviderXOnly);
   const next = {
     ...pending,
     operationalAddress: st.operationalAddress || "",
     operationalScript: st.operationalScript || "",
+    tweakedProviderXOnly: requireXOnly(st.tweakedProviderXOnly, "status tweaked provider"),
   };
   stagePending(storage, next);
   promotePending(storage);
@@ -71,10 +76,29 @@ export async function recoverEnrollment({ storage, register, status }) {
 }
 
 function requireCompleteRecord(rec) {
+  requireRegistrationRecord(rec);
+  requireXOnly(rec.tweakedProviderXOnly, "persisted tweaked provider");
+}
+
+function requireRegistrationRecord(rec) {
   if (!rec || typeof rec !== "object") throw new Error("incomplete enrollment record");
   for (const key of ["credId", "webauthnP256", "directP256", "hotPub", "nonce", "ciphertext"]) {
     if (!rec[key]) throw new Error("incomplete enrollment record");
   }
+}
+
+export function assertTweakedProvider(persisted, status) {
+  const live = requireXOnly(status, "status tweaked provider");
+  if (persisted && requireXOnly(persisted, "persisted tweaked provider") !== live) {
+    throw new Error("persisted tweaked provider does not match vault status");
+  }
+  return live;
+}
+
+function requireXOnly(value, name) {
+  const hex = String(value || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(name);
+  return hex;
 }
 
 function readJSON(storage, key) {

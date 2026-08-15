@@ -69,6 +69,7 @@ export function snapshotPSBT(tx) {
   const outputs = [];
   for (let i = 0; i < tx.outputsLength; i++) outputs.push(normalize(tx.getOutput(i)));
   return {
+    global: normalize(tx.global),
     version: tx.version,
     lockTime: tx.lockTime,
     inputs,
@@ -161,7 +162,8 @@ export function validateAuthorizedPSBT(args) {
   }
   const submitted = parsePSBT(args.submittedB64);
   const authorized = parsePSBT(args.authorizedB64);
-  if (JSON.stringify(stripSigs(snapshotPSBT(submitted))) !== JSON.stringify(stripSigs(snapshotPSBT(authorized)))) {
+  if (submitted.inputsLength !== 1 || authorized.inputsLength !== 1) throw new Error("authorized psbt must have exactly one input");
+  if (JSON.stringify(withoutTapScriptSigs(snapshotPSBT(submitted))) !== JSON.stringify(withoutTapScriptSigs(snapshotPSBT(authorized)))) {
     throw new Error("authorize mutated non-signature psbt fields");
   }
   const before = tapSigs(submitted.getInput(0));
@@ -169,34 +171,29 @@ export function validateAuthorizedPSBT(args) {
   if (before.length !== 1) throw new Error("submitted psbt must carry the hot signature only");
   if (after.length !== 2) throw new Error("authorized psbt must add exactly one provider signature");
   const hot = before[0];
-  if (args.hotPubHex) {
-    const wantHot = requireHex(args.hotPubHex, "hot pub").slice(2);
-    if (hot.pub !== wantHot) throw new Error("submitted hot signature key");
-  }
-  const extras = after.filter((s) => s.pub !== hot.pub || s.sig !== hot.sig || s.leaf !== hot.leaf);
-  if (extras.length !== 1) throw new Error("authorized provider signature delta");
-  const extra = extras[0];
-  if (extra.pub === hot.pub) throw new Error("provider signature reuses the hot key");
-  if (extra.leaf !== hot.leaf) throw new Error("provider signature leaf");
-  if (extra.sig.length !== 128) throw new Error("provider signature must be 64 bytes");
-  const authInput = authorized.getInput(0);
-  if (!authInput.witnessUtxo) throw new Error("authorized witness utxo required");
-  if (!authInput.tapLeafScript || authInput.tapLeafScript.length !== 1) {
-    throw new Error("authorized tap leaf required");
-  }
+  const hotCompressed = requireHex(args.hotPubHex, "hot pub");
+  if (!/^(02|03)[0-9a-f]{64}$/.test(hotCompressed)) throw new Error("hot pub must be compressed secp256k1");
+  if (hot.pub !== hotCompressed.slice(2)) throw new Error("submitted hot signature key");
+  if (hot.sig.length !== 128) throw new Error("hot signature must be 64 bytes");
+  const authInput = submitted.getInput(0);
+  if (!authInput.witnessUtxo || !authInput.tapLeafScript || authInput.tapLeafScript.length !== 1) throw new Error("authorized tap leaf required");
   const leafBytes = toBytes(authInput.tapLeafScript[0][1]);
   if (leafBytes.length < 2) throw new Error("tap leaf");
   const script = leafBytes.subarray(0, -1);
   const ver = leafBytes[leafBytes.length - 1];
-  const msg = authorized.preimageWitnessV1(
-    0,
-    [authInput.witnessUtxo.script],
-    authInput.sighashType ?? SigHash.DEFAULT,
-    [authInput.witnessUtxo.amount],
-    undefined,
-    script,
-    ver,
-  );
+  const leafHash = bytesToHex(schnorr.utils.taggedHash("TapLeaf", Uint8Array.of(ver), writeCompactSize(script.length), script));
+  if (hot.leaf !== leafHash) throw new Error("hot signature leaf");
+  const msg = submitted.preimageWitnessV1(0, [authInput.witnessUtxo.script], authInput.sighashType ?? SigHash.DEFAULT, [authInput.witnessUtxo.amount], -1, script, ver);
+  if (!schnorr.verify(hexToBytes(hot.sig), msg, hexToBytes(hot.pub))) throw new Error("hot signature invalid");
+  if (after.filter((s) => sameTapSig(s, hot)).length !== 1) throw new Error("authorized response mutated the hot signature");
+  const extras = after.filter((s) => !sameTapSig(s, hot));
+  if (extras.length !== 1) throw new Error("authorized provider signature delta");
+  const extra = extras[0];
+  const wantProvider = requireHex(args.tweakedProviderXOnly, "tweaked provider x-only");
+  if (!/^[0-9a-f]{64}$/.test(wantProvider)) throw new Error("tweaked provider x-only must be 32 bytes");
+  if (extra.pub !== wantProvider) throw new Error("provider signature key does not match pinned vault key");
+  if (extra.leaf !== leafHash) throw new Error("provider signature leaf");
+  if (extra.sig.length !== 128) throw new Error("provider signature must be 64 bytes");
   if (!schnorr.verify(hexToBytes(extra.sig), msg, hexToBytes(extra.pub))) {
     throw new Error("provider signature invalid");
   }
@@ -210,13 +207,14 @@ function tapSigs(input) {
 function normalizeTapSig(entry) {
   const meta = entry[0];
   const sig = toBytes(entry[1]);
-  const raw = sig.length === 65 ? sig.slice(0, 64) : sig;
   return {
     pub: bytesToHex(toBytes(meta.pubKey)),
     leaf: bytesToHex(toBytes(meta.leafHash)),
-    sig: bytesToHex(raw),
+    sig: bytesToHex(sig),
   };
 }
+
+function sameTapSig(a, b) { return a.pub === b.pub && a.leaf === b.leaf && a.sig === b.sig; }
 
 export function hotSignPSBT(b64, priv) {
   const tx = parsePSBT(b64);
@@ -224,7 +222,7 @@ export function hotSignPSBT(b64, priv) {
   tx.sign(toBytes(priv));
   const signed = tx.toPSBT();
   const after = snapshotPSBT(Transaction.fromPSBT(signed, PSBT_OPTS));
-  if (JSON.stringify(stripSigs(before)) !== JSON.stringify(stripSigs(after))) {
+  if (JSON.stringify(withoutTapScriptSigs(before)) !== JSON.stringify(withoutTapScriptSigs(after))) {
     throw new Error("local sign mutated non-signature psbt fields");
   }
   return bytesToB64(signed);
@@ -602,14 +600,12 @@ function normalize(value) {
   return value;
 }
 
-function stripSigs(snap) {
+function withoutTapScriptSigs(snap) {
   return {
     ...snap,
-    inputs: snap.inputs.map((input) => {
+    inputs: snap.inputs.map((input, index) => {
       const copy = { ...input };
-      delete copy.tapScriptSig;
-      delete copy.partialSig;
-      delete copy.tapKeySig;
+      if (index === 0) delete copy.tapScriptSig;
       return copy;
     }),
   };

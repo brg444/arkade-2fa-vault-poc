@@ -222,7 +222,7 @@ function preimageWitnessV1Msg(tx) {
     [input.witnessUtxo.script],
     input.sighashType ?? SigHash.DEFAULT,
     [input.witnessUtxo.amount],
-    undefined,
+    -1,
     script,
     ver,
   );
@@ -250,11 +250,33 @@ function authorizedPair() {
   return {
     submitted,
     authorized,
+    hotPriv: hot,
+    provPriv: prov,
     hotPubHex: bytesToHex(secp256k1.getPublicKey(hot, true)),
     provPub: bytesToHex(provPub),
     leafHash,
     hotPub,
   };
+}
+
+function authorizeWith(submitted, providerPriv, leafHash = null, signature = null) {
+  const tx = parsePSBT(submitted);
+  const hash = leafHash || tapLeafHash(tx);
+  const sig = signature || schnorr.sign(preimageWitnessV1Msg(tx), providerPriv);
+  tx.updateInput(0, {
+    tapScriptSig: [[{ pubKey: schnorr.getPublicKey(providerPriv), leafHash: hash }, sig]],
+  }, true);
+  return bytesToB64(tx.toPSBT());
+}
+
+function validatePair(pair, authorizedB64 = pair.authorized, overrides = {}) {
+  return validateAuthorizedPSBT({
+    submittedB64: pair.submitted,
+    authorizedB64,
+    hotPubHex: pair.hotPubHex,
+    tweakedProviderXOnly: pair.provPub,
+    ...overrides,
+  });
 }
 
 test("authorized validation accepts exactly one extra valid provider signature", () => {
@@ -263,11 +285,13 @@ test("authorized validation accepts exactly one extra valid provider signature",
     submittedB64: pair.submitted,
     authorizedB64: pair.authorized,
     hotPubHex: pair.hotPubHex,
+    tweakedProviderXOnly: pair.provPub,
   }).providerPub).toBe(pair.provPub);
   expect(() => validateAuthorizedPSBT({
     submittedB64: pair.submitted,
     authorizedB64: pair.submitted,
     hotPubHex: pair.hotPubHex,
+    tweakedProviderXOnly: pair.provPub,
   })).toThrow(/exactly one provider/);
 });
 
@@ -282,5 +306,74 @@ test("authorized validation rejects a forged nonzero provider signature", () => 
     submittedB64: pair.submitted,
     authorizedB64: bytesToB64(forgedTx.toPSBT()),
     hotPubHex: pair.hotPubHex,
+    tweakedProviderXOnly: pair.provPub,
   })).toThrow(/provider signature invalid/);
+});
+
+test("authorized validation rejects a valid signature under an unpinned provider key", () => {
+  const pair = authorizedPair();
+  const attacker = hex32(9);
+  expect(() => validatePair(pair, authorizeWith(pair.submitted, attacker)))
+    .toThrow(/pinned vault key/);
+});
+
+test("authorized validation rejects 65-byte hot and provider signatures", () => {
+  const pair = authorizedPair();
+  const hot65 = parsePSBT(pair.submitted);
+  const hotEntry = hot65.inputs[0].tapScriptSig[0];
+  hot65.inputs[0].tapScriptSig = [[hotEntry[0], Uint8Array.from([...hotEntry[1], 1])]];
+  const submitted65 = bytesToB64(hot65.toPSBT());
+  expect(() => validateAuthorizedPSBT({
+    submittedB64: submitted65,
+    authorizedB64: authorizeWith(submitted65, pair.provPriv),
+    hotPubHex: pair.hotPubHex,
+    tweakedProviderXOnly: pair.provPub,
+  })).toThrow(/hot signature must be 64 bytes/);
+
+  const providerTx = parsePSBT(pair.submitted);
+  const sig65 = Uint8Array.from([...schnorr.sign(preimageWitnessV1Msg(providerTx), pair.provPriv), 1]);
+  expect(() => validatePair(pair, authorizeWith(pair.submitted, pair.provPriv, null, sig65)))
+    .toThrow(/provider signature must be 64 bytes/);
+});
+
+test("authorized validation rejects a provider signature tagged with the wrong leaf", () => {
+  const pair = authorizedPair();
+  const wrongLeaf = new Uint8Array(32).fill(7);
+  expect(() => validatePair(pair, authorizeWith(pair.submitted, pair.provPriv, wrongLeaf)))
+    .toThrow(/provider signature leaf/);
+});
+
+test("authorized validation rejects mutation of the existing hot tuple", () => {
+  const pair = authorizedPair();
+  const tx = parsePSBT(pair.authorized);
+  const [meta, sig] = tx.inputs[0].tapScriptSig[0];
+  tx.inputs[0].tapScriptSig[0] = [meta, Uint8Array.from(sig.map((b, i) => i === 0 ? b ^ 1 : b))];
+  expect(() => validatePair(pair, bytesToB64(tx.toPSBT())))
+    .toThrow(/mutated the hot signature|provider signature delta/);
+});
+
+test("authorized validation rejects unrelated input signature metadata", () => {
+  const pair = authorizedPair();
+  const partial = parsePSBT(pair.authorized);
+  partial.inputs[0].partialSig = [[secp256k1.getPublicKey(hex32(10), true), new Uint8Array([1])]];
+  expect(() => validatePair(pair, bytesToB64(partial.toPSBT())))
+    .toThrow(/non-signature psbt fields/);
+
+  const keySig = parsePSBT(pair.authorized);
+  keySig.inputs[0].tapKeySig = new Uint8Array(64).fill(4);
+  expect(() => validatePair(pair, bytesToB64(keySig.toPSBT())))
+    .toThrow(/non-signature psbt fields/);
+});
+
+test("authorized validation rejects changed global and output metadata", () => {
+  const pair = authorizedPair();
+  const global = parsePSBT(pair.authorized);
+  global.global.unknown = [[{ type: 0xaa, key: new Uint8Array([1]) }, new Uint8Array([2])]];
+  expect(() => validatePair(pair, bytesToB64(global.toPSBT())))
+    .toThrow(/non-signature psbt fields/);
+
+  const output = parsePSBT(pair.authorized);
+  output.outputs[0].unknown = [[{ type: 0xaa, key: new Uint8Array([3]) }, new Uint8Array([4])]];
+  expect(() => validatePair(pair, bytesToB64(output.toPSBT())))
+    .toThrow(/non-signature psbt fields/);
 });

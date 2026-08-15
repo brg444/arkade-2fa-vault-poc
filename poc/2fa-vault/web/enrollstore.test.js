@@ -33,6 +33,7 @@ function rec(over = {}) {
     hotPub: "dd",
     nonce: "ee",
     ciphertext: "ff",
+    tweakedProviderXOnly: "11".repeat(32),
     operationalAddress: "",
     operationalScript: "",
     ...over,
@@ -79,6 +80,7 @@ test("recover retries exact register then promotes when only pending exists", as
     status: async () => ({
       hotPub: "dd",
       directP256: "cc",
+      tweakedProviderXOnly: "11".repeat(32),
       operationalAddress: "bcrt1qop",
       operationalScript: "5120aa",
     }),
@@ -91,6 +93,7 @@ test("recover retries exact register then promotes when only pending exists", as
     hotPub: "dd",
   });
   expect(loadMain(storage).operationalAddress).toBe("bcrt1qop");
+  expect(loadMain(storage).tweakedProviderXOnly).toBe("11".repeat(32));
   expect(loadPending(storage)).toBeNull();
 });
 
@@ -102,7 +105,7 @@ test("recover refuses to overwrite or discard a pending/main mismatch", async ()
   await expect(recoverEnrollment({
     storage,
     register: async () => { called = true; },
-    status: async () => ({ hotPub: "dd", directP256: "cc" }),
+    status: async () => ({ hotPub: "dd", directP256: "cc", tweakedProviderXOnly: "11".repeat(32) }),
   })).rejects.toThrow(/does not match local record/);
   expect(called).toBe(false);
   expect(loadMain(storage).credId).toBe("11");
@@ -115,8 +118,29 @@ test("recover rejects a status hot/direct mismatch without promoting", async () 
   await expect(recoverEnrollment({
     storage,
     register: async () => {},
-    status: async () => ({ hotPub: "00", directP256: "cc" }),
+    status: async () => ({ hotPub: "00", directP256: "cc", tweakedProviderXOnly: "11".repeat(32) }),
   })).rejects.toThrow(/hot pub/);
   expect(loadMain(storage)).toBeNull();
   expect(loadPending(storage).hotPub).toBe("dd");
+});
+
+test("recover rejects a changed tweaked provider without promoting", async () => {
+  const storage = memoryStorage();
+  stagePending(storage, rec());
+  await expect(recoverEnrollment({
+    storage,
+    register: async () => {},
+    status: async () => ({
+      hotPub: "dd",
+      directP256: "cc",
+      tweakedProviderXOnly: "22".repeat(32),
+    }),
+  })).rejects.toThrow(/tweaked provider/);
+  expect(loadMain(storage)).toBeNull();
+});
+
+test("main enrollment records require a pinned tweaked provider", () => {
+  const storage = memoryStorage();
+  storage.setItem(STORE, JSON.stringify(rec({ tweakedProviderXOnly: "" })));
+  expect(() => loadMain(storage)).toThrow(/persisted tweaked provider/);
 });

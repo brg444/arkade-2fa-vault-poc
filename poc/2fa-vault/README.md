@@ -12,7 +12,7 @@ be `http://localhost:8787` or WebAuthn/origin checks fail.
 - WebAuthn challenge/origin/RP/UV checks and the spending budget live in ordinary provider Go only. The WebAuthn credential ES256 public key is stored and used only for that off-chain check
 - Arkade CSFS is `OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK`. The committed key is a second, PRF-derived direct-auth P-256 public key (`HKDF-SHA256` info `arkade-2fa-vault/direct-p256/v1` || `uint32be(counter)`, rejection-sampled). The packet witness is only the compact low-S 64-byte signature over the current Arkade sighash
 - SQLite UTC-day budget: reservation is committed before the external signer is invoked; completion is a second transaction. A crash after Sign can leave a usable PSBT while the row stays reserved. Do not treat that as crash-atomic pairing of signature and completed accounting
-- Enrollment is **local TOFU / no attestation / setup authorization**: the first successful register is trusted on this origin. There is no authenticator attestation and no independent setup ceremony. `/v1/register` is idempotent only for that exact enrolled tuple (credential ID, WebAuthn P-256, DirectP256, hot pub); any other retry stays locked. The browser stages the complete encrypted local record under a pending `localStorage` key before `POST /register` and promotes it only after success (and retries that exact tuple on reload if pending exists and the main record does not). The vault is built from the **browser-generated hot pubkey** and the provider persists the immutable descriptor (hot, offline, provider base, tweaked provider, **both** P-256 pubs, template/policy/network, CSV, addresses)
+- Enrollment is **local TOFU / no attestation / setup authorization**: the first successful register is trusted on this origin. There is no authenticator attestation and no independent setup ceremony. `/v1/register` is idempotent only for that exact enrolled tuple (credential ID, WebAuthn P-256, DirectP256, hot pub); any other retry stays locked. The browser stages the complete encrypted local record under a pending `localStorage` key before `POST /register`, pins the resulting tweaked provider x-only key, and promotes the record only after success (and retries that exact tuple on reload if pending exists and the main record does not). The vault is built from the **browser-generated hot pubkey** and the provider persists the immutable descriptor (hot, offline, provider base, tweaked provider, **both** P-256 pubs, template/policy/network, CSV, addresses)
 - The second-signer pub is a **public deterministic fixture** (`OfflinePubHex` = secp256k1 generator **G**, discrete log **1**). It is not custody or offline-key security. Savings has no provider key. This POC does not implement an offline generation/storage/signing ceremony
 - Restart rebuilds trees from that stored record. A signer rotation or CSV/network/template change is refused unless the enrolled provider base is the current emulator key or listed as deprecated; the expected tweaked key always comes from the stored record
 - Browser page: register PRF passkey (enrolls WebAuthn P-256 **and** distinct direct-auth P-256) → draft → preflight → `credentials.get` → PRF-derive direct key → sign the Arkade digest → bind (assertion stays off-chain; packet gets only `directSig`) → locally validate the bound PSBT → BIP342 hot-sign → authorize
@@ -56,8 +56,11 @@ sighash. After Review, any change to destination, amount, fee, or
 prevout invalidates the review (no silent re-draft). Bind still checks
 the bound PSBT against the reviewed draft. Before Publish, the browser
 checks that the authorized PSBT equals the submitted hot-signed PSBT
-except exactly one extra provider tapscript signature. That is a POC
-limit, not a production client-verification claim.
+except exactly one extra 64-byte tapscript signature under the locally
+pinned tweaked provider key; it verifies both the preserved hot signature
+and the new provider signature over the exact BIP342 digest. Other PSBT
+metadata changes are rejected. This is still a POC limit, not a full
+independent-descriptor verification claim.
 
 ## Direct-auth script is transaction-bound; budget is not
 
@@ -111,8 +114,8 @@ ANSI-colors through aurora) and fails unless `version` is numeric and
 still calls `testmempoolaccept` before `sendrawtransaction` — that is the
 authoritative custom-policy gate (Knots and other peers may still reject
 `datacarrier` / `scriptpubkey`). The live subtest funds the Operational
-address and calls `testmempoolaccept` / `sendrawtransaction` when
-`nigiri` is reachable; it skips otherwise.
+address and calls `testmempoolaccept` / `sendrawtransaction` when Nigiri
+is reachable; it skips otherwise.
 
 **Fee.** The packet is still the dominant extra output. The POC feerate
 ceiling is 10 sat/vB with a 5 000 sat absolute cap so the two limits are

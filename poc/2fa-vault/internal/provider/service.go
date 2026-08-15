@@ -365,6 +365,7 @@ type Status struct {
 	TxCap                   int64  `json:"txCap"`
 	HotPub                  string `json:"hotPub,omitempty"`
 	DirectP256              string `json:"directP256,omitempty"`
+	TweakedProviderXOnly    string `json:"tweakedProviderXOnly,omitempty"`
 }
 
 func (s *Service) publishEnrollment(hot *btcec.PublicKey, op, sv *vault.Built) {
@@ -405,6 +406,9 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if snap.Operational != nil {
 		st.OperationalAddr = snap.Operational.Address
 		st.OperationalScript = hex.EncodeToString(snap.Operational.PkScript)
+		if snap.Operational.TweakedProvider != nil {
+			st.TweakedProviderXOnly = hex.EncodeToString(schnorr.SerializePubKey(snap.Operational.TweakedProvider))
+		}
 	}
 	if snap.Savings != nil {
 		st.SavingsAddr = snap.Savings.Address

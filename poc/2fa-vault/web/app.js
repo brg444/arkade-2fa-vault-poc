@@ -20,7 +20,9 @@ import {
   recoverEnrollment,
   stagePending,
   promotePending,
+  assertTweakedProvider,
 } from "./enrollstore.js";
+import { compressedES256PublicKey } from "./webauthnkey.js";
 
 const PRF_SALT = new TextEncoder().encode("arkade-2fa-vault/prf/v1");
 const HKDF_INFO = new TextEncoder().encode("arkade-2fa-vault/kek/v1");
@@ -28,6 +30,24 @@ const HKDF_INFO = new TextEncoder().encode("arkade-2fa-vault/kek/v1");
 const $ = (id) => document.getElementById(id);
 
 let reviewed = null;
+let busy = false;
+
+const BUSY_CONTROLS = [
+  "btn-enroll", "btn-fund", "btn-review", "btn-sign",
+  "btn-reject-cap", "btn-reject-intent",
+  "dest", "amount", "fee", "prevtx", "vout",
+];
+
+function setBusy(next) {
+  busy = next;
+  for (const id of BUSY_CONTROLS) if ($(id)) $(id).disabled = next;
+}
+
+async function runExclusive(fn) {
+  if (busy) throw new Error("another vault operation is in progress");
+  setBusy(true);
+  try { return await fn(); } finally { setBusy(false); }
+}
 
 async function api(path, body) {
   const res = await fetch(path, {
@@ -90,6 +110,9 @@ async function refresh() {
   const rec = loadRec();
   if (rec?.hotPub && st.hotPub) assertHotPub(rec.hotPub, rec.hotPub, st.hotPub);
   if (rec?.directP256) assertDirectP256(rec.directP256, rec.directP256, st.directP256);
+  if (rec?.tweakedProviderXOnly) {
+    assertTweakedProvider(rec.tweakedProviderXOnly, st.tweakedProviderXOnly);
+  }
   return st;
 }
 
@@ -120,17 +143,6 @@ async function deriveKEK(prf) {
     false,
     ["encrypt", "decrypt"],
   );
-}
-
-function compressP256(spki) {
-  const raw = spki.slice(spki.length - 65);
-  if (raw[0] !== 0x04) throw new Error("expected uncompressed P-256");
-  const x = raw.slice(1, 33);
-  const y = raw.slice(33, 65);
-  const out = new Uint8Array(33);
-  out[0] = (y[31] & 1) ? 0x03 : 0x02;
-  out.set(x, 1);
-  return out;
 }
 
 async function prfFrom(cred) {
@@ -176,7 +188,7 @@ async function enroll() {
     }
     if (!prf) throw new Error("authenticator did not return PRF");
 
-    const webauthnP256 = compressP256(new Uint8Array(cred.response.getPublicKey()));
+    const webauthnP256 = await compressedES256PublicKey(cred.response);
     const derivedAuth = await deriveDirectP256(prf);
     scalar = derivedAuth.scalar;
     if (bytesToHex(webauthnP256) === bytesToHex(derivedAuth.pub)) {
@@ -197,6 +209,7 @@ async function enroll() {
       ciphertext: bytesToHex(ct),
       operationalAddress: "",
       operationalScript: "",
+      tweakedProviderXOnly: "",
     };
     stagePending(localStorage, rec);
     await api("/v1/register", {
@@ -208,6 +221,7 @@ async function enroll() {
     const st = await refresh();
     assertHotPub(derived, rec.hotPub, st.hotPub);
     assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, st.directP256);
+    rec.tweakedProviderXOnly = assertTweakedProvider("", st.tweakedProviderXOnly);
     rec.operationalAddress = st.operationalAddress || "";
     rec.operationalScript = st.operationalScript || "";
     stagePending(localStorage, rec);
@@ -277,6 +291,11 @@ async function ceremony() {
         extensions: { prf: { eval: { first: PRF_SALT } } },
       },
     });
+    requireFrozenReview();
+    let live = await api("/v1/status");
+    assertHotPub(rec.hotPub, rec.hotPub, live.hotPub);
+    assertDirectP256(rec.directP256, rec.directP256, live.directP256);
+    assertTweakedProvider(rec.tweakedProviderXOnly, live.tweakedProviderXOnly);
     prf = toUint8(await prfFrom(get));
     if (!prf) throw new Error("PRF missing");
     const assertion = {
@@ -287,9 +306,8 @@ async function ceremony() {
     };
     const derivedAuth = await deriveDirectP256(prf);
     scalar = derivedAuth.scalar;
-    assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, st.directP256);
+    assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, live.directP256);
     const directSig = bytesToHex(signDirectP256(scalar, challenge));
-    reviewed.directSig = directSig;
     const bound = await api("/v1/bind", { psbt: draft.psbt, directSig, ...assertion });
     const parsed = validateBoundPSBT({
       draftB64: draft.psbt,
@@ -310,13 +328,18 @@ async function ceremony() {
       hexToBytes(rec.ciphertext),
     ));
     const derived = bytesToHex(secp256k1.getPublicKey(hot, true));
-    assertHotPub(derived, rec.hotPub, st.hotPub);
+    requireFrozenReview();
+    live = await api("/v1/status");
+    assertHotPub(derived, rec.hotPub, live.hotPub);
+    assertDirectP256(rec.directP256, rec.directP256, live.directP256);
+    assertTweakedProvider(rec.tweakedProviderXOnly, live.tweakedProviderXOnly);
     const signed = hotSignPSBT(bound.psbt, hot);
     const out = await api("/v1/authorize", { psbt: signed, ...assertion });
     validateAuthorizedPSBT({
       submittedB64: signed,
       authorizedB64: out.signedPsbt,
       hotPubHex: rec.hotPub,
+      tweakedProviderXOnly: rec.tweakedProviderXOnly,
     });
     const challengeHex = bytesToHex(challenge);
     let published = null;
@@ -379,23 +402,6 @@ async function demoReject(kind) {
       requireFrozenReview();
       return;
     }
-    if (kind === "replay-direct") {
-      if (!reviewed?.directSig) throw new Error("complete a ceremony first to capture a direct signature");
-      const draft = await api("/v1/draft", {
-        ...reviewed.intent,
-        recipientAmount: reviewed.intent.recipientAmount + 1,
-      });
-      await api("/v1/bind", {
-        psbt: draft.psbt,
-        directSig: reviewed.directSig,
-        credentialId: rec.credId,
-        clientDataJSON: "7b7d",
-        authenticatorData: "00",
-        signature: "00",
-      });
-      $("out").textContent = "replayed direct signature unexpectedly accepted";
-      return;
-    }
     throw new Error("unknown rejection demo");
   } catch (err) {
     $("out").textContent = err.message;
@@ -409,14 +415,33 @@ function toUint8(value) {
   return null;
 }
 
-$("btn-enroll").onclick = () => enroll().catch((e) => { $("out").textContent = e.message; });
-$("btn-review").onclick = () => prepareDraft().catch((e) => { $("out").textContent = e.message; });
-$("btn-sign").onclick = () => ceremony().catch((e) => { $("out").textContent = e.message; });
-if ($("btn-fund")) $("btn-fund").onclick = () => fundOperational().catch((e) => { $("out").textContent = e.message; });
-if ($("btn-reject-cap")) $("btn-reject-cap").onclick = () => demoReject("over-budget");
-if ($("btn-reject-intent")) $("btn-reject-intent").onclick = () => demoReject("intent-changed");
-if ($("btn-reject-replay")) $("btn-reject-replay").onclick = () => demoReject("replay-direct");
+function handle(fn) {
+  runExclusive(fn).catch((e) => { $("out").textContent = e.message; });
+}
 
-recoverEnrollment(enrollIO())
-  .catch((e) => { $("out").textContent = e.message; })
-  .finally(() => refresh().catch((e) => { $("status").textContent = e.message; }));
+$("btn-enroll").onclick = () => handle(enroll);
+$("btn-review").onclick = () => handle(prepareDraft);
+$("btn-sign").onclick = () => handle(ceremony);
+if ($("btn-fund")) $("btn-fund").onclick = () => handle(fundOperational);
+if ($("btn-reject-cap")) $("btn-reject-cap").onclick = () => handle(() => demoReject("over-budget"));
+if ($("btn-reject-intent")) $("btn-reject-intent").onclick = () => handle(() => demoReject("intent-changed"));
+
+async function bootstrap() {
+  setBusy(true);
+  try {
+    try {
+      await recoverEnrollment(enrollIO());
+    } catch (e) {
+      $("out").textContent = e.message;
+    }
+    try {
+      await refresh();
+    } catch (e) {
+      $("status").textContent = e.message;
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+bootstrap();
