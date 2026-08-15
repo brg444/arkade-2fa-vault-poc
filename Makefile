@@ -1,4 +1,4 @@
-.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-browser-fixture vault-demo vault-demo-down
+.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-browser-e2e vault-browser-fixture vault-demo vault-demo-down
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 LDFLAGS := -s -w -X 'main.Version=$(VERSION)'
@@ -49,6 +49,10 @@ vault-demo:
 vault-browser-fixture:
 	@bun poc/2fa-vault/web/e2e/capture.mjs
 	@go test -count=1 ./poc/2fa-vault/internal/webauthn ./poc/2fa-vault/internal/vault
+
+# vault-browser-e2e: real Chrome PRF ceremony through the app + unsafe local test signer.
+vault-browser-e2e:
+	@bun poc/2fa-vault/web/e2e/full-app.mjs
 
 # vault-demo-down: stop the POC stack but keep vault-provider-data.
 vault-demo-down:

@@ -28,7 +28,12 @@ to remain inside the page, writes only the public ES256 assertion to
 that assertion in Go. Run it with `make vault-browser-fixture` (set
 `CHROME_BIN` when Chrome is not in a standard location). It proves the
 browser WebAuthn/PRF primitive, but it does **not** yet drive the complete
-draft → bind → authorize app flow.
+draft → bind → authorize app flow. `make vault-browser-e2e` does drive that
+full browser flow with a fresh Chrome virtual authenticator and checks the
+exact register/bind/authorize request shapes. It deliberately starts
+`cmd/provider -unsafe-local-signer`, fabricates an unmined previous
+transaction, and stops after authorization; it is browser/app evidence, not
+RemoteSigner, mempool, or confirmation evidence.
 
 `-unsafe-local-signer` is test-only and does not prove the deployment boundary.
 Compose deploys `cmd/provider`. `cmd/demo` is an optional local harness that
@@ -165,6 +170,9 @@ make vault-demo-down
 
 # Independent browser primitive check (Chrome + Bun; no Playwright):
 make vault-browser-fixture
+
+# Full browser app ceremony with the explicitly unsafe local test signer:
+make vault-browser-e2e
 ```
 
 `scripts/regtest-up.sh` is a detached launcher: it polls Nigiri

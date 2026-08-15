@@ -9,6 +9,7 @@ import {
   bytesToHex,
   encodeEmulatorPacket,
   encodeExtensionScript,
+  hotSignPSBT,
   parsePSBT,
   snapshotPSBT,
   validateAuthorizedPSBT,
@@ -84,7 +85,7 @@ function buildSpend({
   const change = prev.getOutput(0).amount - recipientAmount - fee;
   const tx = new Transaction({ ...PSBT_OPTS, version, lockTime });
   tx.addInput({
-    txid: sha256(sha256(prev.toBytes(true, false))),
+    txid: Uint8Array.from(sha256(sha256(prev.toBytes(true, false)))).reverse(),
     index: 0,
     sequence,
     witnessUtxo: { script: vaultScript, amount: prev.getOutput(0).amount },
@@ -117,6 +118,16 @@ test("draft validation accepts the reviewed collaborative spend", () => {
   expect(parsed.fee).toBe("500");
   expect(parsed.sighash).toBe("SIGHASH_DEFAULT");
   expect(parsed.packet.witness.length).toBe(0);
+});
+
+test("draft validation treats an omitted Taproot sighash field as SIGHASH_DEFAULT", () => {
+  const built = buildSpend();
+  const tx = parsePSBT(built.b64);
+  delete tx.inputs[0].sighashType;
+  expect(validateDraftPSBT({
+    draftB64: bytesToB64(tx.toPSBT()),
+    ...intent(built),
+  }).sighash).toBe("SIGHASH_DEFAULT");
 });
 
 test("bound validation allows only the direct-auth witness to change", () => {
@@ -202,6 +213,22 @@ test("PSBT snapshot preserves unknown prevout field", () => {
   const before = snapshotPSBT(tx);
   const after = snapshotPSBT(parsePSBT(b64));
   expect(after.inputs[0].unknown).toEqual(before.inputs[0].unknown);
+});
+
+test("hot signing restores the exact unknown PrevoutTxField dropped by scure updateInput", () => {
+  const built = buildSpend();
+  const tx = parsePSBT(built.b64);
+  const hot = hex32(2);
+  const hotXOnly = schnorr.getPublicKey(hot);
+  const control = tx.inputs[0].tapLeafScript[0][0];
+  const script = Uint8Array.from([0x20, ...hotXOnly, 0xac, 0xc0]);
+  tx.inputs[0].tapLeafScript = [[control, script]];
+  const unsigned = bytesToB64(tx.toPSBT());
+  const before = snapshotPSBT(parsePSBT(unsigned));
+  const signed = parsePSBT(hotSignPSBT(unsigned, hot));
+  const after = snapshotPSBT(signed);
+  expect(after.inputs[0].unknown).toEqual(before.inputs[0].unknown);
+  expect(signed.getInput(0).tapScriptSig.length).toBe(1);
 });
 
 function tapLeafParts(tx) {

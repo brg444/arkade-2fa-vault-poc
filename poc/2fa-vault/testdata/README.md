@@ -13,6 +13,12 @@ assertion to `webauthn_get.json`, then runs the Go consumer tests. Set
 `CHROME_BIN` if Chrome is not installed in a standard location. Until that
 file exists, `TestBrowserAssertionFixture` skips.
 
+`make vault-browser-e2e` separately drives a fresh virtual authenticator
+through the actual browser app's enrollment, review, DirectP256 binding,
+hot signing, and Provider authorization. It uses the labeled unsafe local
+test signer and no Bitcoin node; the Compose/RemoteSigner/regtest proof is a
+separate acceptance boundary.
+
 A captured assertion is **off-chain** Provider evidence (origin/RP/UV/ES256). It is not the Arkade packet witness. On-chain authorization is a DirectP256 compact signature over `OP_SIGHASH`.
 
 `TestArkadePacketOnchainPolicy` does not need this fixture. It measures the

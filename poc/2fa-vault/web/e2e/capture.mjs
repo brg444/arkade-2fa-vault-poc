@@ -4,19 +4,10 @@
 //
 //   bun poc/2fa-vault/web/e2e/capture.mjs
 
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { addPRFAuthenticator, evaluate, launchChrome } from "./cdp.mjs";
 
 const origin = "http://localhost:8787";
-const profile = mkdtempSync(join(tmpdir(), "arkade-webauthn-"));
-const chrome = findChrome();
 const challenge = crypto.getRandomValues(new Uint8Array(32));
 const fixtureURL = new URL("../../testdata/webauthn_get.json", import.meta.url);
 
@@ -33,47 +24,11 @@ const server = Bun.serve({
   },
 });
 
-const child = Bun.spawn([
-  chrome,
-  "--headless=new",
-  "--disable-gpu",
-  "--disable-dev-shm-usage",
-  "--no-first-run",
-  "--no-default-browser-check",
-  "--remote-debugging-port=0",
-  "--remote-allow-origins=*",
-  `--user-data-dir=${profile}`,
-  origin,
-], { stdout: "pipe", stderr: "pipe" });
-
-let cdp;
+let browser;
 try {
-  const port = await devtoolsPort(profile, child);
-  const page = await pageTarget(port, origin, child);
-  cdp = await CDP.connect(page.webSocketDebuggerUrl);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
-    options: {
-      protocol: "ctap2",
-      ctap2Version: "ctap2_1",
-      transport: "internal",
-      hasResidentKey: true,
-      hasUserVerification: true,
-      isUserVerified: true,
-      automaticPresenceSimulation: true,
-      hasPrf: true,
-    },
-  });
-
-  const evaluated = await cdp.send("Runtime.evaluate", {
-    expression: `(${browserCeremony.toString()})(${JSON.stringify(toB64(challenge))})`,
-    awaitPromise: true,
-    returnByValue: true,
-  });
-  if (evaluated.exceptionDetails) {
-    throw new Error(evaluated.exceptionDetails.exception?.description || evaluated.exceptionDetails.text);
-  }
-  const captured = evaluated.result?.value;
+  browser = await launchChrome(origin);
+  await addPRFAuthenticator(browser.cdp);
+  const captured = await evaluate(browser.cdp, browserCeremony, Buffer.from(challenge).toString("base64"));
   if (!captured || captured.prfLength !== 32 || !captured.fixture) {
     throw new Error("Chrome virtual authenticator did not return a 32-byte PRF result");
   }
@@ -82,105 +37,8 @@ try {
   console.log(`WebAuthn ES256 assertion captured; PRF ${captured.prfLength} bytes confirmed in-page`);
   console.log("wrote", fixtureURL.pathname);
 } finally {
-  cdp?.close();
   server.stop(true);
-  child.kill();
-  await Promise.race([child.exited, Bun.sleep(2_000)]);
-  rmSync(profile, { recursive: true, force: true });
-}
-
-function findChrome() {
-  const candidates = [
-    process.env.CHROME_BIN,
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-  ].filter(Boolean);
-  const found = candidates.find(existsSync);
-  if (!found) throw new Error("Chrome not found; set CHROME_BIN to a Chrome/Chromium executable");
-  return found;
-}
-
-async function devtoolsPort(dir, process) {
-  const active = join(dir, "DevToolsActivePort");
-  for (let i = 0; i < 200; i++) {
-    if (existsSync(active)) {
-      const port = Number(readFileSync(active, "utf8").split(/\r?\n/, 1)[0]);
-      if (Number.isInteger(port) && port > 0) return port;
-    }
-    if (await exited(process)) throw new Error("Chrome exited before opening DevTools");
-    await Bun.sleep(50);
-  }
-  throw new Error("timed out waiting for Chrome DevTools");
-}
-
-async function pageTarget(port, url, process) {
-  for (let i = 0; i < 200; i++) {
-    if (await exited(process)) throw new Error("Chrome exited before creating a page target");
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-      const targets = await response.json();
-      const target = targets.find((item) => item.type === "page" && item.url.startsWith(url));
-      if (target?.webSocketDebuggerUrl) return target;
-    } catch {
-      // Chrome can publish the port before the target list is ready.
-    }
-    await Bun.sleep(50);
-  }
-  throw new Error("timed out waiting for the localhost page target");
-}
-
-async function exited(process) {
-  return (await Promise.race([process.exited.then(() => true), Bun.sleep(0).then(() => false)]));
-}
-
-function toB64(bytes) {
-  return Buffer.from(bytes).toString("base64");
-}
-
-class CDP {
-  static async connect(url) {
-    const ws = new WebSocket(url);
-    await new Promise((resolve, reject) => {
-      ws.addEventListener("open", resolve, { once: true });
-      ws.addEventListener("error", () => reject(new Error("DevTools WebSocket failed")), { once: true });
-    });
-    return new CDP(ws);
-  }
-
-  constructor(ws) {
-    this.ws = ws;
-    this.nextID = 1;
-    this.pending = new Map();
-    ws.addEventListener("message", (event) => {
-      const message = JSON.parse(String(event.data));
-      if (!message.id) return;
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(`${message.error.message} (${message.error.code})`));
-      else pending.resolve(message.result);
-    });
-    ws.addEventListener("close", () => {
-      for (const pending of this.pending.values()) pending.reject(new Error("DevTools WebSocket closed"));
-      this.pending.clear();
-    });
-  }
-
-  send(method, params = {}) {
-    const id = this.nextID++;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  close() {
-    this.ws.close();
-  }
+  await browser?.close();
 }
 
 async function browserCeremony(challengeB64) {

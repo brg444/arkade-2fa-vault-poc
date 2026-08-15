@@ -163,8 +163,12 @@ export function validateAuthorizedPSBT(args) {
   const submitted = parsePSBT(args.submittedB64);
   const authorized = parsePSBT(args.authorizedB64);
   if (submitted.inputsLength !== 1 || authorized.inputsLength !== 1) throw new Error("authorized psbt must have exactly one input");
-  if (JSON.stringify(withoutTapScriptSigs(snapshotPSBT(submitted))) !== JSON.stringify(withoutTapScriptSigs(snapshotPSBT(authorized)))) {
-    throw new Error("authorize mutated non-signature psbt fields");
+  const mismatch = firstMismatch(
+    withoutTapScriptSigs(snapshotPSBT(submitted)),
+    withoutTapScriptSigs(snapshotPSBT(authorized)),
+  );
+  if (mismatch) {
+    throw new Error(`authorize mutated non-signature psbt fields at ${mismatch}`);
   }
   const before = tapSigs(submitted.getInput(0));
   const after = tapSigs(authorized.getInput(0));
@@ -218,12 +222,21 @@ function sameTapSig(a, b) { return a.pub === b.pub && a.leaf === b.leaf && a.sig
 
 export function hotSignPSBT(b64, priv) {
   const tx = parsePSBT(b64);
+  if (tx.inputsLength !== 1) throw new Error("local sign requires exactly one input");
   const before = snapshotPSBT(tx);
+  // @scure/btc-signer's updateInput merge drops unknown PSBT keys. The
+  // Arkade PrevoutTxField is intentionally unknown to the browser library,
+  // so restore the exact cloned map after signing and then verify the full
+  // PSBT delta below.
+  const preservedUnknown = tx.getInput(0).unknown;
   tx.sign(toBytes(priv));
+  if (preservedUnknown) tx.inputs[0].unknown = preservedUnknown;
+  else delete tx.inputs[0].unknown;
   const signed = tx.toPSBT();
   const after = snapshotPSBT(Transaction.fromPSBT(signed, PSBT_OPTS));
-  if (JSON.stringify(withoutTapScriptSigs(before)) !== JSON.stringify(withoutTapScriptSigs(after))) {
-    throw new Error("local sign mutated non-signature psbt fields");
+  const mismatch = firstMismatch(withoutTapScriptSigs(before), withoutTapScriptSigs(after));
+  if (mismatch) {
+    throw new Error(`local sign mutated non-signature psbt field: ${mismatch}`);
   }
   return bytesToB64(signed);
 }
@@ -238,7 +251,7 @@ function inspectPSBT(args) {
   if (input.sequence !== 0xffffffff) {
     throw new Error("collaborative sequence must be final");
   }
-  if (input.sighashType !== SigHash.DEFAULT) {
+  if ((input.sighashType ?? SigHash.DEFAULT) !== SigHash.DEFAULT) {
     throw new Error("sighash must be SIGHASH_DEFAULT");
   }
   if (!input.witnessUtxo) throw new Error("witness utxo required");
@@ -248,7 +261,8 @@ function inspectPSBT(args) {
   const prevRaw = hexToBytes(args.prevTxHex);
   const prev = Transaction.fromRaw(prevRaw, PSBT_OPTS);
   if (input.index !== Number(args.vout)) throw new Error("prevout vout mismatch");
-  if (!bytesEqual(input.txid, sha256d(prev.toBytes(true, false)))) {
+  const prevTxID = Uint8Array.from(sha256d(prev.toBytes(true, false))).reverse();
+  if (!bytesEqual(input.txid, prevTxID)) {
     throw new Error("prevout txid mismatch");
   }
   const prevOut = prev.getOutput(Number(args.vout));
@@ -309,7 +323,7 @@ function inspectPSBT(args) {
   const [control, leaf] = input.tapLeafScript[0];
   return {
     source: args.expectEmptyWitness ? "draft-psbt" : "bound-psbt",
-    prevout: `${bytesToHex(sha256d(prev.toBytes(true, false)).reverse())}:${args.vout}`,
+    prevout: `${bytesToHex(prevTxID)}:${args.vout}`,
     inputValue: input.witnessUtxo.amount.toString(),
     recipientScript: bytesToHex(recipient.script),
     recipientAmount: recipient.amount.toString(),
@@ -609,6 +623,32 @@ function withoutTapScriptSigs(snap) {
       return copy;
     }),
   };
+}
+
+function firstMismatch(a, b, path = "psbt") {
+  if (a === b) return "";
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return path;
+    if (a.length !== b.length) return `${path}.length`;
+    for (let i = 0; i < a.length; i++) {
+      const mismatch = firstMismatch(a[i], b[i], `${path}[${i}]`);
+      if (mismatch) return mismatch;
+    }
+    return "";
+  }
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const aKeys = Object.keys(a).sort();
+    const bKeys = Object.keys(b).sort();
+    if (JSON.stringify(aKeys) !== JSON.stringify(bKeys)) {
+      return `${path}.keys(${aKeys.join(",")} -> ${bKeys.join(",")})`;
+    }
+    for (const key of aKeys) {
+      const mismatch = firstMismatch(a[key], b[key], `${path}.${key}`);
+      if (mismatch) return mismatch;
+    }
+    return "";
+  }
+  return path;
 }
 
 function sha256d(bytes) {
