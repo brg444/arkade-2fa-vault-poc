@@ -8,11 +8,24 @@ import (
 	"strings"
 	"testing"
 
+	emulatorclient "github.com/arkade-os/emulator/pkg/client"
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 )
 
 type fakeChain struct {
 	fail bool
+}
+
+type demoTransport struct {
+	emulatorclient.TransportClient
+}
+
+func (*demoTransport) SubmitOnchainTx(context.Context, string) (string, error) {
+	return "", context.Canceled
+}
+
+func demoRemoteSigner() *RemoteSigner {
+	return &RemoteSigner{Client: &demoTransport{}}
 }
 
 func (f *fakeChain) GetNewAddress(context.Context) (string, error) {
@@ -62,7 +75,7 @@ func TestDemoRoutesAbsentWhenDisabled(t *testing.T) {
 }
 
 func TestDemoOwnerRoutesAbsentWhenEnabled(t *testing.T) {
-	svc := &Service{Signer: &RemoteSigner{}}
+	svc := &Service{Signer: demoRemoteSigner()}
 	d, err := NewDemo(svc, &fakeChain{})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +101,7 @@ func TestNewDemoRejectsLocalSignerOrNil(t *testing.T) {
 	if _, err := NewDemo(nil, chain); err == nil {
 		t.Fatal("nil service accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: &RemoteSigner{}}, nil); err == nil {
+	if _, err := NewDemo(&Service{Signer: demoRemoteSigner()}, nil); err == nil {
 		t.Fatal("nil chain accepted")
 	}
 	if _, err := NewDemo(&Service{}, chain); err == nil {
@@ -101,13 +114,20 @@ func TestNewDemoRejectsLocalSignerOrNil(t *testing.T) {
 	if _, err := NewDemo(&Service{Signer: typedNil}, chain); err == nil {
 		t.Fatal("typed-nil RemoteSigner accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: &RemoteSigner{}}, chain); err != nil {
+	if _, err := NewDemo(&Service{Signer: &RemoteSigner{}}, chain); err == nil {
+		t.Fatal("RemoteSigner without a transport client accepted")
+	}
+	var typedNilClient *demoTransport
+	if _, err := NewDemo(&Service{Signer: &RemoteSigner{Client: typedNilClient}}, chain); err == nil {
+		t.Fatal("RemoteSigner with a typed-nil transport client accepted")
+	}
+	if _, err := NewDemo(&Service{Signer: demoRemoteSigner()}, chain); err != nil {
 		t.Fatalf("non-nil RemoteSigner rejected: %v", err)
 	}
 }
 
 func TestDemoFundFailsClosedWithoutEnrollment(t *testing.T) {
-	svc := &Service{Signer: &RemoteSigner{}}
+	svc := &Service{Signer: demoRemoteSigner()}
 	d, err := NewDemo(svc, &fakeChain{})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +143,7 @@ func TestDemoFundFailsClosedWithoutEnrollment(t *testing.T) {
 		t.Fatalf("demo info: %d", rec.Code)
 	}
 	var info demoInfo
-	if err := json.NewDecoder(rec.Body).Decode(&info); err != nil || !info.Demo {
+	if err := json.NewDecoder(rec.Body).Decode(&info); err != nil || !info.Demo || info.SignerMode != "remote" || info.RemoteSignerSuccesses != 0 {
 		t.Fatalf("demo info body: %+v %v", info, err)
 	}
 	fundRec := httptest.NewRecorder()

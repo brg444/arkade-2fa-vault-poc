@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
+	"sync/atomic"
 
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/arkade-os/emulator/pkg/client"
@@ -94,13 +96,36 @@ func (s LocalSigner) Sign(_ context.Context, ptx *psbt.Packet) (*psbt.Packet, er
 type RemoteSigner struct {
 	Client        client.TransportClient
 	ExpectedXOnly []byte
+	successes     atomic.Uint64
+}
+
+// SuccessfulCalls counts responses that passed exact transaction and pinned
+// provider-signature verification and were reconstructed as original+sig.
+func (s *RemoteSigner) SuccessfulCalls() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.successes.Load()
+}
+
+func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet, error) {
 	if s == nil {
 		return nil, fmt.Errorf("remote signer required")
 	}
-	if s.Client == nil {
+	if isNilInterface(s.Client) {
 		return nil, fmt.Errorf("remote signer missing client")
 	}
 	if len(s.ExpectedXOnly) != 32 {
@@ -133,5 +158,6 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 		return nil, fmt.Errorf("cloned packet missing input")
 	}
 	clone.Inputs[0].TaprootScriptSpendSig = append(clone.Inputs[0].TaprootScriptSpendSig, providerSig)
+	s.successes.Add(1)
 	return clone, nil
 }

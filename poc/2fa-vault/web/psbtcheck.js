@@ -201,7 +201,11 @@ export function validateAuthorizedPSBT(args) {
   if (!schnorr.verify(hexToBytes(extra.sig), msg, hexToBytes(extra.pub))) {
     throw new Error("provider signature invalid");
   }
-  return { providerPub: extra.pub };
+  // The txid excludes witness data, so the PSBT's exact unsigned transaction
+  // independently commits to the txid that finalization and publication must
+  // preserve. Signatures are verified above before this value is released.
+  const transactionId = bytesToHex(Uint8Array.from(sha256d(authorized.toBytes(true, false))).reverse());
+  return { providerPub: extra.pub, transactionId };
 }
 
 function tapSigs(input) {

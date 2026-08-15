@@ -66,6 +66,7 @@ func TestRemoteSignerRejectsNilAndMalformedInputs(t *testing.T) {
 		t.Fatal("SubmitOnchainTx must not run on malformed input")
 		return "", nil
 	}}
+	var typedNilClient *boundaryTransport
 
 	cases := []struct {
 		name   string
@@ -74,6 +75,7 @@ func TestRemoteSignerRejectsNilAndMalformedInputs(t *testing.T) {
 	}{
 		{name: "nil receiver", signer: nil, ptx: ptx},
 		{name: "nil client", signer: &RemoteSigner{ExpectedXOnly: expected}, ptx: ptx},
+		{name: "typed nil client", signer: &RemoteSigner{Client: typedNilClient, ExpectedXOnly: expected}, ptx: ptx},
 		{name: "missing expected key", signer: &RemoteSigner{Client: stub}, ptx: ptx},
 		{name: "nil packet", signer: &RemoteSigner{Client: stub, ExpectedXOnly: expected}, ptx: nil},
 		{name: "nil unsigned tx", signer: &RemoteSigner{Client: stub, ExpectedXOnly: expected}, ptx: &psbt.Packet{Inputs: []psbt.PInput{{}}}},

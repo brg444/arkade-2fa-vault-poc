@@ -32,8 +32,9 @@ type Chain interface {
 // A nil Demo must not register routes. Demo never holds or releases the
 // owner second-signer key.
 type Demo struct {
-	svc   *Service
-	chain Chain
+	svc    *Service
+	chain  Chain
+	signer *RemoteSigner
 }
 
 // NewDemo binds a Bitcoin RPC client for gated fund and mine control.
@@ -42,18 +43,19 @@ func NewDemo(svc *Service, chain Chain) (*Demo, error) {
 	if svc == nil || chain == nil {
 		return nil, fmt.Errorf("demo requires service and chain")
 	}
-	if err := requireRemoteSigner(svc.Signer); err != nil {
+	signer, err := requireRemoteSigner(svc.Signer)
+	if err != nil {
 		return nil, err
 	}
-	return &Demo{svc: svc, chain: chain}, nil
+	return &Demo{svc: svc, chain: chain, signer: signer}, nil
 }
 
-func requireRemoteSigner(s Signer) error {
+func requireRemoteSigner(s Signer) (*RemoteSigner, error) {
 	rs, ok := s.(*RemoteSigner)
-	if !ok || rs == nil {
-		return fmt.Errorf("demo requires a non-nil RemoteSigner")
+	if !ok || rs == nil || isNilInterface(rs.Client) {
+		return nil, fmt.Errorf("demo requires a non-nil RemoteSigner client")
 	}
-	return nil
+	return rs, nil
 }
 
 // Chain exposes the Bitcoin control surface for Publish.
@@ -102,16 +104,24 @@ func NewRPCDemo(svc *Service, rpcURL string) (*Demo, error) {
 }
 
 type demoInfo struct {
-	Demo    bool   `json:"demo"`
-	Network string `json:"network"`
-	Note    string `json:"note"`
+	Demo                  bool   `json:"demo"`
+	Network               string `json:"network"`
+	SignerMode            string `json:"signerMode"`
+	RemoteSignerSuccesses uint64 `json:"remoteSignerSuccesses"`
+	Note                  string `json:"note"`
 }
 
 func (d *Demo) info() demoInfo {
+	mode := "invalid"
+	if current, ok := d.svc.Signer.(*RemoteSigner); ok && current == d.signer {
+		mode = "remote"
+	}
 	return demoInfo{
-		Demo:    true,
-		Network: fixture.Network,
-		Note:    "demo control is fail-closed unless VAULT_DEMO=1; fund/mine only; RemoteSigner only",
+		Demo:                  true,
+		Network:               fixture.Network,
+		SignerMode:            mode,
+		RemoteSignerSuccesses: d.signer.SuccessfulCalls(),
+		Note:                  "demo control is fail-closed unless VAULT_DEMO=1; fund/mine only; RemoteSigner only",
 	}
 }
 

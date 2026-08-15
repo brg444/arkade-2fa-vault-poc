@@ -1428,6 +1428,9 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 			return signed.B64Encode()
 		}}
 		signer := &RemoteSigner{Client: transport, ExpectedXOnly: expected}
+		if signer.SuccessfulCalls() != 0 {
+			t.Fatal("new RemoteSigner success count is not zero")
+		}
 		signed, err := signer.Sign(context.Background(), original)
 		if err != nil {
 			t.Fatalf("valid remote signer response: %v", err)
@@ -1436,6 +1439,9 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 			t.Fatalf("signature delta: got %d entries, want %d", len(signed.Inputs[0].TaprootScriptSpendSig), len(original.Inputs[0].TaprootScriptSpendSig)+1)
 		}
 		_ = boundaryProviderSig(t, signed, expected)
+		if signer.SuccessfulCalls() != 1 {
+			t.Fatalf("successful remote calls = %d, want 1", signer.SuccessfulCalls())
+		}
 	})
 
 	t.Run("no provider signature", func(t *testing.T) {
@@ -1446,6 +1452,9 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 		signer := &RemoteSigner{Client: transport, ExpectedXOnly: expected}
 		if _, err := signer.Sign(context.Background(), original); err == nil {
 			t.Fatal("unchanged response without provider signature was accepted")
+		}
+		if signer.SuccessfulCalls() != 0 {
+			t.Fatal("invalid response incremented RemoteSigner success count")
 		}
 	})
 

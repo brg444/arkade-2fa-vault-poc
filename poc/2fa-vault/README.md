@@ -173,7 +173,26 @@ make vault-browser-fixture
 
 # Full browser app ceremony with the explicitly unsafe local test signer:
 make vault-browser-e2e
+
+# Opt-in full proof: Chrome PRF -> RemoteSigner -> confirmed regtest tx.
+# Requires a clean POC container namespace; it never deletes Nigiri data.
+VAULT_LIVE_ACCEPTANCE=1 make vault-regtest-e2e
 ```
+
+`vault-regtest-e2e` is the machine-checked golden path. It uses a unique
+Compose project and fresh provider volume, refuses to touch an existing POC
+stack, and drives the real browser through enrollment, funded Operational
+prevout, review, DirectP256 binding, hot signing, RemoteSigner authorization,
+challenge-only publication, mining, and confirmation. It then restarts only
+`vault-provider` and requires the same descriptor, completed challenge/txid,
+20,500-sat economic outflow, and confirmation to survive before independently
+querying Bitcoin Core for the exact txid. The browser derives that txid from
+the verified authorized PSBT, and the run requires exactly one RemoteSigner
+response that passed the Provider's exact-delta verification. Cleanup removes only that unique
+acceptance project and volume; shared Nigiri containers and data remain.
+
+The live command is deliberately opt-in and requires Docker, Docker Compose,
+Nigiri, Bun, Chrome, and Core 30+. It is not run by ordinary unit tests.
 
 `scripts/regtest-up.sh` is a detached launcher: it polls Nigiri
 `getblockchaininfo` (bitcoind can fail that briefly while warming)

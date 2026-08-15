@@ -335,18 +335,22 @@ async function ceremony() {
     assertTweakedProvider(rec.tweakedProviderXOnly, live.tweakedProviderXOnly);
     const signed = hotSignPSBT(bound.psbt, hot);
     const out = await api("/v1/authorize", { psbt: signed, ...assertion });
-    validateAuthorizedPSBT({
+    const authorized = validateAuthorizedPSBT({
       submittedB64: signed,
       authorizedB64: out.signedPsbt,
       hotPubHex: rec.hotPub,
       tweakedProviderXOnly: rec.tweakedProviderXOnly,
     });
+    const expectedTxid = authorized.transactionId;
     const challengeHex = bytesToHex(challenge);
     let published = null;
     try {
       published = await api("/v1/publish", { challenge: challengeHex });
     } catch (err) {
       if (!/publisher not configured/.test(err.message)) throw err;
+    }
+    if (published && published.txid !== expectedTxid) {
+      throw new Error("published txid does not match the browser-authorized transaction");
     }
     if (published && Number(published.confirmations) === 0) {
       const demo = await demoInfo();
@@ -366,6 +370,7 @@ async function ceremony() {
       authorized: { replay: out.replay },
       published,
       challenge: challengeHex,
+      expectedTxid,
     }, null, 2);
     await refresh();
   } finally {

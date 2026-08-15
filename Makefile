@@ -1,4 +1,4 @@
-.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-browser-e2e vault-browser-fixture vault-demo vault-demo-down
+.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-browser-e2e vault-browser-fixture vault-demo vault-demo-down vault-regtest-e2e
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 LDFLAGS := -s -w -X 'main.Version=$(VERSION)'
@@ -53,6 +53,10 @@ vault-browser-fixture:
 # vault-browser-e2e: real Chrome PRF ceremony through the app + unsafe local test signer.
 vault-browser-e2e:
 	@bun poc/2fa-vault/web/e2e/full-app.mjs
+
+# vault-regtest-e2e: opt-in real browser -> RemoteSigner -> confirmed regtest proof.
+vault-regtest-e2e:
+	@./poc/2fa-vault/scripts/live-acceptance.sh
 
 # vault-demo-down: stop the POC stack but keep vault-provider-data.
 vault-demo-down:

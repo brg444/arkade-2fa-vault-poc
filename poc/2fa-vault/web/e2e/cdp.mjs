@@ -24,8 +24,9 @@ export async function launchChrome(url) {
   let childExited = false;
   child.exited.then(() => { childExited = true; });
   try {
-    const port = await devtoolsPort(profile, () => childExited);
-    const page = await pageTarget(port, url, () => childExited);
+    const startupDeadline = Date.now() + 20_000;
+    const port = await devtoolsPort(profile, () => childExited, startupDeadline);
+    const page = await pageTarget(port, url, () => childExited, startupDeadline);
     const cdp = await CDP.connect(page.webSocketDebuggerUrl);
     return {
       cdp,
@@ -88,9 +89,9 @@ function findChrome() {
   return found;
 }
 
-async function devtoolsPort(profile, exited) {
+async function devtoolsPort(profile, exited, deadline) {
   const active = join(profile, "DevToolsActivePort");
-  for (let i = 0; i < 200; i++) {
+  while (Date.now() < deadline) {
     if (existsSync(active)) {
       const port = Number(readFileSync(active, "utf8").split(/\r?\n/, 1)[0]);
       if (Number.isInteger(port) && port > 0) return port;
@@ -101,11 +102,13 @@ async function devtoolsPort(profile, exited) {
   throw new Error("timed out waiting for Chrome DevTools");
 }
 
-async function pageTarget(port, url, exited) {
-  for (let i = 0; i < 200; i++) {
+async function pageTarget(port, url, exited, deadline) {
+  while (Date.now() < deadline) {
     if (exited()) throw new Error("Chrome exited before creating a page target");
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+        signal: AbortSignal.timeout(500),
+      });
       const targets = await response.json();
       const target = targets.find((item) => item.type === "page" && item.url.startsWith(url));
       if (target?.webSocketDebuggerUrl) return target;
@@ -121,8 +124,18 @@ class CDP {
   static async connect(url) {
     const ws = new WebSocket(url);
     await new Promise((resolve, reject) => {
-      ws.addEventListener("open", resolve, { once: true });
-      ws.addEventListener("error", () => reject(new Error("DevTools WebSocket failed")), { once: true });
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error("timed out connecting to DevTools WebSocket"));
+      }, 10_000);
+      ws.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("DevTools WebSocket failed"));
+      }, { once: true });
     });
     return new CDP(ws);
   }

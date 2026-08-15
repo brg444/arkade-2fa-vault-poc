@@ -308,12 +308,16 @@ function validatePair(pair, authorizedB64 = pair.authorized, overrides = {}) {
 
 test("authorized validation accepts exactly one extra valid provider signature", () => {
   const pair = authorizedPair();
-  expect(validateAuthorizedPSBT({
+  const verified = validateAuthorizedPSBT({
     submittedB64: pair.submitted,
     authorizedB64: pair.authorized,
     hotPubHex: pair.hotPubHex,
     tweakedProviderXOnly: pair.provPub,
-  }).providerPub).toBe(pair.provPub);
+  });
+  expect(verified.providerPub).toBe(pair.provPub);
+  expect(verified.transactionId).toMatch(/^[0-9a-f]{64}$/);
+  const expectedTxid = bytesToHex(Uint8Array.from(sha256(sha256(parsePSBT(pair.authorized).toBytes(true, false)))).reverse());
+  expect(verified.transactionId).toBe(expectedTxid);
   expect(() => validateAuthorizedPSBT({
     submittedB64: pair.submitted,
     authorizedB64: pair.submitted,
