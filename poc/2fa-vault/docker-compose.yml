@@ -1,0 +1,75 @@
+# POC overlay: private signer topology + localhost UI.
+#
+# docker-compose.regtest.yml publishes emulator :7073 and the ark support
+# ports, and puts every service on the shared external nigiri network.
+# This file:
+#   - creates an internal vault-signer network (Compose project-scopes
+#     the Docker name; do not pin a global name)
+#   - forces emulator off nigiri and onto only vault-signer
+#   - attaches arkd and vault-provider to vault-signer so EMULATOR_ARKD_URL
+#     and VAULT_EMULATOR still resolve
+#   - keeps vault-provider on default (nigiri) for Bitcoin RPC
+#   - resets host publishes so only 127.0.0.1:8787 is published
+#
+#   make vault-demo
+#   make vault-demo-down   # keeps vault-provider-data
+#
+# Paths in this overlay resolve from the first -f file (emulator root),
+# so build.context is "." not "../..".
+#
+# Open http://localhost:8787 (WebAuthn origin). Host publish is loopback only.
+
+services:
+  emulator:
+    ports: !reset []
+    expose: !reset []
+    networks: !override
+      vault-signer:
+
+  arkd:
+    ports: !reset []
+    networks:
+      default:
+      vault-signer:
+
+  arkd-wallet:
+    ports: !reset []
+
+  nbxplorer:
+    ports: !reset []
+
+  pgnbxplorer:
+    ports: !reset []
+
+  vault-provider:
+    build:
+      context: .
+      dockerfile: poc/2fa-vault/Dockerfile
+    container_name: vault-provider
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      VAULT_EMULATOR: emulator:7073
+      # REGTEST ONLY — NEVER FUND WITH REAL BTC.
+      # Public deterministic second-signer fixture: secp256k1 G (scalar 1).
+      # Not opaque, not custody, not offline-key security.
+      VAULT_OFFLINE_PUB: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      # Demo fund/mine only. Publish uses the same RPC. Off unless set.
+      VAULT_DEMO: "1"
+      VAULT_BITCOIN_RPC: "http://admin1:123@bitcoin:18443"
+    volumes:
+      - vault-provider-data:/app/data
+    networks:
+      default:
+      vault-signer:
+    # depends_on only orders start; it does not mean emulator gRPC is ready.
+    restart: unless-stopped
+    depends_on:
+      - emulator
+
+networks:
+  vault-signer:
+    internal: true
+
+volumes:
+  vault-provider-data:

@@ -17,7 +17,7 @@ This is achieved by signing any Arkade transaction (offchain or intent proof) ex
 
 ### GetInfo
 
-Returns service metadata including the signer's public key. The public key should be tweaked with the Arkade script hash before being used in a VTXO tapscript.
+Returns service metadata including the signer's public key. The public key should be tweaked with the Arkade script hash before being used in a VTXO tapscript. `deprecatedSignerPubkeys` lists only keys this emulator will still sign with: after `deprecatedKeysValidUntil` they are omitted, matching SubmitOnchainTx / SubmitTx / intent / finalization.
 
 **Endpoint**: `GET /v1/info`
 

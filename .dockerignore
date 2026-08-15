@@ -1,0 +1,53 @@
+# Docker context is the emulator repo root (POC Dockerfile COPY . .).
+# Keep all Go modules/sources, api-spec, pkg/*, cmd/*, and
+# poc/2fa-vault/web (including the committed same-origin vendor tree).
+
+# VCS / editor
+.git
+.github
+.idea
+.vscode
+.claude
+*.swp
+*.swo
+*~
+.DS_Store
+*.orig
+*.rej
+
+# Local SQLite and other DBs (never bake a live ledger)
+*.sqlite*
+*.db*
+
+# cmd/demo harness keys and any other local hex key material
+*.hex
+
+# Local data directories written by demo/provider outside the image
+/data
+data/
+**/data/
+
+# Coverage, test binaries, profiles
+*.out
+*.cov
+*.cover
+coverage.html
+*.coverprofile
+*.test
+*.prof
+*.pprof
+
+# Build / scratch output
+bin/
+build/
+dist/
+out/
+tmp/
+temp/
+*.exe
+*.o
+*.a
+
+# Local JS tool output (committed web/vendor stays; do not add a vendor/ rule)
+node_modules/
+.bun/

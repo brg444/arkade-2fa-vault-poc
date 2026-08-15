@@ -1,4 +1,4 @@
-.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint
+.PHONY: build build-all docker-run docker-stop format integrationtest run test proto proto-lint vault-demo vault-demo-down
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "unknown")
 LDFLAGS := -s -w -X 'main.Version=$(VERSION)'
@@ -40,6 +40,14 @@ docker-run:
 docker-stop:
 	@echo "Stopping dockerized arkd and arkd wallet in test mode on regtest..."
 	@docker compose -f docker-compose.regtest.yml down -v
+
+# vault-demo: detached one-command POC (Nigiri + private emulator + UI).
+vault-demo:
+	@./poc/2fa-vault/scripts/regtest-up.sh
+
+# vault-demo-down: stop the POC stack but keep vault-provider-data.
+vault-demo-down:
+	@docker compose -f docker-compose.regtest.yml -f poc/2fa-vault/docker-compose.yml down
 
 build:
 	@echo "Building emulator $(VERSION)..."

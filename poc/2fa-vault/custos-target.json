@@ -1,0 +1,84 @@
+{
+  "reposRoot": ".",
+  "context": "Arkade 2FA Vault is a proof of concept for ordinary L1 Taproot vault UTXOs, not Ark VTXOs. The Operational vault has a collaborative hot-plus-tweaked-provider leaf, a hot-plus-second-signer owner leaf, and a CSV-plus-second-signer recovery leaf. Savings deliberately has no provider key. The public Provider HTTP service validates a one-input PSBT, exact previous transaction, Operational script and collaborative leaf, off-chain WebAuthn semantics, a transaction-bound DirectP256 OP_SIGHASH packet witness, a transaction-bound hot BIP342 signature, transaction/period/fee policy (recipient plus miner fee), and then calls the private Arkade Emulator SubmitOnchainTx signing oracle. Every HTTP request, PSBT field, previous transaction, WebAuthn field, Emulator response, and browser-served API response is hostile. The browser's encrypted hot key and PRF-derived DirectP256 scalar are unlocked by a passkey PRF and must never be exposed to the Provider. The Provider and Emulator are separate trust boundaries.\n\nThe committed Arkade script is OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK. The packet witness is one compact low-S 64-byte signature over the current Arkade sighash. WebAuthn clientDataJSON and authenticatorData stay off-chain and are checked only by Provider Go (stored credential Origin/RPID). A DirectP256 signature from spend A must fail on spend B at the raw LocalSigner / SubmitOnchainTx path. Budget and WebAuthn semantics are still not inside the key-constrained signer: a caller that reaches the raw Emulator with a valid current-tx DirectP256 signature plus hot signature can obtain a provider signature even if the public /authorize policy would reject the amounts. Treat that remaining policy-oracle gap as a known boundary. A client served by the Provider is trusted code for this POC; same-origin CSP blocks third-party CDN code but does not survive a compromised Provider serving modified first-party JavaScript. The second user signer is in scope only as a required independent key in the Taproot paths; its generation, storage and signing ceremony are out of scope.\n\nThe POC must fail closed. The private Emulator endpoint must not be exposed through the Provider API. A signature response may differ from the submitted PSBT only by one valid expected provider Taproot script-spend signature. Period budget is reserved durably before the external signer is invoked; ambiguous post-dispatch failures remain reserved and block same-digest re-sign. Economic outflow is recipient plus fee. Idempotency is only for the exact transaction digest after a stored completed row. No result should be treated as production security evidence until the genuine browser ceremony, private RemoteSigner boundary and regtest broadcast are exercised end to end.",
+  "intake": [
+    {
+      "question": "What are the crown-jewel assets — whose funds or secrets, and how much, is at risk here?",
+      "answer": "The browser hot private key, the PRF-derived DirectP256 scalar, and the Provider/Emulator signing capability. A bypass can steal the bounded Operational balance. Savings must remain unspendable by the Provider. This POC must never be used with real funds."
+    },
+    {
+      "question": "Who is trusted and who is adversarial? Is the operator/server assumed honest, and is the client hostile — or both?",
+      "answer": "Audit both a malicious client and a compromised Provider/Emulator response. The current POC still trusts Provider policy-service integrity and the browser code delivered to the user; those assumptions must be stated rather than silently promoted to enclave guarantees."
+    },
+    {
+      "question": "What is explicitly OUT of scope for this audit?",
+      "answer": "Production UX, multi-user authentication, attestation infrastructure, second-signer key generation/storage/ceremony, mainnet deployment, operator migration, and a complete wallet broadcast implementation."
+    },
+    {
+      "question": "What changed recently, or which area are you most worried about?",
+      "answer": "DirectP256 OP_SIGHASH transaction binding with WebAuthn off-chain, durable reserve-then-sign budget accounting (recipient plus fee), RemoteSigner clone-and-append, cmd/provider deployment, and enrollment descriptor compatibility including stored Origin/RPID."
+    },
+    {
+      "question": "What invariants must the code uphold?",
+      "answer": "One verified Operational input; one reviewed recipient; optional exact Operational change; one canonical Arkade packet whose witness is exactly one 64-byte DirectP256 OP_SIGHASH signature; SIGHASH_DEFAULT; exact collaborative leaf/control block; valid hot and provider signatures; fresh exact WebAuthn semantics at the public boundary using the stored Origin/RPID; durable reserved recipient-plus-fee budget before Sign; bounded fees; no Provider key in Savings; deterministic recovery paths; no PRF bytes sent to the Provider."
+    }
+  ],
+  "bundles": [
+    {
+      "name": "vault-template-and-unilateral-paths",
+      "focus": "Taproot template correctness and key separation. Verify every leaf and control block commits to the advertised output, the Provider appears only in the Operational collaborative leaf, owner/recovery paths require the intended keys and sequences, amount arithmetic is range-safe, and the builders cannot create an unbalanced or unintended spend. The authorization script is OP_0 OP_SIGHASH plus DirectP256 CSFS; WebAuthn is not an on-chain witness.",
+      "files": [
+        "poc/2fa-vault/fixture/fixture.go",
+        "poc/2fa-vault/internal/vault/script.go",
+        "poc/2fa-vault/internal/vault/vault.go",
+        "poc/2fa-vault/internal/vault/tx.go"
+      ]
+    },
+    {
+      "name": "webauthn-and-browser-hot-key",
+      "focus": "WebAuthn semantic and ES256 verification, DER/low-S conversion, P-256 point validation, passkey PRF use, encrypted hot-key lifecycle, DirectP256 HKDF derivation, enrollment durability, origin/RP binding, same-origin supply chain, and client-side draft/bound PSBT validation before the hot key is decrypted or used.",
+      "files": [
+        "poc/2fa-vault/internal/webauthn/assert.go",
+        "poc/2fa-vault/internal/webauthn/der.go",
+        "poc/2fa-vault/internal/webauthn/p256.go",
+        "poc/2fa-vault/web/app.js",
+        "poc/2fa-vault/web/directauth.js",
+        "poc/2fa-vault/web/psbtcheck.js",
+        "poc/2fa-vault/web/index.html"
+      ]
+    },
+    {
+      "name": "provider-authorization-oracle",
+      "focus": "Mandatory endpoint/check matrix and checked-vs-signed correspondence. Inventory every attacker-controlled PSBT field; prove the full previous transaction, WitnessUtxo, outpoint, Operational output, exact collaborative leaf, Arkade packet, off-chain WebAuthn assertion, DirectP256 witness, hot signature, recipient, change, amount and fee are reconciled before policy reservation. Verify the private Emulator response is reconstructed from the submitted PSBT plus one verified provider signature.",
+      "files": [
+        "poc/2fa-vault/internal/provider/service.go",
+        "poc/2fa-vault/internal/provider/classify.go",
+        "poc/2fa-vault/internal/provider/hotsig.go",
+        "poc/2fa-vault/internal/provider/signer.go",
+        "poc/2fa-vault/internal/provider/psbtguard.go",
+        "poc/2fa-vault/internal/provider/dial.go"
+      ]
+    },
+    {
+      "name": "policy-ledger-and-enrollment-state",
+      "focus": "SQLite transactionality and integer domain. Verify one-shot credential persistence, deterministic vault restart inputs including stored Origin/RPID compatibility, concurrent reservations across goroutines/processes, UTC rollover, durable reservation before Sign, conservative retain-on-ambiguous-post-dispatch, exact-digest idempotency, recipient-plus-fee outflow, and no overflow or stale-state race.",
+      "files": [
+        "poc/2fa-vault/internal/policy/ledger.go",
+        "poc/2fa-vault/internal/provider/service.go",
+        "poc/2fa-vault/fixture/fixture.go"
+      ]
+    },
+    {
+      "name": "public-api-and-deployment-boundary",
+      "focus": "Network reachability and confused-deputy review. Enumerate every public route, body/parser limit, Origin/content-type rule, one-shot enrollment gate, static-code security header, signer timeout and error path. Prove no generic raw signing endpoint is reachable. Deployment is cmd/provider with a pubkey-only offline fixture and a persistent volume; cmd/demo is an optional local harness only.",
+      "files": [
+        "poc/2fa-vault/internal/provider/http.go",
+        "poc/2fa-vault/cmd/provider/main.go",
+        "poc/2fa-vault/cmd/demo/main.go",
+        "poc/2fa-vault/Dockerfile",
+        "poc/2fa-vault/docker-compose.yml",
+        "poc/2fa-vault/README.md"
+      ]
+    }
+  ]
+}

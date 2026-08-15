@@ -1,0 +1,9 @@
+:root { font-family: ui-sans-serif, system-ui, sans-serif; color: #111; background: #f6f4f0; }
+body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+h1 { font-size: 1.4rem; }
+.sub { color: #444; }
+section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin: 1rem 0; }
+label { display: block; margin: 0.4rem 0; }
+input { width: 100%; box-sizing: border-box; }
+button { margin-top: 0.5rem; padding: 0.4rem 0.8rem; }
+pre { white-space: pre-wrap; word-break: break-all; font-size: 0.8rem; }

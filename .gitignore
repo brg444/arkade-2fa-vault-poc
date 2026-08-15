@@ -3,3 +3,12 @@
 build/
 bin/
 docs/plans/
+
+# Arkade 2FA vault POC runtime state and local key fixtures.
+poc-2fa-data/
+*.hex
+*.sqlite*
+*.db*
+
+# Optional captured WebAuthn assertion fixture; regenerate locally as needed.
+poc/2fa-vault/testdata/webauthn_get.json

@@ -90,10 +90,24 @@ type service struct {
 // longer be finalized by this emulator. A nil cutoff (the default, unset via
 // config) preserves today's unbounded behavior.
 func (s *service) activeDeprecatedSigners() []signer {
-	if s.deprecatedKeysValidUntil != nil && time.Now().After(*s.deprecatedKeysValidUntil) {
+	if s.deprecatedSignersExpired() {
 		return nil
 	}
 	return s.deprecatedSigners
+}
+
+func (s *service) deprecatedSignersExpired() bool {
+	return s.deprecatedKeysValidUntil != nil && time.Now().After(*s.deprecatedKeysValidUntil)
+}
+
+// activeDeprecatedPublicKeys is the GetInfo view of the same cutoff as
+// activeDeprecatedSigners. Callers must not observe expired keys here, or
+// they will treat a signer as available and then fail at SubmitOnchainTx.
+func (s *service) activeDeprecatedPublicKeys() []string {
+	if s.deprecatedSignersExpired() {
+		return nil
+	}
+	return append([]string(nil), s.deprecatedPublicKeys...)
 }
 
 func New(ctx context.Context, version string, secretKey *btcec.PrivateKey, deprecatedKeys []*btcec.PrivateKey, deprecatedKeysValidUntil *time.Time, arkdURL, arkdIndexerURL string, computeLimits arkade.ComputeLimits) (Service, error) {
@@ -180,7 +194,7 @@ func (s *service) Close() {
 func (s *service) GetInfo(ctx context.Context) (*Info, error) {
 	return &Info{
 		SignerPublicKey:            s.publicKey,
-		DeprecatedSignerPublicKeys: append([]string(nil), s.deprecatedPublicKeys...),
+		DeprecatedSignerPublicKeys: s.activeDeprecatedPublicKeys(),
 	}, nil
 }
 
