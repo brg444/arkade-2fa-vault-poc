@@ -1,0 +1,80 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+}
+
+{$VAULT_DOMAIN} {
+	log {
+		output stdout
+		format filter {
+			request>headers>X-Vault-Enrollment-Token delete
+			wrap json
+		}
+	}
+
+	header {
+		-Server
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'none'"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=()"
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	@health {
+		method GET
+		path /health
+	}
+	handle @health {
+		reverse_proxy vault-authorizer:8788
+	}
+
+	@api_get {
+		method GET
+		path /v1/status /v1/tx
+	}
+	handle @api_get {
+		reverse_proxy vault-authorizer:8788
+	}
+
+	@api_post {
+		method POST
+		path /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish
+	}
+	handle @api_post {
+		reverse_proxy vault-authorizer:8788
+	}
+
+	@api_options {
+		method OPTIONS
+		path /v1/status /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx
+	}
+	handle @api_options {
+		reverse_proxy vault-authorizer:8788
+	}
+
+	@known_v1 {
+		path /v1/status /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx
+	}
+	handle @known_v1 {
+		respond "method not allowed" 405
+	}
+
+	@any_v1 {
+		path /v1/*
+	}
+	handle @any_v1 {
+		respond "not found" 404
+	}
+
+	@static {
+		method GET HEAD
+	}
+	handle @static {
+		root * /srv
+		file_server
+	}
+
+	respond "method not allowed" 405
+}

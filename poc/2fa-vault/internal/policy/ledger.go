@@ -3,9 +3,13 @@ package policy
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,8 +18,9 @@ import (
 )
 
 const (
-	stateReserved  = "reserved"
-	stateCompleted = "completed"
+	stateReserved       = "reserved"
+	stateProviderSigned = "provider_signed"
+	stateCompleted      = "completed"
 )
 
 // Clock is injectable so UTC day boundaries are testable.
@@ -38,9 +43,16 @@ func OpenLedger(path string, clock Clock) (*Ledger, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-		_ = db.Close()
-		return nil, err
+	for _, pragma := range []string{
+		`PRAGMA busy_timeout = 5000`,
+		// The policy reservation must reach durable storage before provider-key
+		// use. Pin this explicitly instead of inheriting a driver/default mode.
+		`PRAGMA synchronous = FULL`,
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	if err := ensurePOCSchema(db, path); err != nil {
 		_ = db.Close()
@@ -51,12 +63,21 @@ func OpenLedger(path string, clock Clock) (*Ledger, error) {
 
 var credentialColumns = []string{
 	"id", "credential_id", "webauthn_p256_compressed", "direct_p256_compressed",
-	"rp_id", "origin", "created_at",
+	"rp_id", "origin",
 	"hot_compressed", "offline_compressed", "provider_base_compressed",
-	"tweaked_provider_compressed", "template_version", "policy_version",
+	"tweaked_provider_compressed", "arkade_base_compressed",
+	"tweaked_arkade_compressed", "arkade_emulator_origin",
+	"arkade_emulator_version", "template_version", "policy_version",
 	"network", "vault_id", "operational_csv_type", "operational_csv_value",
 	"savings_csv_type", "savings_csv_value", "operational_address",
 	"operational_script", "savings_address", "savings_script",
+	"recipient_dust_sats", "tx_recipient_cap_sats", "period_allowance_sats",
+	"absolute_fee_cap_sats", "feerate_cap_sat_vb", "integrity_mac",
+}
+
+var issuanceColumns = []string{
+	"vault_id", "arkade_sighash", "period_start", "recipient_amount", "fee",
+	"state", "request_psbt", "provider_psbt", "signed_psbt", "created_at", "updated_at",
 }
 
 const createPOCSchema = `
@@ -67,11 +88,14 @@ CREATE TABLE credential (
   direct_p256_compressed BLOB NOT NULL,
   rp_id TEXT NOT NULL,
   origin TEXT NOT NULL,
-  created_at TEXT NOT NULL,
   hot_compressed BLOB NOT NULL,
   offline_compressed BLOB NOT NULL,
   provider_base_compressed BLOB NOT NULL,
   tweaked_provider_compressed BLOB NOT NULL,
+  arkade_base_compressed BLOB NOT NULL,
+  tweaked_arkade_compressed BLOB NOT NULL,
+  arkade_emulator_origin TEXT NOT NULL,
+  arkade_emulator_version TEXT NOT NULL,
   template_version TEXT NOT NULL,
   policy_version TEXT NOT NULL,
   network TEXT NOT NULL,
@@ -83,7 +107,13 @@ CREATE TABLE credential (
   operational_address TEXT NOT NULL,
   operational_script BLOB NOT NULL,
   savings_address TEXT NOT NULL,
-  savings_script BLOB NOT NULL
+  savings_script BLOB NOT NULL,
+  recipient_dust_sats INTEGER NOT NULL,
+  tx_recipient_cap_sats INTEGER NOT NULL,
+  period_allowance_sats INTEGER NOT NULL,
+  absolute_fee_cap_sats INTEGER NOT NULL,
+  feerate_cap_sat_vb INTEGER NOT NULL,
+  integrity_mac BLOB NOT NULL
 );
 CREATE TABLE issuance (
   vault_id TEXT NOT NULL,
@@ -91,9 +121,17 @@ CREATE TABLE issuance (
   period_start TEXT NOT NULL,
   recipient_amount INTEGER NOT NULL,
   fee INTEGER NOT NULL,
-  state TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('reserved', 'provider_signed', 'completed')),
+  request_psbt TEXT NOT NULL CHECK (length(request_psbt) > 0),
+  provider_psbt TEXT,
   signed_psbt TEXT,
   created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (
+    (state = 'reserved' AND provider_psbt IS NULL AND signed_psbt IS NULL) OR
+    (state = 'provider_signed' AND provider_psbt IS NOT NULL AND signed_psbt IS NULL) OR
+    (state = 'completed' AND provider_psbt IS NOT NULL AND signed_psbt IS NOT NULL)
+  ),
   PRIMARY KEY (vault_id, arkade_sighash)
 );
 `
@@ -115,14 +153,57 @@ func ensurePOCSchema(db *sql.DB, path string) error {
 		return err
 	}
 	if !sameColumns(cols, credentialColumns) {
-		return fmt.Errorf("stale POC database %s: credential columns %v, want %v; delete the file and restart", path, cols, credentialColumns)
+		return fmt.Errorf("incompatible vault database %s: credential columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, credentialColumns)
+	}
+	if err := requireSchemaFragments(db, "credential", []string{
+		"id INTEGER PRIMARY KEY CHECK (id = 1)",
+	}); err != nil {
+		return fmt.Errorf("incompatible vault database %s: credential constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
 	}
 	var issuance string
 	err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='issuance'`).Scan(&issuance)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("stale POC database %s: missing issuance table; delete the file and restart", path)
+		return fmt.Errorf("incompatible vault database %s: missing issuance table; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	cols, err = tableColumns(db, "issuance")
+	if err != nil {
+		return err
+	}
+	if !sameColumns(cols, issuanceColumns) {
+		return fmt.Errorf("incompatible vault database %s: issuance columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, issuanceColumns)
+	}
+	if err := requireSchemaFragments(db, "issuance", []string{
+		"state TEXT NOT NULL CHECK (state IN ('reserved', 'provider_signed', 'completed'))",
+		"request_psbt TEXT NOT NULL CHECK (length(request_psbt) > 0)",
+		"(state = 'reserved' AND provider_psbt IS NULL AND signed_psbt IS NULL)",
+		"(state = 'provider_signed' AND provider_psbt IS NOT NULL AND signed_psbt IS NULL)",
+		"(state = 'completed' AND provider_psbt IS NOT NULL AND signed_psbt IS NOT NULL)",
+		"PRIMARY KEY (vault_id, arkade_sighash)",
+	}); err != nil {
+		return fmt.Errorf("incompatible vault database %s: issuance constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
+	}
+	return nil
+}
+
+func requireSchemaFragments(db *sql.DB, table string, fragments []string) error {
+	if table != "credential" && table != "issuance" {
+		return fmt.Errorf("unknown table")
+	}
+	var schema string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+	).Scan(&schema); err != nil {
+		return err
+	}
+	for _, fragment := range fragments {
+		if !strings.Contains(schema, fragment) {
+			return fmt.Errorf("missing required %q", fragment)
+		}
+	}
+	return nil
 }
 
 func tableColumns(db *sql.DB, table string) ([]string, error) {
@@ -180,21 +261,139 @@ type Credential struct {
 	RPID         string
 	Origin       string
 
-	Offline             []byte
-	ProviderBase        []byte
-	TweakedProvider     []byte
-	TemplateVersion     string
-	PolicyVersion       string
-	Network             string
-	VaultID             string
-	OperationalCSVType  int64
-	OperationalCSVValue uint32
-	SavingsCSVType      int64
-	SavingsCSVValue     uint32
-	OperationalAddress  string
-	OperationalScript   []byte
-	SavingsAddress      string
-	SavingsScript       []byte
+	Offline               []byte
+	ProviderBase          []byte
+	TweakedProvider       []byte
+	ArkadeBase            []byte
+	TweakedArkade         []byte
+	ArkadeEmulatorOrigin  string
+	ArkadeEmulatorVersion string
+	TemplateVersion       string
+	PolicyVersion         string
+	Network               string
+	VaultID               string
+	OperationalCSVType    int64
+	OperationalCSVValue   uint32
+	SavingsCSVType        int64
+	SavingsCSVValue       uint32
+	OperationalAddress    string
+	OperationalScript     []byte
+	SavingsAddress        string
+	SavingsScript         []byte
+	RecipientDustSats     int64
+	TxRecipientCapSats    int64
+	PeriodAllowanceSats   int64
+	AbsoluteFeeCapSats    int64
+	FeerateCapSatPerV     int64
+	IntegrityMAC          []byte
+}
+
+const credentialIntegrityDomain = "arkade-2fa-vault/credential-record/v2"
+
+// SealCredential authenticates every policy/descriptor field in Credential.
+// The MAC key is derived and held by the key-owning authorizer; it is never
+// persisted beside this record. IntegrityMAC itself is deliberately outside
+// the canonical payload.
+func SealCredential(c *Credential, key []byte) error {
+	if c == nil {
+		return fmt.Errorf("credential required")
+	}
+	mac, err := credentialMAC(*c, key)
+	if err != nil {
+		return err
+	}
+	c.IntegrityMAC = mac
+	return nil
+}
+
+// VerifyCredentialIntegrity rejects a missing, malformed, or modified record
+// before any persisted key or descriptor field is used by the authorizer.
+func VerifyCredentialIntegrity(c *Credential, key []byte) error {
+	if c == nil || len(c.IntegrityMAC) != sha256.Size {
+		return fmt.Errorf("credential integrity MAC missing or malformed")
+	}
+	want, err := credentialMAC(*c, key)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(want)
+	if !hmac.Equal(c.IntegrityMAC, want) {
+		return fmt.Errorf("credential integrity MAC mismatch")
+	}
+	return nil
+}
+
+func credentialMAC(c Credential, key []byte) ([]byte, error) {
+	if len(key) != sha256.Size {
+		return nil, fmt.Errorf("credential integrity key must be 32 bytes")
+	}
+	payload, err := canonicalCredential(c)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(payload)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(payload)
+	return mac.Sum(nil), nil
+}
+
+func canonicalCredential(c Credential) ([]byte, error) {
+	out := make([]byte, 0, 1024)
+	var err error
+	out, err = appendCredentialField(out, []byte(credentialIntegrityDomain))
+	if err != nil {
+		return nil, err
+	}
+	out = binary.LittleEndian.AppendUint32(out, 2) // canonical record version
+	fields := [][]byte{
+		c.ID, c.WebAuthnP256, c.DirectP256, c.Hot,
+		[]byte(c.RPID), []byte(c.Origin), c.Offline, c.ProviderBase,
+		c.TweakedProvider, c.ArkadeBase, c.TweakedArkade,
+		[]byte(c.ArkadeEmulatorOrigin), []byte(c.ArkadeEmulatorVersion),
+		[]byte(c.TemplateVersion), []byte(c.PolicyVersion),
+		[]byte(c.Network), []byte(c.VaultID),
+	}
+	for _, field := range fields {
+		out, err = appendCredentialField(out, field)
+		if err != nil {
+			zeroBytes(out)
+			return nil, err
+		}
+	}
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.OperationalCSVType))
+	out = binary.LittleEndian.AppendUint32(out, c.OperationalCSVValue)
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.SavingsCSVType))
+	out = binary.LittleEndian.AppendUint32(out, c.SavingsCSVValue)
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.RecipientDustSats))
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.TxRecipientCapSats))
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.PeriodAllowanceSats))
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.AbsoluteFeeCapSats))
+	out = binary.LittleEndian.AppendUint64(out, uint64(c.FeerateCapSatPerV))
+	for _, field := range [][]byte{
+		[]byte(c.OperationalAddress), c.OperationalScript,
+		[]byte(c.SavingsAddress), c.SavingsScript,
+	} {
+		out, err = appendCredentialField(out, field)
+		if err != nil {
+			zeroBytes(out)
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func appendCredentialField(dst, field []byte) ([]byte, error) {
+	if uint64(len(field)) > uint64(^uint32(0)) {
+		return dst, fmt.Errorf("credential field too large")
+	}
+	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(field)))
+	return append(dst, field...), nil
+}
+
+func zeroBytes(raw []byte) {
+	for i := range raw {
+		raw[i] = 0
+	}
 }
 
 func (l *Ledger) GetCredential() (*Credential, error) {
@@ -202,15 +401,21 @@ func (l *Ledger) GetCredential() (*Credential, error) {
 	err := l.db.QueryRow(`
 SELECT credential_id, webauthn_p256_compressed, direct_p256_compressed, rp_id, origin, hot_compressed,
        offline_compressed, provider_base_compressed, tweaked_provider_compressed,
+       arkade_base_compressed, tweaked_arkade_compressed, arkade_emulator_origin, arkade_emulator_version,
        template_version, policy_version, network, vault_id,
        operational_csv_type, operational_csv_value, savings_csv_type, savings_csv_value,
-       operational_address, operational_script, savings_address, savings_script
+       operational_address, operational_script, savings_address, savings_script,
+       recipient_dust_sats, tx_recipient_cap_sats, period_allowance_sats,
+       absolute_fee_cap_sats, feerate_cap_sat_vb, integrity_mac
   FROM credential WHERE id = 1`).Scan(
 		&c.ID, &c.WebAuthnP256, &c.DirectP256, &c.RPID, &c.Origin, &c.Hot,
 		&c.Offline, &c.ProviderBase, &c.TweakedProvider,
+		&c.ArkadeBase, &c.TweakedArkade, &c.ArkadeEmulatorOrigin, &c.ArkadeEmulatorVersion,
 		&c.TemplateVersion, &c.PolicyVersion, &c.Network, &c.VaultID,
 		&c.OperationalCSVType, &c.OperationalCSVValue, &c.SavingsCSVType, &c.SavingsCSVValue,
 		&c.OperationalAddress, &c.OperationalScript, &c.SavingsAddress, &c.SavingsScript,
+		&c.RecipientDustSats, &c.TxRecipientCapSats, &c.PeriodAllowanceSats,
+		&c.AbsoluteFeeCapSats, &c.FeerateCapSatPerV, &c.IntegrityMAC,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -249,6 +454,21 @@ func (l *Ledger) Enroll(c Credential) error {
 	if err := requireCompressedKey(c.TweakedProvider, "tweaked provider pubkey"); err != nil {
 		return err
 	}
+	if err := requireCompressedKey(c.ArkadeBase, "arkade emulator base pubkey"); err != nil {
+		return err
+	}
+	if err := requireCompressedKey(c.TweakedArkade, "tweaked arkade emulator pubkey"); err != nil {
+		return err
+	}
+	if err := requireIndependentXOnlyKeys(
+		c.Hot, c.Offline, c.ProviderBase, c.TweakedProvider,
+		c.ArkadeBase, c.TweakedArkade,
+	); err != nil {
+		return err
+	}
+	if c.Network != "regtest" && (c.ArkadeEmulatorOrigin == "" || c.ArkadeEmulatorVersion == "") {
+		return fmt.Errorf("public arkade emulator origin and version required")
+	}
 	if c.TemplateVersion == "" || c.PolicyVersion == "" || c.Network == "" || c.VaultID == "" {
 		return fmt.Errorf("template, policy, network and vault id required")
 	}
@@ -259,19 +479,32 @@ func (l *Ledger) Enroll(c Credential) error {
 		len(c.OperationalScript) == 0 || len(c.SavingsScript) == 0 {
 		return fmt.Errorf("vault addresses and scripts required")
 	}
+	if c.RecipientDustSats <= 0 || c.TxRecipientCapSats < c.RecipientDustSats ||
+		c.PeriodAllowanceSats <= 0 || c.AbsoluteFeeCapSats < 0 || c.FeerateCapSatPerV <= 0 {
+		return fmt.Errorf("invalid persisted economic policy")
+	}
+	if len(c.IntegrityMAC) != sha256.Size {
+		return fmt.Errorf("credential integrity MAC must be 32 bytes")
+	}
 	_, err := l.db.Exec(
 		`INSERT INTO credential (
-		   id, credential_id, webauthn_p256_compressed, direct_p256_compressed, rp_id, origin, created_at,
+		   id, credential_id, webauthn_p256_compressed, direct_p256_compressed, rp_id, origin,
 		   hot_compressed, offline_compressed, provider_base_compressed, tweaked_provider_compressed,
+		   arkade_base_compressed, tweaked_arkade_compressed, arkade_emulator_origin, arkade_emulator_version,
 		   template_version, policy_version, network, vault_id,
 		   operational_csv_type, operational_csv_value, savings_csv_type, savings_csv_value,
-		   operational_address, operational_script, savings_address, savings_script
-		 ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.WebAuthnP256, c.DirectP256, c.RPID, c.Origin, l.clock().UTC().Format(time.RFC3339),
+		   operational_address, operational_script, savings_address, savings_script,
+		   recipient_dust_sats, tx_recipient_cap_sats, period_allowance_sats,
+		   absolute_fee_cap_sats, feerate_cap_sat_vb, integrity_mac
+		 ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.WebAuthnP256, c.DirectP256, c.RPID, c.Origin,
 		c.Hot, c.Offline, c.ProviderBase, c.TweakedProvider,
+		c.ArkadeBase, c.TweakedArkade, c.ArkadeEmulatorOrigin, c.ArkadeEmulatorVersion,
 		c.TemplateVersion, c.PolicyVersion, c.Network, c.VaultID,
 		c.OperationalCSVType, c.OperationalCSVValue, c.SavingsCSVType, c.SavingsCSVValue,
 		c.OperationalAddress, c.OperationalScript, c.SavingsAddress, c.SavingsScript,
+		c.RecipientDustSats, c.TxRecipientCapSats, c.PeriodAllowanceSats,
+		c.AbsoluteFeeCapSats, c.FeerateCapSatPerV, c.IntegrityMAC,
 	)
 	if err != nil {
 		return fmt.Errorf("enrollment locked or failed: %w", err)
@@ -296,14 +529,28 @@ func requireCompressedKey(b []byte, name string) error {
 	return nil
 }
 
+func requireIndependentXOnlyKeys(keys ...[]byte) error {
+	for i := range keys {
+		for j := i + 1; j < len(keys); j++ {
+			// requireCompressedKey has already established the 33-byte SEC
+			// encoding. The remaining 32 bytes are the Taproot identity, so
+			// opposite compressed parities must also be rejected.
+			if bytes.Equal(keys[i][1:], keys[j][1:]) {
+				return fmt.Errorf("secp256k1 key roles must be independent by x-only identity")
+			}
+		}
+	}
+	return nil
+}
+
 // SpentInPeriod sums completed+reserved economic outflow (recipient + fee)
 // for the UTC day.
 func (l *Ledger) SpentInPeriod(ctx context.Context, vaultID, period string) (int64, error) {
 	var n sql.NullInt64
 	err := l.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(recipient_amount + fee), 0) FROM issuance
-		 WHERE vault_id = ? AND period_start = ? AND state IN (?, ?)`,
-		vaultID, period, stateReserved, stateCompleted,
+		 WHERE vault_id = ? AND period_start = ? AND state IN (?, ?, ?)`,
+		vaultID, period, stateReserved, stateProviderSigned, stateCompleted,
 	).Scan(&n)
 	if err != nil {
 		return 0, err
@@ -331,20 +578,19 @@ func (l *Ledger) Completed(ctx context.Context, vaultID string, digest []byte) (
 	return "", false, nil
 }
 
-// AuthorizeFn is the external signer. Issue never holds an uncommitted
-// write transaction across this callback.
+// AuthorizeFn is the legacy one-stage external signer. Issue retains its
+// conservative no-retry semantics for an ambiguous failure after reservation.
 type AuthorizeFn func(ctx context.Context) (signedPSBT string, err error)
+
+// SequentialAuthorizeFn transforms one exact persisted PSBT stage into the
+// next. The private stage and public stage use the same type, but are persisted
+// separately so an ambiguous public timeout never causes private-key reuse.
+type SequentialAuthorizeFn func(ctx context.Context, storedPSBT string) (nextPSBT string, err error)
 
 const persistTimeout = 5 * time.Second
 
-// Issue commits a reserved row, then signs, then records completion.
-//
-// Phase 1 commits the reservation before any external Sign call so a crash
-// cannot release budget after a signature has escaped. Phase 2 calls sign.
-// Phase 3 persists completed in a second transaction on an internal
-// bounded context, independent of client cancellation. After phase 1, any
-// ambiguous or post-submit failure stays reserved and blocks a same-digest
-// re-sign. Only a failure before that commit may leave no row.
+// Issue preserves the one-stage API for the regtest/external-signer tests. A
+// reserved legacy issuance never retries the ambiguous signer callback.
 func (l *Ledger) Issue(
 	ctx context.Context,
 	vaultID string,
@@ -352,11 +598,65 @@ func (l *Ledger) Issue(
 	recipient, fee, remainingCap int64,
 	sign AuthorizeFn,
 ) (signed string, replay bool, err error) {
+	if sign == nil {
+		return "", false, fmt.Errorf("signer required")
+	}
+	request := "legacy-external-signer:" + hex.EncodeToString(digest)
+	return l.issueSequential(
+		ctx, vaultID, digest, request, recipient, fee, remainingCap, false,
+		func(ctx context.Context, _ string) (string, error) { return sign(ctx) },
+		func(_ context.Context, providerPSBT string) (string, error) { return providerPSBT, nil },
+	)
+}
+
+// IssueSequential durably binds an exact normalized client PSBT, reserves its
+// allowance, persists the private Provider signature, and only then dispatches
+// that stored PSBT to the public Arkade Emulator. An exact retry may resume the
+// private in-process stage after a crash, or the public stage after any
+// ambiguous timeout, but it can never replace the bound request or spend a
+// second allowance reservation.
+func (l *Ledger) IssueSequential(
+	ctx context.Context,
+	vaultID string,
+	digest []byte,
+	requestPSBT string,
+	recipient, fee, remainingCap int64,
+	privateSign, publicSign SequentialAuthorizeFn,
+) (signed string, replay bool, err error) {
+	if privateSign == nil || publicSign == nil {
+		return "", false, fmt.Errorf("private and public signers required")
+	}
+	return l.issueSequential(
+		ctx, vaultID, digest, requestPSBT, recipient, fee, remainingCap, true,
+		privateSign, publicSign,
+	)
+}
+
+type issuanceStage struct {
+	state        string
+	requestPSBT  string
+	providerPSBT string
+	signedPSBT   string
+	created      bool
+}
+
+func (l *Ledger) issueSequential(
+	ctx context.Context,
+	vaultID string,
+	digest []byte,
+	requestPSBT string,
+	recipient, fee, remainingCap int64,
+	resumeReserved bool,
+	privateSign, publicSign SequentialAuthorizeFn,
+) (signed string, replay bool, err error) {
 	if vaultID == "" {
 		return "", false, fmt.Errorf("vault id required")
 	}
 	if len(digest) != 32 {
 		return "", false, fmt.Errorf("digest must be 32 bytes")
+	}
+	if requestPSBT == "" {
+		return "", false, fmt.Errorf("exact request PSBT required")
 	}
 	if recipient <= 0 {
 		return "", false, fmt.Errorf("recipient amount required")
@@ -367,32 +667,52 @@ func (l *Ledger) Issue(
 	if remainingCap < 0 {
 		return "", false, fmt.Errorf("negative allowance")
 	}
-	if sign == nil {
-		return "", false, fmt.Errorf("signer required")
-	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	stored, replay, err := l.commitReservation(ctx, vaultID, digest, recipient, fee, remainingCap)
+	stage, err := l.commitReservation(ctx, vaultID, digest, requestPSBT, recipient, fee, remainingCap)
 	if err != nil {
 		return "", false, err
 	}
-	if replay {
-		return stored, true, nil
+	if stage.state == stateCompleted {
+		return stage.signedPSBT, true, nil
 	}
-
-	signed, err = sign(ctx)
+	if stage.state == stateReserved {
+		if !stage.created && !resumeReserved {
+			return "", false, fmt.Errorf("issuance %s already reserved after an ambiguous signer attempt", hex.EncodeToString(digest))
+		}
+		providerPSBT, err := privateSign(ctx, stage.requestPSBT)
+		if err != nil {
+			return "", false, err
+		}
+		if providerPSBT == "" {
+			return "", false, fmt.Errorf("empty private-signed response")
+		}
+		persist, cancel := context.WithTimeout(context.Background(), persistTimeout)
+		err = l.commitProviderSigned(persist, vaultID, digest, providerPSBT)
+		cancel()
+		if err != nil {
+			return "", false, err
+		}
+		stage.state = stateProviderSigned
+		stage.providerPSBT = providerPSBT
+	}
+	if stage.state != stateProviderSigned || stage.providerPSBT == "" {
+		return "", false, fmt.Errorf("issuance %s has invalid signing state", hex.EncodeToString(digest))
+	}
+	signed, err = publicSign(ctx, stage.providerPSBT)
 	if err != nil {
 		return "", false, err
 	}
 	if signed == "" {
-		return "", false, fmt.Errorf("empty signed response")
+		return "", false, fmt.Errorf("empty public-signed response")
 	}
 
 	persist, cancel := context.WithTimeout(context.Background(), persistTimeout)
-	defer cancel()
-	if err := l.commitCompletion(persist, vaultID, digest, signed); err != nil {
+	err = l.commitCompletion(persist, vaultID, digest, signed)
+	cancel()
+	if err != nil {
 		return "", false, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -401,14 +721,20 @@ func (l *Ledger) Issue(
 	return signed, false, nil
 }
 
-func (l *Ledger) commitReservation(ctx context.Context, vaultID string, digest []byte, recipient, fee, remainingCap int64) (string, bool, error) {
+func (l *Ledger) commitReservation(
+	ctx context.Context,
+	vaultID string,
+	digest []byte,
+	requestPSBT string,
+	recipient, fee, remainingCap int64,
+) (issuanceStage, error) {
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	commit := false
 	defer func() {
@@ -417,68 +743,121 @@ func (l *Ledger) commitReservation(ctx context.Context, vaultID string, digest [
 		}
 	}()
 
-	var state string
-	var stored sql.NullString
+	var stage issuanceStage
+	var provider, signed sql.NullString
+	var storedRecipient, storedFee int64
 	err = conn.QueryRowContext(ctx,
-		`SELECT state, signed_psbt FROM issuance WHERE vault_id = ? AND arkade_sighash = ?`,
+		`SELECT state, request_psbt, provider_psbt, signed_psbt, recipient_amount, fee
+		   FROM issuance WHERE vault_id = ? AND arkade_sighash = ?`,
 		vaultID, digest,
-	).Scan(&state, &stored)
-	switch {
-	case err == nil && state == stateCompleted && stored.Valid:
+	).Scan(&stage.state, &stage.requestPSBT, &provider, &signed, &storedRecipient, &storedFee)
+	if err == nil {
+		if stage.requestPSBT != requestPSBT || storedRecipient != recipient || storedFee != fee {
+			return issuanceStage{}, fmt.Errorf("issuance %s is already bound to a different exact request", hex.EncodeToString(digest))
+		}
+		if provider.Valid {
+			stage.providerPSBT = provider.String
+		}
+		if signed.Valid {
+			stage.signedPSBT = signed.String
+		}
+		if err := validateIssuanceStage(stage); err != nil {
+			return issuanceStage{}, err
+		}
 		if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
-			return "", false, err
+			return issuanceStage{}, err
 		}
 		commit = true
-		return stored.String, true, nil
-	case err == nil:
-		if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
-			return "", false, err
-		}
-		commit = true
-		return "", false, fmt.Errorf("issuance %s already %s", hex.EncodeToString(digest), state)
-	case err != sql.ErrNoRows:
-		return "", false, err
+		return stage, nil
+	}
+	if err != sql.ErrNoRows {
+		return issuanceStage{}, err
 	}
 
 	period := l.PeriodStart()
 	var used sql.NullInt64
 	if err := conn.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(recipient_amount + fee), 0) FROM issuance
-		 WHERE vault_id = ? AND period_start = ? AND state IN (?, ?)`,
-		vaultID, period, stateReserved, stateCompleted,
+		 WHERE vault_id = ? AND period_start = ? AND state IN (?, ?, ?)`,
+		vaultID, period, stateReserved, stateProviderSigned, stateCompleted,
 	).Scan(&used); err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	usedAmt := used.Int64
 	if !used.Valid || usedAmt < 0 {
-		return "", false, fmt.Errorf("period spent invalid")
+		return issuanceStage{}, fmt.Errorf("period spent invalid")
 	}
 	need, err := addOutflow(recipient, fee)
 	if err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	if usedAmt > remainingCap {
-		return "", false, fmt.Errorf("period allowance exceeded")
+		return issuanceStage{}, fmt.Errorf("period allowance exceeded")
 	}
 	if need > remainingCap-usedAmt {
-		return "", false, fmt.Errorf("period allowance exceeded")
+		return issuanceStage{}, fmt.Errorf("period allowance exceeded")
 	}
 
+	now := l.clock().UTC().Format(time.RFC3339)
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO issuance (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		vaultID, digest, period, recipient, fee, stateReserved, l.clock().UTC().Format(time.RFC3339),
+		`INSERT INTO issuance (
+		   vault_id, arkade_sighash, period_start, recipient_amount, fee, state,
+		   request_psbt, created_at, updated_at
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		vaultID, digest, period, recipient, fee, stateReserved, requestPSBT, now, now,
 	); err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err != nil {
-		return "", false, err
+		return issuanceStage{}, err
 	}
 	commit = true
-	return "", false, nil
+	return issuanceStage{state: stateReserved, requestPSBT: requestPSBT, created: true}, nil
+}
+
+func validateIssuanceStage(stage issuanceStage) error {
+	switch stage.state {
+	case stateReserved:
+		if stage.requestPSBT == "" || stage.providerPSBT != "" || stage.signedPSBT != "" {
+			return fmt.Errorf("reserved issuance has inconsistent persisted signing data")
+		}
+	case stateProviderSigned:
+		if stage.requestPSBT == "" || stage.providerPSBT == "" || stage.signedPSBT != "" {
+			return fmt.Errorf("provider-signed issuance has inconsistent persisted signing data")
+		}
+	case stateCompleted:
+		if stage.requestPSBT == "" || stage.providerPSBT == "" || stage.signedPSBT == "" {
+			return fmt.Errorf("completed issuance has inconsistent persisted signing data")
+		}
+	default:
+		return fmt.Errorf("unknown issuance state %q", stage.state)
+	}
+	return nil
+}
+
+func (l *Ledger) commitProviderSigned(ctx context.Context, vaultID string, digest []byte, providerPSBT string) error {
+	return l.commitSigningStage(
+		ctx, vaultID, digest, stateReserved, stateProviderSigned,
+		"provider_psbt", providerPSBT,
+	)
 }
 
 func (l *Ledger) commitCompletion(ctx context.Context, vaultID string, digest []byte, signed string) error {
+	return l.commitSigningStage(
+		ctx, vaultID, digest, stateProviderSigned, stateCompleted,
+		"signed_psbt", signed,
+	)
+}
+
+func (l *Ledger) commitSigningStage(
+	ctx context.Context,
+	vaultID string,
+	digest []byte,
+	wantState, nextState, column, value string,
+) error {
+	if column != "provider_psbt" && column != "signed_psbt" {
+		return fmt.Errorf("invalid signing-stage column")
+	}
 	conn, err := l.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -494,8 +873,9 @@ func (l *Ledger) commitCompletion(ctx context.Context, vaultID string, digest []
 		}
 	}()
 	res, err := conn.ExecContext(ctx,
-		`UPDATE issuance SET state = ?, signed_psbt = ? WHERE vault_id = ? AND arkade_sighash = ? AND state = ?`,
-		stateCompleted, signed, vaultID, digest, stateReserved,
+		`UPDATE issuance SET state = ?, `+column+` = ?, updated_at = ?
+		 WHERE vault_id = ? AND arkade_sighash = ? AND state = ?`,
+		nextState, value, l.clock().UTC().Format(time.RFC3339), vaultID, digest, wantState,
 	)
 	if err != nil {
 		return err
@@ -505,7 +885,7 @@ func (l *Ledger) commitCompletion(ctx context.Context, vaultID string, digest []
 		return err
 	}
 	if n != 1 {
-		return fmt.Errorf("issuance %s not reserved", hex.EncodeToString(digest))
+		return fmt.Errorf("issuance %s is not in required state %s", hex.EncodeToString(digest), wantState)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		return err

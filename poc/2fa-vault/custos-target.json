@@ -1,83 +1,103 @@
 {
   "reposRoot": ".",
-  "context": "Arkade 2FA Vault is a proof of concept for ordinary L1 Taproot vault UTXOs, not Ark VTXOs. The Operational vault has a collaborative hot-plus-tweaked-provider leaf, a hot-plus-second-signer owner leaf, and a CSV-plus-second-signer recovery leaf. Savings deliberately has no provider key. The public Provider HTTP service validates a one-input PSBT, exact previous transaction, Operational script and collaborative leaf, off-chain WebAuthn semantics, a transaction-bound DirectP256 OP_SIGHASH packet witness, a transaction-bound hot BIP342 signature, transaction/period/fee policy (recipient plus miner fee), and then calls the private Arkade Emulator SubmitOnchainTx signing oracle. Every HTTP request, PSBT field, previous transaction, WebAuthn field, Emulator response, and browser-served API response is hostile. The browser's encrypted hot key and PRF-derived DirectP256 scalar are unlocked by a passkey PRF and must never be exposed to the Provider. The Provider and Emulator are separate trust boundaries.\n\nThe committed Arkade script is OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK. The packet witness is one compact low-S 64-byte signature over the current Arkade sighash. WebAuthn clientDataJSON and authenticatorData stay off-chain and are checked only by Provider Go (stored credential Origin/RPID). A DirectP256 signature from spend A must fail on spend B at the raw LocalSigner / SubmitOnchainTx path. Budget and WebAuthn semantics are still not inside the key-constrained signer: a caller that reaches the raw Emulator with a valid current-tx DirectP256 signature plus hot signature can obtain a provider signature even if the public /authorize policy would reject the amounts. Treat that remaining policy-oracle gap as a known boundary. A client served by the Provider is trusted code for this POC; same-origin CSP blocks third-party CDN code but does not survive a compromised Provider serving modified first-party JavaScript. The second user signer is in scope only as a required independent key in the Taproot paths; its generation, storage and signing ceremony are out of scope.\n\nThe POC must fail closed. The private Emulator endpoint must not be exposed through the Provider API. A signature response may differ from the submitted PSBT only by one valid expected provider Taproot script-spend signature. Period budget is reserved durably before the external signer is invoked; ambiguous post-dispatch failures remain reserved and block same-digest re-sign. Economic outflow is recipient plus fee. Idempotency is only for the exact transaction digest after a stored completed row. No result should be treated as production security evidence until the genuine browser ceremony, private RemoteSigner boundary and regtest broadcast are exercised end to end.",
+  "context": "Arkade 2FA Vault is a proof of concept for ordinary L1 Taproot vault UTXOs, not Ark VTXOs. Operational has an exact hot + tweaked private Provider + tweaked public Arkade Emulator 3-of-3 collaborative leaf, a hot-plus-independent-backup owner leaf, and a CSV-plus-backup recovery leaf. Both independent cosigner bases are tweaked with the same ArkadeScriptHash. Savings has only owner/recovery leaves and must exclude both cosigners' base and tweaked identities. The WebAuthn ES256 credential is an off-chain origin/RP/UP/UV factor. A distinct PRF-derived DirectP256 key signs the exact Arkade OP_SIGHASH digest committed by OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK. The passkey does not sign Bitcoin.\n\nAudit two execution profiles separately. Regtest cmd/provider plus two independent private Emulator instances is a local demonstration with a public generator-G backup fixture; its policy-agnostic raw signers must never be treated as a deployment boundary. Mutinynet uses cmd/authorizer: one internal-only software process owns both the file-backed private Provider key and sole authoritative SQLite ledger, runs Service.Authorize before private key use, and exposes only an explicit policy-operation route/method allowlist through a stateless TLS/static gateway. It has one narrow outbound HTTPS client for the public Arkade cosigner and no inbound generic signer route, local Emulator, arkd/gRPC signer transport, raw signing route, demo funding/mining route, or client-supplied raw publish operation. The public origin, fresh-enrollment base key, and allowed version are code-pinned with no Compose override. GetInfo reports signer keys/version but no network identity; the separate Esplora height-1 checkpoint pins Mutinynet. Only the authorizer may mount the Provider key and ledger.\n\nEvery public request, PSBT field, previous transaction, WebAuthn field, public-cosigner response, gateway response, Esplora response, and browser-served API response is hostile. Before either cosigner result is accepted, the authorizer must reconcile the full prevout/PSBT, enrolled Operational script, exact collaborative leaf/control block, Arkade packet, DirectP256 signature, hot BIP342 signature, WebAuthn semantics, recipient/change, fee and transaction/period caps. The exact normalized request is durably reserved before the private Provider signs; the Provider-signed PSBT is durably stored before public Arkade dispatch; completion stores the final PSBT. Every reserved/provider_signed/completed row counts, ambiguous failures are never released, an exact request retry resumes the persisted stage without repeating completed signers, and a different request under the same masked digest is rejected. A signature response must preserve the submitted hot signature and add exactly the valid tweaked-Provider and tweaked-Arkade signatures, unordered, with no duplicate, substitution, or other mutation. Publication loads the completed PSBT by challenge and never signs or broadcasts caller-supplied raw bytes.\n\nThe immutable v2 credential/descriptor row is HMAC-authenticated with a domain-separated key derived from the file-only Provider scalar and must verify before any stored field is used. Fresh enrollment accepts only the code-pinned public key as current. An existing authenticated descriptor may retain its exact public base/tweak while that base is actively advertised as deprecated; it never adopts an advertised key. Old v1 databases and funded 2-of-2 UTXOs have no automatic migration. The browser keeps an exact authorize request body only in same-page memory for transient/public-signer retry, reuses it before any new assertion/direct/hot signing, never persists assertion material in localStorage/sessionStorage, and clears it after verified success or intent change.\n\nDo not accept the old raw-signer policy-oracle gap as a Mutinynet limitation: any network-callable generic key-use path is a release blocker. Remaining honest limits are different: Docker/SQLite is not an HSM/enclave and host/root compromise can misuse the private Provider key; the public Arkade signer is an availability and transaction-privacy dependency but is not trusted for response correctness; the same-origin POC client is trusted code and a compromised gateway can serve malicious first-party JavaScript; the browser independently derives the restricted POC Arkade sighash but does not yet derive the complete versioned descriptor; recovery-key generation/signing is out of scope; backups have no anti-rollback protection; and this is Mutinynet-only, one vault per isolated authorizer. Never use real BTC.",
   "intake": [
     {
-      "question": "What are the crown-jewel assets — whose funds or secrets, and how much, is at risk here?",
-      "answer": "The browser hot private key, the PRF-derived DirectP256 scalar, and the Provider/Emulator signing capability. A bypass can steal the bounded Operational balance. Savings must remain unspendable by the Provider. This POC must never be used with real funds."
+      "question": "What are the crown-jewel assets and failure impact?",
+      "answer": "The browser hot private key, ephemeral PRF result and DirectP256 scalar, authorizer private Provider key, authoritative staged policy ledger, authenticated vault descriptor, and bounded Operational UTXOs. A bypass can steal the Operational balance or roll back allowance accounting. Savings must remain unspendable by either cosigner role. Never use real BTC."
     },
     {
-      "question": "Who is trusted and who is adversarial? Is the operator/server assumed honest, and is the client hostile — or both?",
-      "answer": "Audit both a malicious client and a compromised Provider/Emulator response. The current POC still trusts Provider policy-service integrity and the browser code delivered to the user; those assumptions must be stated rather than silently promoted to enclave guarantees."
+      "question": "Which actors and inputs are trusted?",
+      "answer": "Treat clients, requests, PSBTs, previous transactions, public Arkade responses, gateway/API responses, and publishers as hostile. Mutinynet trusts the key-owning authorizer process and host plus the exact first-party signing client delivered by the gateway. The code-pinned public endpoint is required for availability and learns the transaction, but its signed PSBT is accepted only after exact local identity/signature/mutation reconciliation. These are explicit software/host and same-origin assumptions, not enclave or compromised-provider resistance."
     },
     {
-      "question": "What is explicitly OUT of scope for this audit?",
-      "answer": "Production UX, multi-user authentication, attestation infrastructure, second-signer key generation/storage/ceremony, mainnet deployment, operator migration, and a complete wallet broadcast implementation."
+      "question": "What is explicitly out of scope?",
+      "answer": "Mainnet, production custody, HSM/enclave isolation, attestation infrastructure, shared multi-user hosting, backup-key generation/storage/signing ceremony, anti-rollback hardware, automatic v1 database or funded-output migration, private Provider-key/operator migration, true Ark VTXOs, and the full Arkade Wallet Vault-mode fork."
     },
     {
-      "question": "What changed recently, or which area are you most worried about?",
-      "answer": "DirectP256 OP_SIGHASH transaction binding with WebAuthn off-chain, durable reserve-then-sign budget accounting (recipient plus fee), RemoteSigner clone-and-append, cmd/provider deployment, and enrollment descriptor compatibility including stored Origin/RPID."
+      "question": "What changed and needs concentrated review?",
+      "answer": "The exact 3-of-3 template and same-hash dual tweaks; public Arkade release pins, active-deprecated restart rule, and hostile-response reconciliation; status/browser enrollment identity persistence; staged reserved to provider_signed to completed issuance with exact resume and no release; exact in-memory browser authorize retry; v2 fail-closed schema; two-independent-Emulator regtest topology; Mutinynet checkpointing; bootstrap enrollment; x-only role separation; and absence of inbound generic signing routes."
     },
     {
-      "question": "What invariants must the code uphold?",
-      "answer": "One verified Operational input; one reviewed recipient; optional exact Operational change; one canonical Arkade packet whose witness is exactly one 64-byte DirectP256 OP_SIGHASH signature; SIGHASH_DEFAULT; exact collaborative leaf/control block; valid hot and provider signatures; fresh exact WebAuthn semantics at the public boundary using the stored Origin/RPID; durable reserved recipient-plus-fee budget before Sign; bounded fees; no Provider key in Savings; deterministic recovery paths; no PRF bytes sent to the Provider."
+      "question": "What invariants are release blocking?",
+      "answer": "One exact verified Operational input; one reviewed native-SegWit recipient; optional exact Operational change; exact canonical Ark extension in the final zero-valued output with one 64-byte transaction-bound DirectP256 signature; SIGHASH_DEFAULT; the submitted hot signature plus exactly the tweaked private-Provider and public-Arkade signatures; fresh stored-origin/RP WebAuthn semantics; all secp roles independent by x-only identity; both tweaks derived from the same ArkadeScriptHash; durable exact-request reservation and Provider stage before public dispatch; bounded recipient-plus-fee outflow; neither cosigner in Savings; no inbound generic network key-use route; code-pinned public origin/base/version; and only the authorizer owns private Provider key plus ledger."
     }
   ],
   "bundles": [
     {
-      "name": "vault-template-and-unilateral-paths",
-      "focus": "Taproot template correctness and key separation. Verify every leaf and control block commits to the advertised output, the Provider appears only in the Operational collaborative leaf, owner/recovery paths require the intended keys and sequences, amount arithmetic is range-safe, and the builders cannot create an unbalanced or unintended spend. The authorization script is OP_0 OP_SIGHASH plus DirectP256 CSFS; WebAuthn is not an on-chain witness.",
+      "name": "vault-template-and-key-separation",
+      "focus": "Verify canonical Taproot leaves/control blocks, exact 3-of-3 order-independent signature semantics, both independent base keys tweaked by the same ArkadeScriptHash, network-specific addresses, BIP68 block-delay bounds, x-only pairwise separation across hot/backup/both bases/both tweaks, DirectP256 authorization-script binding, deterministic v2 restart records, and exclusion of all four collaborator identities from every Savings leaf.",
       "files": [
         "poc/2fa-vault/fixture/fixture.go",
+        "poc/2fa-vault/internal/deployment/config.go",
         "poc/2fa-vault/internal/vault/script.go",
         "poc/2fa-vault/internal/vault/vault.go",
         "poc/2fa-vault/internal/vault/tx.go"
       ]
     },
     {
-      "name": "webauthn-and-browser-hot-key",
-      "focus": "WebAuthn semantic and ES256 verification, DER/low-S conversion, P-256 point validation, passkey PRF use, encrypted hot-key lifecycle, DirectP256 HKDF derivation, enrollment durability, origin/RP binding, same-origin supply chain, and client-side draft/bound PSBT validation before the hot key is decrypted or used.",
+      "name": "webauthn-direct-auth-and-browser",
+      "focus": "Audit WebAuthn origin/RP/challenge/UP/UV validation, ES256 DER/low-S handling, P-256 point validation, mandatory PRF, DirectP256 domain separation and transaction binding, encrypted hot-key lifecycle, pending enrollment recovery, exact public Arkade base/tweak/origin/version persistence, network-specific address decoding, exact three-signature PSBT-delta validation, same-page byte-identical authorize retry without assertion storage, success/intent-change clearing, and the explicit same-origin malicious-JavaScript limitation.",
       "files": [
         "poc/2fa-vault/internal/webauthn/assert.go",
         "poc/2fa-vault/internal/webauthn/der.go",
         "poc/2fa-vault/internal/webauthn/p256.go",
         "poc/2fa-vault/web/app.js",
+        "poc/2fa-vault/web/authorizeretry.js",
+        "poc/2fa-vault/web/enrollstore.js",
         "poc/2fa-vault/web/directauth.js",
-        "poc/2fa-vault/web/psbtcheck.js",
-        "poc/2fa-vault/web/index.html"
+        "poc/2fa-vault/web/psbtcheck.js"
       ]
     },
     {
-      "name": "provider-authorization-oracle",
-      "focus": "Mandatory endpoint/check matrix and checked-vs-signed correspondence. Inventory every attacker-controlled PSBT field; prove the full previous transaction, WitnessUtxo, outpoint, Operational output, exact collaborative leaf, Arkade packet, off-chain WebAuthn assertion, DirectP256 witness, hot signature, recipient, change, amount and fee are reconciled before policy reservation. Verify the private Emulator response is reconstructed from the submitted PSBT plus one verified provider signature.",
+      "name": "policy-bound-authorizer",
+      "focus": "Build a checked-versus-signed matrix for every attacker-controlled PSBT and prevout field. Prove Service.Authorize independently validates descriptor, transaction, packet, WebAuthn, DirectP256, hot signature, economic policy, and each cosigner response. Verify the exact request is reserved before the private LocalSigner, its result is persisted before the public signer, the public response adds only its expected signature, and no inbound raw sign operation is reachable through AuthorizerHandler.",
       "files": [
         "poc/2fa-vault/internal/provider/service.go",
         "poc/2fa-vault/internal/provider/classify.go",
         "poc/2fa-vault/internal/provider/hotsig.go",
-        "poc/2fa-vault/internal/provider/signer.go",
         "poc/2fa-vault/internal/provider/psbtguard.go",
-        "poc/2fa-vault/internal/provider/dial.go"
+        "poc/2fa-vault/internal/provider/signer.go",
+        "poc/2fa-vault/internal/provider/public_emulator.go",
+        "poc/2fa-vault/internal/provider/http.go",
+        "poc/2fa-vault/internal/provider/authorizer_policy_boundary_test.go"
       ]
     },
     {
-      "name": "policy-ledger-and-enrollment-state",
-      "focus": "SQLite transactionality and integer domain. Verify one-shot credential persistence, deterministic vault restart inputs including stored Origin/RPID compatibility, concurrent reservations across goroutines/processes, UTC rollover, durable reservation before Sign, conservative retain-on-ambiguous-post-dispatch, exact-digest idempotency, recipient-plus-fee outflow, and no overflow or stale-state race.",
+      "name": "ledger-enrollment-and-rollback",
+      "focus": "Audit one-shot bootstrap token lifecycle, exact-tuple registration idempotence, v2 descriptor compatibility and no v1 auto-migration, SQLite synchronous=FULL and transactionality, reserved/provider_signed/completed invariants, process/concurrent serialization, UTC rollover, overflow safety, recipient-plus-fee accounting, conservative ambiguous-failure retention, exact-request stage resume without duplicate signer calls, completed replay, backup consistency, and the documented absence of anti-rollback protection.",
       "files": [
         "poc/2fa-vault/internal/policy/ledger.go",
         "poc/2fa-vault/internal/provider/service.go",
-        "poc/2fa-vault/fixture/fixture.go"
+        "poc/2fa-vault/internal/provider/enrollment_bootstrap_test.go",
+        "poc/2fa-vault/internal/provider/deployment_runtime_test.go"
       ]
     },
     {
-      "name": "public-api-and-deployment-boundary",
-      "focus": "Network reachability and confused-deputy review. Enumerate every public route, body/parser limit, Origin/content-type rule, one-shot enrollment gate, static-code security header, signer timeout and error path. Prove no generic raw signing endpoint is reachable. Deployment is cmd/provider with a pubkey-only offline fixture and a persistent volume; cmd/demo is an optional local harness only.",
+      "name": "mutinynet-key-and-network-boundary",
+      "focus": "Prove cmd/authorizer is Mutinynet-only, strictly parses private Provider secrets and x-only fixture exclusions, code-pins public Arkade origin/fresh base/exact version with no environment override, permits an authenticated existing base only when actively deprecated without TOFU substitution, treats GetInfo as lacking network attestation, separately pins Esplora height 1, rejects redirects and bounded-response violations, owns key plus ledger, and exposes only its explicit inbound allowlist. Review two-service Compose isolation and built-binary exclusion of generic Emulator/RemoteSigner/gRPC client routes while retaining only the narrow outbound HTTPS cosigner client.",
       "files": [
-        "poc/2fa-vault/internal/provider/http.go",
+        "poc/2fa-vault/internal/authorizer/runtime.go",
+        "poc/2fa-vault/cmd/authorizer/main.go",
+        "poc/2fa-vault/internal/provider/public_emulator.go",
+        "poc/2fa-vault/internal/provider/esplora.go",
+        "poc/2fa-vault/Dockerfile.mutinynet",
+        "poc/2fa-vault/Dockerfile.gateway",
+        "poc/2fa-vault/docker-compose.mutinynet.yml",
+        "poc/2fa-vault/docker-compose.mutinynet.enroll.yml",
+        "poc/2fa-vault/deploy/mutinynet/Caddyfile",
+        "poc/2fa-vault/mutinynet_deployment_test.go"
+      ]
+    },
+    {
+      "name": "regtest-demo-isolation",
+      "focus": "Treat both independent RemoteSigner/Emulator instances only as a disposable regtest acceptance harness. Verify cmd/provider rejects non-regtest; fixture backup key and unsafe local signer cannot enter Mutinynet; neither Emulator has a host port in the vault overlay; fund/mine routes are gated; wallet initialization is bounded and idempotent; and nothing from this harness weakens the Mutinynet authorizer claim.",
+      "files": [
         "poc/2fa-vault/cmd/provider/main.go",
-        "poc/2fa-vault/cmd/demo/main.go",
-        "poc/2fa-vault/Dockerfile",
-        "poc/2fa-vault/docker-compose.yml",
-        "poc/2fa-vault/README.md"
+        "poc/2fa-vault/internal/remotesigner/dial.go",
+        "poc/2fa-vault/internal/provider/demo.go",
+        "poc/2fa-vault/scripts/regtest-up.sh",
+        "poc/2fa-vault/docker-compose.yml"
       ]
     }
   ]

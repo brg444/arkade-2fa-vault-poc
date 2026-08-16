@@ -13,6 +13,9 @@ export const PSBT_OPTS = Object.freeze({
 });
 
 export const DUST_SATS = 330n;
+export const MAX_MONEY_SATS = 21_000_000n * 100_000_000n;
+export const MAX_PSBT_BYTES = 256 * 1024;
+export const MAX_PREV_TX_BYTES = 1024 * 1024;
 export const PACKET_TYPE = 0x01;
 export const ARK_MAGIC = new Uint8Array([0x41, 0x52, 0x4b]);
 const REGTEST = Object.freeze({ ...TEST_NETWORK, bech32: "bcrt" });
@@ -21,17 +24,30 @@ export function bytesToHex(b) {
   return [...toBytes(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-export function hexToBytes(h) {
+export function hexToBytes(h, maxBytes = MAX_PREV_TX_BYTES) {
   if (typeof h !== "string" || h.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(h)) {
     throw new Error("hex");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || h.length > maxBytes * 2) {
+    throw new Error("hex input too large");
   }
   const out = new Uint8Array(h.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
-export function b64ToBytes(b64) {
+export function b64ToBytes(b64, maxBytes = MAX_PSBT_BYTES) {
+  if (typeof b64 !== "string" || b64.length === 0 || b64.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(b64)) {
+    throw new Error("base64");
+  }
+  const padding = b64.endsWith("==") ? 2 : (b64.endsWith("=") ? 1 : 0);
+  const decodedLength = (b64.length / 4) * 3 - padding;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || decodedLength > maxBytes) {
+    throw new Error("base64 input too large");
+  }
   const bin = atob(b64);
+  if (bin.length !== decodedLength) throw new Error("base64");
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
@@ -57,9 +73,36 @@ export function parsePSBT(b64) {
   return Transaction.fromPSBT(b64ToBytes(b64), PSBT_OPTS);
 }
 
-export function scriptFromAddress(addr) {
+export function parseExactSats(value, name, minimum = 0n) {
+  const raw = String(value ?? "").trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error(`${name} must be an exact non-negative integer`);
+  const amount = BigInt(raw);
+  if (amount < minimum) throw new Error(`${name} is below the minimum`);
+  if (amount > MAX_MONEY_SATS) throw new Error(`${name} exceeds MAX_MONEY`);
+  const number = Number(amount);
+  if (!Number.isSafeInteger(number) || BigInt(number) !== amount) {
+    throw new Error(`${name} is not exactly representable`);
+  }
+  return { text: raw, bigint: amount, number };
+}
+
+export function parseExactVout(value) {
+  const raw = String(value ?? "").trim();
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error("vout must be an exact non-negative integer");
+  const vout = BigInt(raw);
+  if (vout > 0xffffffffn) throw new Error("vout exceeds uint32");
+  return { text: raw, number: Number(vout) };
+}
+
+export function scriptFromAddress(addr, network) {
   if (!addr) throw new Error("operational address required");
-  return OutScript.encode(Address(REGTEST).decode(addr));
+  return OutScript.encode(Address(addressNetwork(network)).decode(addr));
+}
+
+function addressNetwork(network) {
+  if (network === "regtest") return REGTEST;
+  if (network === "mutinynet") return TEST_NETWORK;
+  throw new Error("unsupported vault network");
 }
 
 export function snapshotPSBT(tx) {
@@ -149,11 +192,21 @@ export function reviewFields(parsed) {
     changeAmount: parsed.changeAmount,
     fee: parsed.fee,
     sighash: parsed.sighash,
+    arkadeChallenge: parsed.arkadeChallenge,
     leafScript: parsed.leafScript,
     controlBlock: parsed.controlBlock,
     packetVin: parsed.packet.vin,
     packetWitnessItems: parsed.packet.witness.length,
   };
+}
+
+export function assertArkadeChallenge(local, server) {
+  const expected = String(local || "").toLowerCase();
+  const received = String(server || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected) || !/^[0-9a-f]{64}$/.test(received) || expected !== received) {
+    throw new Error("provider preflight challenge does not match the locally computed Arkade sighash");
+  }
+  return expected;
 }
 
 export function validateAuthorizedPSBT(args) {
@@ -173,7 +226,9 @@ export function validateAuthorizedPSBT(args) {
   const before = tapSigs(submitted.getInput(0));
   const after = tapSigs(authorized.getInput(0));
   if (before.length !== 1) throw new Error("submitted psbt must carry the hot signature only");
-  if (after.length !== 2) throw new Error("authorized psbt must add exactly one provider signature");
+  if (after.length !== 3) {
+    throw new Error("authorized psbt must contain hot, private provider, and public Arkade emulator signatures only");
+  }
   const hot = before[0];
   const hotCompressed = requireHex(args.hotPubHex, "hot pub");
   if (!/^(02|03)[0-9a-f]{64}$/.test(hotCompressed)) throw new Error("hot pub must be compressed secp256k1");
@@ -191,21 +246,36 @@ export function validateAuthorizedPSBT(args) {
   if (!schnorr.verify(hexToBytes(hot.sig), msg, hexToBytes(hot.pub))) throw new Error("hot signature invalid");
   if (after.filter((s) => sameTapSig(s, hot)).length !== 1) throw new Error("authorized response mutated the hot signature");
   const extras = after.filter((s) => !sameTapSig(s, hot));
-  if (extras.length !== 1) throw new Error("authorized provider signature delta");
-  const extra = extras[0];
+  if (extras.length !== 2) throw new Error("authorized collaborative signature delta");
   const wantProvider = requireHex(args.tweakedProviderXOnly, "tweaked provider x-only");
   if (!/^[0-9a-f]{64}$/.test(wantProvider)) throw new Error("tweaked provider x-only must be 32 bytes");
-  if (extra.pub !== wantProvider) throw new Error("provider signature key does not match pinned vault key");
-  if (extra.leaf !== leafHash) throw new Error("provider signature leaf");
-  if (extra.sig.length !== 128) throw new Error("provider signature must be 64 bytes");
-  if (!schnorr.verify(hexToBytes(extra.sig), msg, hexToBytes(extra.pub))) {
-    throw new Error("provider signature invalid");
+  const wantArkade = requireHex(args.tweakedArkadeXOnly, "tweaked Arkade emulator x-only");
+  if (!/^[0-9a-f]{64}$/.test(wantArkade)) throw new Error("tweaked Arkade emulator x-only must be 32 bytes");
+  if (new Set([hot.pub, wantProvider, wantArkade]).size !== 3) {
+    throw new Error("collaborative signer keys must be independent");
   }
+  const expected = new Map([
+    [wantProvider, "private provider"],
+    [wantArkade, "public Arkade emulator"],
+  ]);
+  for (const extra of extras) {
+    const role = expected.get(extra.pub);
+    if (!role) {
+      throw new Error("authorized response contains a duplicate or substituted collaborative signer");
+    }
+    if (extra.leaf !== leafHash) throw new Error(`${role} signature leaf`);
+    if (extra.sig.length !== 128) throw new Error(`${role} signature must be 64 bytes`);
+    if (!schnorr.verify(hexToBytes(extra.sig), msg, hexToBytes(extra.pub))) {
+      throw new Error(`${role} signature invalid`);
+    }
+    expected.delete(extra.pub);
+  }
+  if (expected.size !== 0) throw new Error("authorized response is missing a required collaborative signature");
   // The txid excludes witness data, so the PSBT's exact unsigned transaction
   // independently commits to the txid that finalization and publication must
   // preserve. Signatures are verified above before this value is released.
   const transactionId = bytesToHex(Uint8Array.from(sha256d(authorized.toBytes(true, false))).reverse());
-  return { providerPub: extra.pub, transactionId };
+  return { providerPub: wantProvider, arkadePub: wantArkade, transactionId };
 }
 
 function tapSigs(input) {
@@ -259,18 +329,26 @@ function inspectPSBT(args) {
     throw new Error("sighash must be SIGHASH_DEFAULT");
   }
   if (!input.witnessUtxo) throw new Error("witness utxo required");
+  assertMoneyRange(input.witnessUtxo.amount, "witness utxo amount");
   if (!input.tapLeafScript || input.tapLeafScript.length !== 1) {
     throw new Error("exactly one collaborative tap leaf required");
   }
-  const prevRaw = hexToBytes(args.prevTxHex);
+  const reviewedVout = parseExactVout(args.vout);
+  const reviewedAmount = parseExactSats(args.recipientAmount, "recipient amount", DUST_SATS);
+  const reviewedFee = parseExactSats(args.fee, "fee");
+  if (reviewedAmount.bigint + reviewedFee.bigint > MAX_MONEY_SATS) {
+    throw new Error("recipient amount plus fee exceeds MAX_MONEY");
+  }
+  const prevRaw = hexToBytes(args.prevTxHex, MAX_PREV_TX_BYTES);
   const prev = Transaction.fromRaw(prevRaw, PSBT_OPTS);
-  if (input.index !== Number(args.vout)) throw new Error("prevout vout mismatch");
+  if (input.index !== reviewedVout.number) throw new Error("prevout vout mismatch");
   const prevTxID = Uint8Array.from(sha256d(prev.toBytes(true, false))).reverse();
   if (!bytesEqual(input.txid, prevTxID)) {
     throw new Error("prevout txid mismatch");
   }
-  const prevOut = prev.getOutput(Number(args.vout));
+  const prevOut = prev.getOutput(reviewedVout.number);
   if (!prevOut) throw new Error("prevout vout out of range");
+  assertMoneyRange(prevOut.amount, "prevout amount");
   if (input.witnessUtxo.amount !== prevOut.amount) {
     throw new Error("witness utxo amount does not match prevout");
   }
@@ -288,6 +366,7 @@ function inspectPSBT(args) {
   let packetIndex = -1;
   for (let i = 0; i < tx.outputsLength; i++) {
     const out = tx.getOutput(i);
+    assertMoneyRange(out.amount, `output ${i} amount`);
     const script = toBytes(out.script);
     if (isExtensionScript(script)) {
       if (packet) throw new Error("multiple extension outputs");
@@ -304,6 +383,7 @@ function inspectPSBT(args) {
     }
     if (recipient) throw new Error("multiple recipient outputs");
     if (script.length === 0 || script[0] === 0x6a) throw new Error("unexpected op_return or unspendable output");
+    if (!isNativeWitnessProgram(script)) throw new Error("collaborative recipient must be a native segwit output");
     if (out.amount < DUST_SATS) throw new Error("recipient below dust");
     recipient = { script, amount: out.amount };
   }
@@ -314,20 +394,24 @@ function inspectPSBT(args) {
   if (!bytesEqual(recipient.script, wantRecipient)) {
     throw new Error("recipient script does not match reviewed destination");
   }
-  if (recipient.amount !== BigInt(args.recipientAmount)) {
+  if (recipient.amount !== reviewedAmount.bigint) {
     throw new Error("recipient amount does not match reviewed amount");
   }
 
   let outSum = 0n;
-  for (let i = 0; i < tx.outputsLength; i++) outSum += tx.getOutput(i).amount;
+  for (let i = 0; i < tx.outputsLength; i++) {
+    outSum += tx.getOutput(i).amount;
+    if (outSum > MAX_MONEY_SATS) throw new Error("total output amount exceeds MAX_MONEY");
+  }
   const fee = input.witnessUtxo.amount - outSum;
   if (fee < 0n) throw new Error("negative fee");
-  if (fee !== BigInt(args.fee)) throw new Error("fee does not match reviewed fee");
+  if (fee !== reviewedFee.bigint) throw new Error("fee does not match reviewed fee");
 
   const [control, leaf] = input.tapLeafScript[0];
+  const challenge = computeArkadeChallenge(tx);
   return {
     source: args.expectEmptyWitness ? "draft-psbt" : "bound-psbt",
-    prevout: `${bytesToHex(prevTxID)}:${args.vout}`,
+    prevout: `${bytesToHex(prevTxID)}:${reviewedVout.text}`,
     inputValue: input.witnessUtxo.amount.toString(),
     recipientScript: bytesToHex(recipient.script),
     recipientAmount: recipient.amount.toString(),
@@ -335,11 +419,26 @@ function inspectPSBT(args) {
     changeAmount: change ? change.amount.toString() : "0",
     fee: fee.toString(),
     sighash: "SIGHASH_DEFAULT",
+    arkadeChallenge: bytesToHex(challenge),
     leafScript: bytesToHex(leaf),
     controlBlock: normalize(control),
     packet,
     packetIndex,
   };
+}
+
+function assertMoneyRange(amount, name) {
+  if (typeof amount !== "bigint" || amount < 0n || amount > MAX_MONEY_SATS) {
+    throw new Error(`${name} is outside the Bitcoin money range`);
+  }
+}
+
+function isNativeWitnessProgram(script) {
+  if (!(script instanceof Uint8Array) || script.length < 4 || script.length > 42) return false;
+  const version = script[0];
+  if (version !== 0x00 && (version < 0x51 || version > 0x60)) return false;
+  const programLength = script[1];
+  return programLength >= 2 && programLength <= 40 && script.length === programLength + 2;
 }
 
 function assertDraftBoundEqual(draft, bound, packetIndex) {
@@ -381,17 +480,30 @@ function expectedDirectWitness(directSig) {
 }
 
 function operationalScript(args) {
-  if (args.operationalScriptHex) return hexToBytes(args.operationalScriptHex);
-  if (args.operationalAddress) return scriptFromAddress(args.operationalAddress);
+  const fromHex = args.operationalScriptHex ? hexToBytes(args.operationalScriptHex) : null;
+  const fromAddress = args.operationalAddress
+    ? scriptFromAddress(args.operationalAddress, args.network)
+    : null;
+  if (fromHex && fromAddress && !bytesEqual(fromHex, fromAddress)) {
+    throw new Error("operational address does not match persisted script");
+  }
+  if (fromHex) return fromHex;
+  if (fromAddress) return fromAddress;
   throw new Error("operational script required");
 }
 
 function parseCanonicalPacket(script, expectEmptyWitness) {
   const packets = parseExtensionPackets(script);
+  if (!bytesEqual(encodeExtensionScript(packets), script)) {
+    throw new Error("non-canonical ark extension encoding");
+  }
   if (packets.length !== 1 || packets[0].type !== PACKET_TYPE) {
     throw new Error("extension must contain exactly one type 0x01 packet");
   }
   const entry = parseEmulatorPacket(packets[0].data);
+  if (!bytesEqual(encodeEmulatorPacket(entry), packets[0].data)) {
+    throw new Error("non-canonical emulator packet encoding");
+  }
   if (entry.vin !== 0) throw new Error("emulator entry vin");
   if (entry.script.length === 0) throw new Error("empty authorization script");
   if (expectEmptyWitness && entry.witness.length !== 0) {
@@ -407,6 +519,109 @@ function parseCanonicalPacket(script, expectEmptyWitness) {
   };
 }
 
+// computeArkadeChallenge independently implements the restricted digest used
+// by this one-input SIGHASH_DEFAULT vault template. It mirrors
+// pkg/arkade.CalcArkadeScriptSignatureHash: BIP342's SigMsg layout, Arkade's
+// witness-masked extension output, and the distinct ArkadeTapSighash tag.
+export function computeArkadeChallenge(tx) {
+  if (!(tx instanceof Transaction)) throw new Error("arkade challenge requires parsed transaction");
+  if (tx.inputsLength !== 1) throw new Error("arkade challenge requires exactly one input");
+  const input = tx.getInput(0);
+  if (!input.witnessUtxo) throw new Error("arkade challenge witness utxo");
+  if (!input.tapLeafScript || input.tapLeafScript.length !== 1) {
+    throw new Error("arkade challenge tap leaf");
+  }
+  if ((input.sighashType ?? SigHash.DEFAULT) !== SigHash.DEFAULT) {
+    throw new Error("arkade challenge requires SIGHASH_DEFAULT");
+  }
+  const txid = toBytes(input.txid);
+  if (txid.length !== 32) throw new Error("arkade challenge input txid");
+  const leafBytes = toBytes(input.tapLeafScript[0][1]);
+  if (leafBytes.length < 2) throw new Error("arkade challenge tap leaf");
+  const leafScript = leafBytes.subarray(0, -1);
+  const leafVersion = leafBytes[leafBytes.length - 1];
+  const outputs = [];
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const out = tx.getOutput(i);
+    outputs.push(serializeOutput(out.amount, maskEmulatorWitness(toBytes(out.script))));
+  }
+  const sigMsg = concat([
+    Uint8Array.of(0x00, SigHash.DEFAULT),
+    i32LE(tx.version),
+    u32LE(tx.lockTime),
+    sha256(concat([reverseBytes(txid), u32LE(input.index)])),
+    sha256(u64LE(input.witnessUtxo.amount)),
+    sha256(varBytes(toBytes(input.witnessUtxo.script))),
+    sha256(u32LE(input.sequence ?? 0xffffffff)),
+    sha256(concat(outputs)),
+    Uint8Array.of(0x02),
+    u32LE(0),
+    schnorr.utils.taggedHash(
+      "TapLeaf",
+      Uint8Array.of(leafVersion),
+      writeCompactSize(leafScript.length),
+      leafScript,
+    ),
+    Uint8Array.of(0x00),
+    u32LE(0xffffffff),
+  ]);
+  return schnorr.utils.taggedHash("ArkadeTapSighash", sigMsg);
+}
+
+function maskEmulatorWitness(script) {
+  if (!isExtensionScript(script)) return script;
+  const packets = parseExtensionPackets(script);
+  if (!bytesEqual(encodeExtensionScript(packets), script)) {
+    throw new Error("non-canonical ark extension encoding");
+  }
+  let found = false;
+  const masked = packets.map((packet) => {
+    if (packet.type !== PACKET_TYPE) return packet;
+    if (found) throw new Error("multiple emulator packets");
+    found = true;
+    const entry = parseEmulatorPacket(packet.data);
+    return {
+      type: packet.type,
+      data: encodeEmulatorPacket({ vin: entry.vin, script: entry.script, witness: [] }),
+    };
+  });
+  return found ? encodeExtensionScript(masked) : script;
+}
+
+function serializeOutput(amount, script) {
+  return concat([u64LE(amount), varBytes(script)]);
+}
+
+function varBytes(bytes) {
+  const value = toBytes(bytes);
+  return concat([writeCompactSize(value.length), value]);
+}
+
+function reverseBytes(bytes) {
+  return Uint8Array.from(toBytes(bytes)).reverse();
+}
+
+function i32LE(value) {
+  if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) throw new Error("int32");
+  return u32LE(value >>> 0);
+}
+
+function u32LE(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) throw new Error("uint32");
+  return Uint8Array.of(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+}
+
+function u64LE(value) {
+  let n = BigInt(value);
+  if (n < 0n || n > 0xffffffffffffffffn) throw new Error("uint64");
+  const out = new Uint8Array(8);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number(n & 0xffn);
+    n >>= 8n;
+  }
+  return out;
+}
+
 export function parseExtensionPackets(script) {
   const payload = pushedPayload(script);
   if (!payload || payload.length < ARK_MAGIC.length || !bytesEqual(payload.slice(0, 3), ARK_MAGIC)) {
@@ -418,7 +633,7 @@ export function parseExtensionPackets(script) {
     const type = payload[off++];
     const [len, n] = readUvarint(payload, off);
     off = n;
-    const size = Number(len);
+    const size = boundedNumber(len, payload.length - off, "extension packet length");
     if (off + size > payload.length) throw new Error("truncated extension packet");
     packets.push({ type, data: payload.slice(off, off + size) });
     off += size;
@@ -442,13 +657,13 @@ export function parseEmulatorPacket(data) {
   off += 2;
   const [scriptLen, n2] = readCompactSize(data, off);
   off = n2;
-  const sl = Number(scriptLen);
+  const sl = boundedNumber(scriptLen, data.length - off, "emulator script length");
   if (off + sl > data.length) throw new Error("truncated emulator script");
   const script = data.slice(off, off + sl);
   off += sl;
   const [witLen, n3] = readCompactSize(data, off);
   off = n3;
-  const wl = Number(witLen);
+  const wl = boundedNumber(witLen, data.length - off, "emulator witness length");
   if (off + wl > data.length) throw new Error("truncated emulator witness");
   const witBytes = data.slice(off, off + wl);
   off += wl;
@@ -535,11 +750,12 @@ function readTxWitness(buf) {
   let off = 0;
   const [count, n] = readCompactSize(buf, off);
   off = n;
+  const itemCount = boundedNumber(count, buf.length, "witness item count");
   const items = [];
-  for (let i = 0; i < Number(count); i++) {
+  for (let i = 0; i < itemCount; i++) {
     const [len, n2] = readCompactSize(buf, off);
     off = n2;
-    const size = Number(len);
+    const size = boundedNumber(len, buf.length - off, "witness item length");
     if (off + size > buf.length) throw new Error("truncated witness item");
     items.push(buf.slice(off, off + size));
     off += size;
@@ -567,7 +783,10 @@ function readCompactSize(buf, off) {
   }
   if (first === 0xfe) {
     if (off + 5 > buf.length) throw new Error("truncated compact size");
-    return [BigInt(buf[off + 1] | (buf[off + 2] << 8) | (buf[off + 3] << 16) | (buf[off + 4] << 24)), off + 5];
+    return [BigInt(buf[off + 1]) |
+      (BigInt(buf[off + 2]) << 8n) |
+      (BigInt(buf[off + 3]) << 16n) |
+      (BigInt(buf[off + 4]) << 24n), off + 5];
   }
   throw new Error("oversized compact size");
 }
@@ -603,6 +822,13 @@ function writeUvarint(n) {
   }
   out.push(Number(x));
   return Uint8Array.from(out);
+}
+
+function boundedNumber(value, max, name) {
+  if (typeof value !== "bigint" || value < 0n || value > BigInt(max) || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`${name} exceeds remaining input`);
+  }
+  return Number(value);
 }
 
 function normalize(value) {

@@ -49,6 +49,9 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 	if len(p.RecipientScript) == 0 {
 		return nil, fmt.Errorf("recipient script required")
 	}
+	if !txscript.IsWitnessProgram(p.RecipientScript) {
+		return nil, fmt.Errorf("collaborative recipient must be a native segwit output")
+	}
 	prev, err := checkedPrevout(p.Vault, p.PrevTx, p.PrevOutPoint)
 	if err != nil {
 		return nil, err
@@ -56,7 +59,7 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 	if p.Fee < 0 || p.RecipientAmount <= 0 {
 		return nil, fmt.Errorf("invalid amount")
 	}
-	if p.RecipientAmount < fixture.DustSats {
+	if p.RecipientAmount < p.Vault.Record.AuthorizationPolicy.RecipientDustSats {
 		return nil, fmt.Errorf("recipient below dust")
 	}
 
@@ -65,7 +68,7 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 		return nil, err
 	}
 	hasChange := change > 0
-	if hasChange && change < fixture.DustSats {
+	if hasChange && change < p.Vault.Record.AuthorizationPolicy.RecipientDustSats {
 		return nil, fmt.Errorf("change below dust")
 	}
 
@@ -265,7 +268,8 @@ func AddPartialSig(ptx *psbt.Packet, pub *btcec.PublicKey, leafHash, sig []byte)
 	})
 }
 
-// FinalizeCollaborative builds the Bitcoin witness from the two partial sigs.
+// FinalizeCollaborative builds the Bitcoin witness from the hot, private
+// Provider, and public Arkade Emulator partial signatures.
 // It fail-closes on nil inputs, a preexisting final script, the wrong leaf,
 // duplicate/extra keys, a non-default sighash, or an invalid signature.
 func FinalizeCollaborative(ptx *psbt.Packet, v *Built) error {
@@ -276,7 +280,7 @@ func FinalizeCollaborative(ptx *psbt.Packet, v *Built) error {
 }
 
 func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
-	if ptx == nil || ptx.UnsignedTx == nil || v == nil || v.Leaves.Collaborative == nil || v.Record.Hot == nil || v.TweakedProvider == nil {
+	if ptx == nil || ptx.UnsignedTx == nil || v == nil || v.Leaves.Collaborative == nil || v.Record.Hot == nil || v.TweakedProvider == nil || v.TweakedArkade == nil {
 		return fmt.Errorf("collaborative finalize inputs")
 	}
 	if len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
@@ -301,8 +305,9 @@ func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
 	}
 	wantHot := schnorr.SerializePubKey(v.Record.Hot)
 	wantProv := schnorr.SerializePubKey(v.TweakedProvider)
+	wantArkade := schnorr.SerializePubKey(v.TweakedArkade)
 	wantLeaf := v.Leaves.Collaborative.Hash
-	var hotSig, provSig *psbt.TaprootScriptSpendSig
+	var hotSig, provSig, arkadeSig *psbt.TaprootScriptSpendSig
 	seen := make(map[string]struct{})
 	for _, s := range in.TaprootScriptSpendSig {
 		if s == nil {
@@ -330,18 +335,26 @@ func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
 				return fmt.Errorf("duplicate provider signature")
 			}
 			provSig = s
+		case bytes.Equal(s.XOnlyPubKey, wantArkade):
+			if arkadeSig != nil {
+				return fmt.Errorf("duplicate arkade emulator signature")
+			}
+			arkadeSig = s
 		default:
 			return fmt.Errorf("unexpected taproot key")
 		}
 	}
-	if hotSig == nil || provSig == nil || len(in.TaprootScriptSpendSig) != 2 {
-		return fmt.Errorf("expected hot and tweaked-provider signatures")
+	if hotSig == nil || provSig == nil || arkadeSig == nil || len(in.TaprootScriptSpendSig) != 3 {
+		return fmt.Errorf("expected hot, tweaked-provider, and tweaked-arkade signatures")
 	}
 	if err := verifySchnorrTapSig(ptx, hotSig, wantHot, v.Leaves.Collaborative.Script); err != nil {
 		return fmt.Errorf("hot signature: %w", err)
 	}
 	if err := verifySchnorrTapSig(ptx, provSig, wantProv, v.Leaves.Collaborative.Script); err != nil {
 		return fmt.Errorf("provider signature: %w", err)
+	}
+	if err := verifySchnorrTapSig(ptx, arkadeSig, wantArkade, v.Leaves.Collaborative.Script); err != nil {
+		return fmt.Errorf("arkade emulator signature: %w", err)
 	}
 	return nil
 }

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arkade-os/arkd/pkg/ark-lib/intent"
+	arkintent "github.com/arkade-os/arkd/pkg/ark-lib/intent"
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,10 +24,22 @@ func (s *service) SubmitIntent(ctx context.Context, intent Intent) (*psbt.Packet
 	}
 
 	ptx := &intent.Proof.Packet
+	deprecatedSigners := s.activeDeprecatedSigners()
 
 	prevOutFetcher, err := prevOutFetcherForIntent(ptx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prevout fetcher: %w", err)
+	}
+
+	// The BIP322-shaped message input commits the encoded intent in its
+	// previous-outpoint hash. Validating only the separately supplied message's
+	// time window would allow the service to sign a proof that commits a
+	// different message. Verify that structural binding before executing or
+	// adding any signer signature. Full ark-lib intent verification is not used
+	// here because the emulator's tweaked signature is intentionally absent at
+	// this pre-signing stage.
+	if err := validateIntentMessageCommitment(ptx, intent.Message); err != nil {
+		return nil, fmt.Errorf("intent proof does not commit the supplied message: %w", err)
 	}
 
 	// Parse EmulatorPacket from the transaction's OP_RETURN output
@@ -50,7 +65,7 @@ func (s *service) SubmitIntent(ctx context.Context, intent Intent) (*psbt.Packet
 			continue
 		}
 
-		matchedSigner, script, err := resolveArkadeScriptSigner(s.signer, s.activeDeprecatedSigners(), ptx, entry)
+		matchedSigner, script, err := resolveArkadeScriptSigner(s.signer, deprecatedSigners, ptx, entry)
 		if err != nil {
 			// there may be input/entry pairs attributed to a different signer
 			if errors.Is(err, arkade.ErrTweakedArkadePubKeyNotFound) && len(ptx.Inputs) > 1 {
@@ -100,22 +115,60 @@ func (s *service) SubmitIntent(ctx context.Context, intent Intent) (*psbt.Packet
 	return ptx, nil
 }
 
+var intentMessageTag = []byte("ark-intent-proof-message")
+
+func validateIntentMessageCommitment(ptx *psbt.Packet, message IntentMessage) error {
+	if ptx == nil || ptx.UnsignedTx == nil || len(ptx.UnsignedTx.TxIn) < 2 ||
+		len(ptx.Inputs) < 2 || ptx.Inputs[1].WitnessUtxo == nil {
+		return fmt.Errorf("malformed intent proof")
+	}
+
+	encoded, err := message.Encode()
+	if err != nil {
+		return fmt.Errorf("failed to encode message: %w", err)
+	}
+	messageHash := chainhash.TaggedHash(intentMessageTag, []byte(encoded))
+	toSpend := wire.NewMsgTx(0)
+	toSpend.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{
+			Hash:  chainhash.Hash{},
+			Index: wire.MaxPrevOutIndex,
+		},
+		Sequence:        0,
+		SignatureScript: append([]byte{txscript.OP_0, txscript.OP_DATA_32}, messageHash[:]...),
+	})
+	toSpend.AddTxOut(&wire.TxOut{
+		Value:    0,
+		PkScript: ptx.Inputs[1].WitnessUtxo.PkScript,
+	})
+
+	messageOutpoint := ptx.UnsignedTx.TxIn[0].PreviousOutPoint
+	if messageOutpoint.Hash != toSpend.TxHash() {
+		return arkintent.ErrInvalidTxWrongTxHash
+	}
+	if messageOutpoint.Index != 0 {
+		return arkintent.ErrInvalidTxWrongOutputIndex
+	}
+
+	return nil
+}
+
 // validateMessage checks the proof's validity window. Register and estimate-fee
 // carry ValidAt+ExpireAt; the rest only ExpireAt, read here via a type switch.
 func validateMessage(message IntentMessage) error {
 	var validAt, expireAt int64
 	switch m := message.(type) {
-	case *intent.RegisterMessage:
+	case *arkintent.RegisterMessage:
 		validAt, expireAt = m.ValidAt, m.ExpireAt
-	case *intent.EstimateIntentFeeMessage:
+	case *arkintent.EstimateIntentFeeMessage:
 		validAt, expireAt = m.ValidAt, m.ExpireAt
-	case *intent.DeleteMessage:
+	case *arkintent.DeleteMessage:
 		expireAt = m.ExpireAt
-	case *intent.GetPendingTxMessage:
+	case *arkintent.GetPendingTxMessage:
 		expireAt = m.ExpireAt
-	case *intent.GetIntentMessage:
+	case *arkintent.GetIntentMessage:
 		expireAt = m.ExpireAt
-	case *intent.GetDataMessage:
+	case *arkintent.GetDataMessage:
 		expireAt = m.ExpireAt
 	default:
 		return fmt.Errorf("unsupported intent message type")

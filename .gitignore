@@ -10,5 +10,28 @@ poc-2fa-data/
 *.sqlite*
 *.db*
 
+# Mutinynet deployment secrets and local environment files. Store real secret
+# files outside this repository; explicitly permit reviewable example names.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+!*.key.example
+*.pem
+!*.pem.example
+*.p12
+*.pfx
+*.secret
+!*.secret.example
+*.secrets
+!*.secrets.example
+provider-key
+provider_key
+enrollment-token
+enrollment_token
+secrets/
+**/secrets/
+
 # Optional captured WebAuthn assertion fixture; regenerate locally as needed.
 poc/2fa-vault/testdata/webauthn_get.json

@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -166,6 +167,14 @@ func TestRecoverySpendRejectsUnsafeBoundaries(t *testing.T) {
 
 func TestVaultSpendBuildersRejectInt64OverflowAndNonBitcoinValues(t *testing.T) {
 	f := newSecurityVaultFixture(t)
+
+	t.Run("collaborative recipient is not native segwit", func(t *testing.T) {
+		params := f.collaborativeParams()
+		params.RecipientScript = []byte{txscript.OP_TRUE}
+		if _, err := BuildCollaborativeSpend(params); err == nil {
+			t.Fatal("collaborative builder accepted a non-segwit recipient")
+		}
+	})
 
 	t.Run("collaborative amount plus fee overflow", func(t *testing.T) {
 		params := f.collaborativeParams()

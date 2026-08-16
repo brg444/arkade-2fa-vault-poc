@@ -9,6 +9,7 @@ import (
 	emulatorv1 "github.com/arkade-os/emulator/api-spec/protobuf/gen/emulator/v1"
 	"github.com/arkade-os/emulator/internal/application"
 	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -134,4 +135,50 @@ func TestValidationErrorsStayDescriptive(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, codes.InvalidArgument, st.Code())
 	require.Equal(t, "invalid tx", st.Message())
+}
+
+func TestSigningEndpointsRejectExcessiveCollectionsBeforeParsing(t *testing.T) {
+	h := New("test", failingService{})
+	ctx := context.Background()
+	ptx := newProofB64(t)
+
+	_, err := h.SubmitTx(ctx, &emulatorv1.SubmitTxRequest{
+		ArkTx:         ptx,
+		CheckpointTxs: make([]string, maxRequestItems+1),
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "too many checkpoint txs")
+
+	_, err = h.SubmitFinalization(ctx, &emulatorv1.SubmitFinalizationRequest{
+		SignedIntent: newIntentProto(t),
+		CommitmentTx: ptx,
+		Forfeits:     make([]string, maxRequestItems+1),
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "too many forfeit txs")
+
+	_, err = h.SubmitFinalization(ctx, &emulatorv1.SubmitFinalizationRequest{
+		SignedIntent:  newIntentProto(t),
+		CommitmentTx:  ptx,
+		ConnectorTree: make([]*emulatorv1.TxTreeNode, maxRequestItems+1),
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "connector tree exceeds complexity limit")
+}
+
+func TestSigningEndpointRejectsExcessivePSBTInputsBeforeService(t *testing.T) {
+	tx := wire.NewMsgTx(2)
+	for i := range maxRequestItems + 1 {
+		tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: uint32(i)}})
+	}
+	tx.AddTxOut(&wire.TxOut{Value: 1, PkScript: []byte{0x51}})
+	packet, err := psbt.NewFromUnsignedTx(tx)
+	require.NoError(t, err)
+	encoded, err := packet.B64Encode()
+	require.NoError(t, err)
+
+	h := New("test", failingService{})
+	_, err = h.SubmitOnchainTx(context.Background(), &emulatorv1.SubmitOnchainTxRequest{Tx: encoded})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	require.ErrorContains(t, err, "complexity limit")
 }

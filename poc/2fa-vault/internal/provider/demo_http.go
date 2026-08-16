@@ -12,13 +12,13 @@ type demoMineRequest struct {
 	Blocks int `json:"blocks"`
 }
 
-func (d *Demo) attach(mux *http.ServeMux) {
+func (d *Demo) attach(mux *http.ServeMux, origin string) {
 	mux.HandleFunc("GET /v1/demo/info", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, d.info(), nil)
 	})
 	mux.HandleFunc("POST /v1/demo/fund", func(w http.ResponseWriter, r *http.Request) {
 		var req demoFundRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
@@ -27,7 +27,7 @@ func (d *Demo) attach(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("POST /v1/demo/mine", func(w http.ResponseWriter, r *http.Request) {
 		var req demoMineRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}

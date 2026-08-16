@@ -17,17 +17,19 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/provider"
+	"github.com/arkade-os/emulator/poc/2fa-vault/internal/remotesigner"
 	"github.com/btcsuite/btcd/btcec/v2"
 )
 
 func main() {
 	log.Print("POC harness: fixture hot.hex / offline.hex under -data. Offline is another signer, not an isolated ceremony.")
 	var (
-		addr        = flag.String("addr", fixture.HTTPAddr, "listen address")
-		data        = flag.String("data", "poc-2fa-data", "data directory")
-		webDir      = flag.String("web", "", "static web directory")
-		emulator    = flag.String("emulator", envOr("VAULT_EMULATOR", provider.DefaultEmulatorAddr), "private emulator host:port")
-		unsafeLocal = flag.Bool("unsafe-local-signer", false, "test-only local provider key")
+		addr           = flag.String("addr", fixture.HTTPAddr, "listen address")
+		data           = flag.String("data", "poc-2fa-data", "data directory")
+		webDir         = flag.String("web", "", "static web directory")
+		emulator       = flag.String("emulator", envOr("VAULT_EMULATOR", remotesigner.DefaultEmulatorAddr), "private emulator host:port")
+		arkadeEmulator = flag.String("arkade-emulator", os.Getenv("VAULT_ARKADE_EMULATOR"), "independent regtest Arkade emulator host:port")
+		unsafeLocal    = flag.Bool("unsafe-local-signer", false, "test-only local provider key")
 	)
 	flag.Parse()
 	if err := os.MkdirAll(*data, 0o700); err != nil {
@@ -57,20 +59,46 @@ func main() {
 			log.Fatal(err)
 		}
 		svc.ProviderPub = prov.PubKey()
+		arkadePriv, err := loadOrCreateKey(filepath.Join(*data, "arkade-emulator.hex"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if prov.PubKey().IsEqual(arkadePriv.PubKey()) {
+			log.Fatal("provider and Arkade emulator keys must be independent")
+		}
+		svc.ArkadePub = arkadePriv.PubKey()
 		svc.Signer = provider.LocalSigner{Priv: prov}
+		svc.ArkadeSigner = provider.LocalSigner{Priv: arkadePriv}
 		log.Print("UNSAFE local signer enabled; not a deployment demonstration")
 	} else {
+		if *arkadeEmulator == "" {
+			log.Fatal("VAULT_ARKADE_EMULATOR / -arkade-emulator is required")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		cli, pub, deprecated, conn, err := provider.DialEmulator(ctx, *emulator)
-		cancel()
+		cli, pub, deprecated, conn, err := remotesigner.DialEmulator(ctx, *emulator)
 		if err != nil {
+			cancel()
 			log.Fatalf("emulator at %s: %v (start the private emulator or pass -unsafe-local-signer for tests)", *emulator, err)
 		}
+		arkadeCli, arkadePub, arkadeDeprecated, arkadeConn, err := remotesigner.DialEmulator(ctx, *arkadeEmulator)
+		cancel()
+		if err != nil {
+			_ = conn.Close()
+			log.Fatalf("arkade emulator at %s: %v", *arkadeEmulator, err)
+		}
 		defer conn.Close()
+		defer arkadeConn.Close()
+		if pub.IsEqual(arkadePub) {
+			log.Fatal("provider and Arkade emulators advertise the same key")
+		}
 		svc.ProviderPub = pub
 		svc.DeprecatedProvider = deprecated
+		svc.ArkadePub = arkadePub
+		svc.DeprecatedArkade = arkadeDeprecated
 		svc.Signer = &provider.RemoteSigner{Client: cli}
+		svc.ArkadeSigner = &provider.RemoteSigner{Client: arkadeCli}
 		fmt.Printf("  emulator    %s\n", *emulator)
+		fmt.Printf("  arkade emu  %s\n", *arkadeEmulator)
 		fmt.Printf("  provider    %x\n", pub.SerializeCompressed())
 	}
 

@@ -406,7 +406,6 @@ func verifyNonArkdCheckpointSignatures(checkpoints []*psbt.Packet, arkdPubKey *b
 }
 
 type retryConfig struct {
-	MinAttempts  int
 	MaxAttempts  int
 	MaxElapsed   time.Duration
 	InitialDelay time.Duration
@@ -416,7 +415,6 @@ type retryConfig struct {
 }
 
 var finalizeRetryConfig = retryConfig{
-	MinAttempts: 10,
 	// absolute caps, enforced even when the caller passes a context without
 	// deadline, so the signer can never be wedged by an unresponsive arkd
 	MaxAttempts:  15,
@@ -433,12 +431,23 @@ func retryWithBackoff(
 	backoffDelay := cfg.InitialDelay
 	deadline := time.Now().Add(cfg.MaxElapsed)
 	for attempt := 1; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("retry cancelled before attempt %d: %w", attempt, ctx.Err())
+		default:
+		}
+
 		err := op()
 		if err == nil {
 			return nil
 		}
 		if onErr != nil {
 			onErr(attempt, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("retry cancelled after attempt %d: %w", attempt, ctx.Err())
+		default:
 		}
 
 		// absolute bounds, independent of the caller supplied context, so the
@@ -454,16 +463,14 @@ func retryWithBackoff(
 			return fmt.Errorf("retry budget exhausted after attempt %d: %w", attempt, err)
 		}
 
-		// try a minimum number of times before respecting ctx.Done
-		if attempt < cfg.MinAttempts {
-			time.Sleep(delay)
-			continue
-		}
-
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return fmt.Errorf("retry cancelled after attempt %d: %w", attempt, ctx.Err())
-		case <-time.After(delay):
+		case <-timer.C:
 		}
 	}
 }

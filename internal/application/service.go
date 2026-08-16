@@ -199,7 +199,6 @@ func (s *service) GetInfo(ctx context.Context) (*Info, error) {
 }
 
 var arkdConnectRetryConfig = retryConfig{
-	MinAttempts:  0,
 	InitialDelay: 1 * time.Second,
 	MaxDelay:     45 * time.Second,
 	Multiplier:   2.0,

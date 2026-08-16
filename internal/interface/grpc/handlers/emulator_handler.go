@@ -7,6 +7,7 @@ import (
 	"github.com/arkade-os/arkd/pkg/ark-lib/tree"
 	emulatorv1 "github.com/arkade-os/emulator/api-spec/protobuf/gen/emulator/v1"
 	"github.com/arkade-os/emulator/internal/application"
+	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -19,6 +20,12 @@ import (
 // implementation detail. Validation errors stay descriptive so that a
 // legitimate caller can fix its request.
 const internalErrMsg = "internal error"
+
+// The packet format itself permits at most MaxEntryCount script executions.
+// Apply the same ceiling to request collections and transaction maps before
+// iterating or performing cryptographic work so a single bounded-size protobuf
+// cannot amplify into an excessive number of parses or signatures.
+const maxRequestItems = arkade.MaxEntryCount
 
 type handler struct {
 	version string
@@ -57,10 +64,16 @@ func (h *handler) SubmitTx(
 	if len(checkpoints) <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "missing checkpoint txs")
 	}
+	if len(checkpoints) > maxRequestItems {
+		return nil, status.Error(codes.InvalidArgument, "too many checkpoint txs")
+	}
 
 	arkPtx, err := parsePsbt(arkTx)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid ark tx")
+	}
+	if err := validatePacketComplexity(arkPtx); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "ark tx exceeds complexity limit")
 	}
 
 	checkpointPsbt := make([]*psbt.Packet, 0, len(checkpoints))
@@ -68,6 +81,9 @@ func (h *handler) SubmitTx(
 		checkpointPtx, err := parsePsbt(checkpoint)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "invalid checkpoint tx")
+		}
+		if err := validatePacketComplexity(checkpointPtx); err != nil {
+			return nil, status.Error(codes.InvalidArgument, "checkpoint tx exceeds complexity limit")
 		}
 		checkpointPsbt = append(checkpointPsbt, checkpointPtx)
 	}
@@ -116,6 +132,9 @@ func (h *handler) SubmitIntent(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("invalid intent: %v", err))
 	}
+	if err := validatePacketComplexity(&intent.Proof.Packet); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "intent proof exceeds complexity limit")
+	}
 
 	signedIntentProof, err := h.svc.SubmitIntent(ctx, *intent)
 	if err != nil {
@@ -145,10 +164,19 @@ func (h *handler) SubmitFinalization(
 	if signedIntent == nil {
 		return nil, status.Error(codes.InvalidArgument, "missing signed intent")
 	}
+	if len(forfeitTxs) > maxRequestItems {
+		return nil, status.Error(codes.InvalidArgument, "too many forfeit txs")
+	}
+	if len(connectorTree) > maxRequestItems {
+		return nil, status.Error(codes.InvalidArgument, "connector tree exceeds complexity limit")
+	}
 
 	intent, err := parseIntent(signedIntent)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("invalid signed intent: %v", err))
+	}
+	if err := validatePacketComplexity(&intent.Proof.Packet); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "signed intent exceeds complexity limit")
 	}
 
 	if len(commitmentTx) <= 0 {
@@ -159,12 +187,18 @@ func (h *handler) SubmitFinalization(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid commitment tx")
 	}
+	if err := validatePacketComplexity(commitmentPtx); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "commitment tx exceeds complexity limit")
+	}
 
 	forfeitPsbt := make([]*psbt.Packet, 0, len(forfeitTxs))
 	for _, forfeit := range forfeitTxs {
 		forfeitPtx, err := parsePsbt(forfeit)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, "invalid forfeit tx")
+		}
+		if err := validatePacketComplexity(forfeitPtx); err != nil {
+			return nil, status.Error(codes.InvalidArgument, "forfeit tx exceeds complexity limit")
 		}
 		forfeitPsbt = append(forfeitPsbt, forfeitPtx)
 	}
@@ -234,6 +268,9 @@ func (h *handler) SubmitOnchainTx(
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid tx")
 	}
+	if err := validatePacketComplexity(ptx); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "tx exceeds complexity limit")
+	}
 
 	signed, err := h.svc.SubmitOnchainTx(ctx, application.OnchainTx{Tx: ptx})
 	if err != nil {
@@ -248,6 +285,18 @@ func (h *handler) SubmitOnchainTx(
 	}
 
 	return &emulatorv1.SubmitOnchainTxResponse{SignedTx: encoded}, nil
+}
+
+func validatePacketComplexity(ptx *psbt.Packet) error {
+	if ptx == nil || ptx.UnsignedTx == nil {
+		return fmt.Errorf("missing unsigned transaction")
+	}
+	if len(ptx.UnsignedTx.TxIn) > maxRequestItems ||
+		len(ptx.UnsignedTx.TxOut) > maxRequestItems ||
+		len(ptx.Inputs) > maxRequestItems || len(ptx.Outputs) > maxRequestItems {
+		return fmt.Errorf("transaction map exceeds %d items", maxRequestItems)
+	}
+	return nil
 }
 
 func verifyTreeRelatedToCommitment(commitmentPtx *psbt.Packet, txTree *tree.TxTree) error {

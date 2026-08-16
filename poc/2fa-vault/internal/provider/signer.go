@@ -5,10 +5,10 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 
 	"github.com/arkade-os/emulator/pkg/arkade"
-	"github.com/arkade-os/emulator/pkg/client"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -21,10 +21,12 @@ type Signer interface {
 	Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet, error)
 }
 
-// LocalSigner executes the committed DirectP256 OP_SIGHASH script and
-// BIP340-signs locally. Test-only or -unsafe-local-signer. Deployment uses
-// RemoteSigner. The script binds the packet witness to the current Arkade
-// sighash; it does not verify WebAuthn or enforce budget.
+// LocalSigner is the policy-agnostic final-sign primitive. Mutinynet uses it
+// only inside the protected authorizer process, after Service has validated
+// policy and durably reserved allowance; it is never a network service.
+// Regtest tests may also select it explicitly. The script binds the packet
+// witness to the current Arkade sighash; this primitive itself does not verify
+// WebAuthn or enforce budget.
 type LocalSigner struct {
 	Priv *btcec.PrivateKey
 }
@@ -92,11 +94,45 @@ func (s LocalSigner) Sign(_ context.Context, ptx *psbt.Packet) (*psbt.Packet, er
 	return ptx, nil
 }
 
-// RemoteSigner calls the private Emulator SubmitOnchainTx endpoint.
+// RemoteSigner calls the private regtest Emulator SubmitOnchainTx endpoint.
 type RemoteSigner struct {
-	Client        client.TransportClient
+	Client        RemoteTransport
 	ExpectedXOnly []byte
+	expectedMu    sync.RWMutex
 	successes     atomic.Uint64
+}
+
+// RemoteTransport is the regtest-only Emulator method used by RemoteSigner.
+// Keeping it narrow prevents the production authorizer from importing gRPC.
+type RemoteTransport interface {
+	SubmitOnchainTx(context.Context, string) (string, error)
+}
+
+// BindExpectedSigner pins the one tweaked signer key accepted in an Emulator
+// response. It is immutable after first bind.
+func (s *RemoteSigner) BindExpectedSigner(expected []byte) {
+	if s == nil || len(expected) != 32 {
+		return
+	}
+	s.expectedMu.Lock()
+	defer s.expectedMu.Unlock()
+	if len(s.ExpectedXOnly) == 0 {
+		s.ExpectedXOnly = append([]byte(nil), expected...)
+	}
+}
+
+// BindExpectedProvider is retained for the regtest demo compatibility layer.
+func (s *RemoteSigner) BindExpectedProvider(expected []byte) {
+	s.BindExpectedSigner(expected)
+}
+
+func (s *RemoteSigner) expectedProvider() []byte {
+	if s == nil {
+		return nil
+	}
+	s.expectedMu.RLock()
+	defer s.expectedMu.RUnlock()
+	return append([]byte(nil), s.ExpectedXOnly...)
 }
 
 // SuccessfulCalls counts responses that passed exact transaction and pinned
@@ -128,11 +164,17 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 	if isNilInterface(s.Client) {
 		return nil, fmt.Errorf("remote signer missing client")
 	}
-	if len(s.ExpectedXOnly) != 32 {
+	expected := s.expectedProvider()
+	if len(expected) != 32 {
 		return nil, fmt.Errorf("remote signer missing expected provider key")
 	}
 	if ptx == nil || ptx.UnsignedTx == nil || len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
 		return nil, fmt.Errorf("exactly one input required")
+	}
+	for _, sig := range ptx.Inputs[0].TaprootScriptSpendSig {
+		if sig != nil && bytes.Equal(sig.XOnlyPubKey, expected) {
+			return nil, fmt.Errorf("expected emulator signature is already present")
+		}
 	}
 	encoded, err := ptx.B64Encode()
 	if err != nil {
@@ -146,7 +188,7 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 	if err != nil {
 		return nil, err
 	}
-	providerSig, err := extractVerifiedProviderSig(ptx, out, s.ExpectedXOnly)
+	providerSig, err := extractVerifiedSignerSig(ptx, out, expected)
 	if err != nil {
 		return nil, err
 	}

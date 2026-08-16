@@ -570,7 +570,6 @@ func TestVerifyCheckpointSignatures(t *testing.T) {
 
 func TestRetryFinalize(t *testing.T) {
 	originalCfg := finalizeRetryConfig
-	finalizeRetryConfig.MinAttempts = 3
 	finalizeRetryConfig.InitialDelay = 10 * time.Millisecond
 	finalizeRetryConfig.Jitter = 0
 	finalizeRetryConfig.Multiplier = 1
@@ -602,7 +601,7 @@ func TestRetryFinalize(t *testing.T) {
 			{"checkpoint-a", "checkpoint-b"},
 		}, client.finalizePayloads)
 	})
-	t.Run("exhausts minimum retries", func(t *testing.T) {
+	t.Run("cancelled caller is not retried", func(t *testing.T) {
 		client := &mockArkdClient{
 			finalizeErrs: []error{
 				fmt.Errorf("retry 1"),
@@ -621,13 +620,9 @@ func TestRetryFinalize(t *testing.T) {
 			[]string{"checkpoint-a"},
 		)
 		require.ErrorContains(t, err, "context canceled")
-		require.Equal(t, 3, client.finalizeCalls)
-		require.Equal(t, []string{"txid-123", "txid-123", "txid-123"}, client.finalizeTxids)
-		require.Equal(t, [][]string{
-			{"checkpoint-a"},
-			{"checkpoint-a"},
-			{"checkpoint-a"},
-		}, client.finalizePayloads)
+		require.Zero(t, client.finalizeCalls)
+		require.Empty(t, client.finalizeTxids)
+		require.Empty(t, client.finalizePayloads)
 	})
 }
 
@@ -715,7 +710,6 @@ func TestSubmitTxHandlesMalformedArkdCheckpointResponse(t *testing.T) {
 // budget even when the caller supplies a context that never expires.
 func TestRetryWithBackoffIsBounded(t *testing.T) {
 	cfg := retryConfig{
-		MinAttempts:  10,
 		MaxAttempts:  4,
 		MaxElapsed:   time.Second,
 		InitialDelay: time.Millisecond,
@@ -762,6 +756,31 @@ func TestRetryWithBackoffExhaustsElapsedBudget(t *testing.T) {
 	)
 
 	require.ErrorContains(t, err, "retry budget exhausted after attempt 1")
+	require.Equal(t, 1, attempts)
+}
+
+func TestRetryWithBackoffHonorsCancellationDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+
+	err := retryWithBackoff(
+		ctx,
+		retryConfig{
+			MaxAttempts:  15,
+			MaxElapsed:   time.Minute,
+			InitialDelay: time.Minute,
+			MaxDelay:     time.Minute,
+			Multiplier:   1,
+		},
+		func() error {
+			attempts++
+			cancel()
+			return errAlwaysFails
+		},
+		nil,
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, attempts)
 }
 

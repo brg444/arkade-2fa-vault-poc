@@ -1,0 +1,104 @@
+name: arkade-2fa-vault-mutinynet
+
+services:
+  vault-authorizer:
+    build:
+      context: ../..
+      dockerfile: poc/2fa-vault/Dockerfile.mutinynet
+    command:
+      - -addr=0.0.0.0:8788
+      - -db=/app/data/vault.sqlite
+      - -provider-key-file=/run/secrets/vault_provider_key
+    environment:
+      VAULT_NETWORK: mutinynet
+      VAULT_CLIENT_ORIGIN: https://${VAULT_DOMAIN:?set VAULT_DOMAIN}
+      VAULT_RP_ID: ${VAULT_DOMAIN:?set VAULT_DOMAIN}
+      VAULT_OFFLINE_PUB: ${VAULT_OFFLINE_PUB:?set a real independent compressed backup public key}
+      VAULT_OPERATIONAL_CSV_BLOCKS: ${VAULT_OPERATIONAL_CSV_BLOCKS:?set an explicit block delay}
+      VAULT_SAVINGS_CSV_BLOCKS: ${VAULT_SAVINGS_CSV_BLOCKS:?set an explicit longer block delay}
+      VAULT_ESPLORA_URL: ${VAULT_ESPLORA_URL:-https://mempool.mutinynet.arkade.sh/api}
+    secrets:
+      - source: vault_provider_key
+        target: vault_provider_key
+    volumes:
+      - vault-authorizer-data:/app/data
+    networks:
+      vault-boundary:
+      vault-egress:
+        # Compose >=2.33.1: force Internet-bound Esplora traffic onto the
+        # non-internal network instead of relying on attachment order.
+        gw_priority: 1
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8788/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  vault-gateway:
+    build:
+      context: ../..
+      dockerfile: poc/2fa-vault/Dockerfile.gateway
+    environment:
+      VAULT_DOMAIN: ${VAULT_DOMAIN:?set VAULT_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - vault-caddy-data:/caddy-data
+      - vault-caddy-config:/caddy-config
+    networks:
+      vault-edge:
+        gw_priority: 1
+      vault-boundary:
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    # Caddy remains non-root while binding 80/443, with no Linux capabilities.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    pids_limit: 128
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    depends_on:
+      vault-authorizer:
+        condition: service_healthy
+
+networks:
+  vault-edge:
+  vault-egress:
+  vault-boundary:
+    internal: true
+
+volumes:
+  vault-authorizer-data:
+  vault-caddy-data:
+  vault-caddy-config:
+
+secrets:
+  vault_provider_key:
+    file: ${VAULT_PROVIDER_KEY_FILE:?set VAULT_PROVIDER_KEY_FILE to a 32-byte hex secret file}

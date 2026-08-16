@@ -47,6 +47,30 @@ type testServer struct {
 	stub   *stubEmulatorServer
 }
 
+// TestHTTPServerHasResourceTimeouts keeps the public HTTP/gRPC endpoint from
+// silently reverting to net/http's unbounded defaults.  It does not open a
+// listener, so it remains portable in restricted test environments.
+func TestHTTPServerHasResourceTimeouts(t *testing.T) {
+	protocols := new(http.Protocols)
+	server := newHTTPServer("127.0.0.1:0", http.NotFoundHandler(), protocols)
+
+	if server.ReadHeaderTimeout != httpReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", server.ReadHeaderTimeout, httpReadHeaderTimeout)
+	}
+	if server.ReadTimeout != httpReadTimeout {
+		t.Fatalf("ReadTimeout = %s, want %s", server.ReadTimeout, httpReadTimeout)
+	}
+	if server.WriteTimeout != httpWriteTimeout {
+		t.Fatalf("WriteTimeout = %s, want %s", server.WriteTimeout, httpWriteTimeout)
+	}
+	if server.IdleTimeout != httpIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", server.IdleTimeout, httpIdleTimeout)
+	}
+	if server.MaxHeaderBytes != maxHTTPHeaderBytes {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", server.MaxHeaderBytes, maxHTTPHeaderBytes)
+	}
+}
+
 // newTestServer stands up the production server wiring - the same server
 // options, interceptors and router used by newServer - in front of a stub
 // handler.

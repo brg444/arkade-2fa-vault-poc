@@ -15,6 +15,7 @@ import (
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	_ "modernc.org/sqlite"
 )
@@ -165,6 +166,47 @@ func TestPublishRejectsCorruptedAndInvalidStoredPSBT(t *testing.T) {
 	}
 	if rec3.callCount() != 0 {
 		t.Fatal("invalid sig called chain")
+	}
+
+	for _, role := range []string{"hot", "private provider", "public arkade"} {
+		t.Run("missing "+role, func(t *testing.T) {
+			env := newBoundaryEnv(t)
+			chain := &recordingBroadcast{}
+			env.service.Broadcaster = chain
+			challenge := completeCanonical(t, env)
+			stored, ok, err := env.ledger.Completed(context.Background(), fixture.VaultID, challenge)
+			if err != nil || !ok {
+				t.Fatalf("completed: ok=%v err=%v", ok, err)
+			}
+			packet := mustParsePSBT(t, stored)
+			var missing []byte
+			switch role {
+			case "hot":
+				missing = schnorr.SerializePubKey(env.hotPriv.PubKey())
+			case "private provider":
+				missing = schnorr.SerializePubKey(env.service.Operational.TweakedProvider)
+			case "public arkade":
+				missing = schnorr.SerializePubKey(env.service.Operational.TweakedArkade)
+			}
+			kept := packet.Inputs[0].TaprootScriptSpendSig[:0]
+			for _, sig := range packet.Inputs[0].TaprootScriptSpendSig {
+				if !bytes.Equal(sig.XOnlyPubKey, missing) {
+					kept = append(kept, sig)
+				}
+			}
+			packet.Inputs[0].TaprootScriptSpendSig = kept
+			encoded, err := packet.B64Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			overwriteSignedPSBT(t, env.dbPath, challenge, encoded)
+			if _, err := env.service.Publish(context.Background(), hex.EncodeToString(challenge)); err == nil {
+				t.Fatalf("stored completion without %s signature was published", role)
+			}
+			if chain.callCount() != 0 {
+				t.Fatalf("missing %s signature reached the chain", role)
+			}
+		})
 	}
 }
 

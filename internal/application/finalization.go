@@ -350,7 +350,6 @@ func validateForfeitOutputs(
 }
 
 var commitmentTxRetryConfig = retryConfig{
-	MinAttempts:  5,
 	MaxAttempts:  8,
 	InitialDelay: 200 * time.Millisecond,
 	MaxDelay:     2 * time.Second,

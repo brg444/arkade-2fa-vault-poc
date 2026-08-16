@@ -1005,7 +1005,7 @@ func opcodeCheckSequenceVerify(op *opcode, data []byte, vm *Engine) error {
 
 	// Transaction version numbers not high enough to trigger CSV rules must
 	// fail.
-	if uint32(vm.tx.Version) < 2 {
+	if vm.tx.Version < 2 {
 		str := fmt.Sprintf("invalid transaction version: %d",
 			vm.tx.Version)
 		return scriptError(txscript.ErrUnsatisfiedLockTime, str)
@@ -2157,7 +2157,7 @@ func opcodeInspectOutputScriptPubkey(op *opcode, data []byte, vm *Engine) error 
 // opcodeInspectVersion pushes the transaction version onto the stack.
 // Stack transformation: [...] -> [... version]
 func opcodeInspectVersion(op *opcode, data []byte, vm *Engine) error {
-	return vm.dstack.PushBigNum(BigNumFromUint64(uint64(uint32(vm.tx.Version))))
+	return vm.dstack.PushBigNum(BigNumFromInt64(int64(vm.tx.Version)))
 }
 
 // opcodeInspectLocktime pushes the transaction locktime onto the stack.

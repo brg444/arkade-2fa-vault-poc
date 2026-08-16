@@ -55,7 +55,7 @@ cleanup() {
   set +e
   if [ "$started" -eq 1 ]; then
     owned=1
-    for container in emulator arkd arkd-wallet nbxplorer pgnbxplorer vault-provider; do
+    for container in emulator arkade-emulator arkd arkd-wallet nbxplorer pgnbxplorer vault-provider; do
       if run_bounded 10 docker inspect "$container" >/dev/null 2>&1; then
         label="$(run_bounded 10 docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null)"
         if [ "$label" != "$PROJECT" ]; then
@@ -81,7 +81,7 @@ trap 'exit 130' HUP INT TERM
 
 # Fixed container names mean two POC stacks cannot safely coexist. Refuse to
 # touch either a running demo or stale stopped containers from another run.
-for container in emulator arkd arkd-wallet nbxplorer pgnbxplorer vault-provider; do
+for container in emulator arkade-emulator arkd arkd-wallet nbxplorer pgnbxplorer vault-provider; do
   if run_bounded 10 docker inspect "$container" >/dev/null 2>&1; then
     echo "existing POC container '$container' found; stop/remove that stack before live acceptance" >&2
     exit 1

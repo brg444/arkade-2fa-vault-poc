@@ -226,7 +226,7 @@ func (c *Client) GetBlockCount(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// GetBlockchainInfo returns the node's chain name (regtest, main, test, signet).
+// GetBlockchainInfo returns the node's chain name for the regtest guard.
 func (c *Client) GetBlockchainInfo(ctx context.Context) (string, error) {
 	raw, err := c.call(ctx, "getblockchaininfo")
 	if err != nil {
@@ -241,8 +241,8 @@ func (c *Client) GetBlockchainInfo(ctx context.Context) (string, error) {
 	return out.Chain, nil
 }
 
-// RequireRegtest contacts the node with the configured credentials and
-// requires chain to be exactly "regtest".
+// RequireRegtest contacts the demo node with configured credentials and fails
+// unless it reports the one supported chain.
 func (c *Client) RequireRegtest(ctx context.Context) error {
 	chain, err := c.GetBlockchainInfo(ctx)
 	if err != nil {

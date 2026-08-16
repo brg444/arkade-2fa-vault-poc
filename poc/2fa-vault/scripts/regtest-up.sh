@@ -85,7 +85,7 @@ else
   fi
 fi
 
-# Core 30+ only. The ~117-byte packet exceeds the pre-v30 83-byte
+# Core 30+ only. The current 274-byte packet exceeds the pre-v30 83-byte
 # datacarrier default. Do not fake a Core extra-args override; Nigiri
 # does not consume one. testmempoolaccept remains the publish policy gate.
 require_core30() {
@@ -98,12 +98,12 @@ require_core30() {
   ver="$(printf '%s\n' "$info" | tr ',' '\n' | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
   case "$ver" in
     ''|*[!0-9]*)
-      echo "Bitcoin Core version is missing or not numeric (need >= 300000 / Core 30+). The ~117-byte Arkade packet exceeds the pre-v30 83-byte datacarrier default, so current Nigiri/Core 30+ is required. testmempoolaccept remains the authoritative custom-policy gate at publish." >&2
+      echo "Bitcoin Core version is missing or not numeric (need >= 300000 / Core 30+). The current 274-byte Arkade packet exceeds the pre-v30 83-byte datacarrier default, so current Nigiri/Core 30+ is required. testmempoolaccept remains the authoritative custom-policy gate at publish." >&2
       exit 1
       ;;
   esac
   if [ "$ver" -lt 300000 ]; then
-    echo "Bitcoin Core version $ver is too old (need >= 300000 / Core 30+). The ~117-byte Arkade packet exceeds the pre-v30 83-byte datacarrier default, so current Nigiri/Core 30+ is required. testmempoolaccept remains the authoritative custom-policy gate at publish." >&2
+    echo "Bitcoin Core version $ver is too old (need >= 300000 / Core 30+). The current 274-byte Arkade packet exceeds the pre-v30 83-byte datacarrier default, so current Nigiri/Core 30+ is required. testmempoolaccept remains the authoritative custom-policy gate at publish." >&2
     exit 1
   fi
 }
@@ -112,7 +112,7 @@ require_core30
 echo "validating merged compose"
 $COMPOSE config >/dev/null
 
-echo "starting private emulator + vault-provider"
+echo "starting two private regtest emulators + vault-provider"
 $COMPOSE up -d --build
 
 # arkd v0.9.13 exposes its admin service before a fresh operator wallet is
@@ -132,39 +132,41 @@ while ! curl -sf "$HEALTH_URL" >/dev/null 2>&1; do
   sleep 2
 done
 
-# Runtime topology: no host port, not on nigiri, exactly one attached
-# network, and that network is Internal=true.
-if ! docker inspect emulator >/dev/null 2>&1; then
-  echo "emulator container not found" >&2
-  $COMPOSE logs --tail=200 >&2 || true
-  exit 1
-fi
-if docker port emulator 2>/dev/null | grep -q .; then
-  echo "emulator publishes a host port" >&2
-  docker port emulator >&2 || true
-  exit 1
-fi
-ports="$(docker inspect -f '{{json .NetworkSettings.Ports}}' emulator)"
-if printf '%s' "$ports" | grep -Eq '":\[\{'; then
-  echo "emulator has a host port mapping" >&2
-  echo "$ports" >&2
-  exit 1
-fi
+# Runtime topology for both independent cosigners: no host port, not on
+# nigiri, exactly one attached network, and that network is Internal=true.
+for signer_container in emulator arkade-emulator; do
+  if ! docker inspect "$signer_container" >/dev/null 2>&1; then
+    echo "$signer_container container not found" >&2
+    $COMPOSE logs --tail=200 >&2 || true
+    exit 1
+  fi
+  if docker port "$signer_container" 2>/dev/null | grep -q .; then
+    echo "$signer_container publishes a host port" >&2
+    docker port "$signer_container" >&2 || true
+    exit 1
+  fi
+  ports="$(docker inspect -f '{{json .NetworkSettings.Ports}}' "$signer_container")"
+  if printf '%s' "$ports" | grep -Eq '":\[\{'; then
+    echo "$signer_container has a host port mapping" >&2
+    echo "$ports" >&2
+    exit 1
+  fi
 
-nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' emulator)"
-set -- $nets
-if [ "$#" -ne 1 ]; then
-  echo "emulator must have exactly one attached network: $nets" >&2
-  exit 1
-fi
-net="$1"
-if [ "$net" = nigiri ] || [ "$net" = default ]; then
-  echo "emulator is attached to the shared nigiri network: $net" >&2
-  exit 1
-fi
-if [ "$(docker network inspect -f '{{.Internal}}' "$net")" != true ]; then
-  echo "emulator network $net is not Internal=true" >&2
-  exit 1
-fi
+  nets="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$signer_container")"
+  set -- $nets
+  if [ "$#" -ne 1 ]; then
+    echo "$signer_container must have exactly one attached network: $nets" >&2
+    exit 1
+  fi
+  net="$1"
+  if [ "$net" = nigiri ] || [ "$net" = default ]; then
+    echo "$signer_container is attached to the shared nigiri network: $net" >&2
+    exit 1
+  fi
+  if [ "$(docker network inspect -f '{{.Internal}}' "$net")" != true ]; then
+    echo "$signer_container network $net is not Internal=true" >&2
+    exit 1
+  fi
+done
 
 echo "http://localhost:8787"

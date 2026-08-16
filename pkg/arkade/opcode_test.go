@@ -4523,6 +4523,15 @@ func checkSequenceVerifySpec() *opcodeSpec {
 				expectedError: txscript.ErrUnsatisfiedLockTime,
 			},
 			{
+				name:       "negative_transaction_version",
+				inputStack: [][]byte{scriptNum(50).Bytes()},
+				setupWorld: func(w *opcodeWorld) {
+					w.tx.Version = -1
+					w.tx.TxIn[0].Sequence = 100
+				},
+				expectedError: txscript.ErrUnsatisfiedLockTime,
+			},
+			{
 				name:       "tx_sequence_disabled",
 				inputStack: [][]byte{scriptNum(50).Bytes()},
 				setupWorld: func(w *opcodeWorld) {
@@ -4902,7 +4911,14 @@ func inspectVersionSpec() *opcodeSpec {
 	return &opcodeSpec{
 		opcode:          OP_INSPECTVERSION,
 		checkProperties: inspectMetaPropertyChecker(OP_INSPECTVERSION),
-		validVectors:    []opcodeVector{{name: "push", expectedStack: [][]byte{{2}}}},
+		validVectors: []opcodeVector{
+			{name: "push", expectedStack: [][]byte{{2}}},
+			{
+				name:          "negative remains signed",
+				setupWorld:    func(w *opcodeWorld) { w.tx.Version = -1 },
+				expectedStack: [][]byte{scriptNum(-1).Bytes()},
+			},
+		},
 	}
 }
 
@@ -5184,7 +5200,7 @@ func inspectMetaPropertyChecker(op byte) opcodePropertyChecker {
 		top := c.after.GetStack()[afterDepth-1]
 		switch op {
 		case OP_INSPECTVERSION:
-			want, err := BigNumFromUint64(uint64(uint32(c.before.tx.Version))).Bytes()
+			want, err := BigNumFromInt64(int64(c.before.tx.Version)).Bytes()
 			require.NoError(t, err)
 			require.Equal(t, want, top)
 		case OP_INSPECTLOCKTIME:

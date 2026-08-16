@@ -22,6 +22,36 @@
 # cmd/demo harness keys and any other local hex key material
 *.hex
 
+# Browser-captured WebAuthn/Chrome evidence is local and must not enter the
+# Docker daemon or build cache through the broad authorizer build context.
+poc/2fa-vault/testdata/webauthn_get.json
+poc/2fa-vault/testdata/chrome-*
+poc/2fa-vault/testdata/*.capture*
+
+# Deployment secrets and local environment files. Keep all real secret files
+# outside the repository as well; these patterns are defense in depth against
+# accidentally adding one to a Docker build context.
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+!*.key.example
+*.pem
+!*.pem.example
+*.p12
+*.pfx
+*.secret
+!*.secret.example
+*.secrets
+!*.secrets.example
+provider-key
+provider_key
+enrollment-token
+enrollment_token
+secrets/
+**/secrets/
+
 # Local data directories written by demo/provider outside the image
 /data
 data/

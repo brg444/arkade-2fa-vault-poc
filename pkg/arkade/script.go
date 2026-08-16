@@ -9,6 +9,7 @@ import (
 	scriptlib "github.com/arkade-os/arkd/pkg/ark-lib/script"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -23,6 +24,8 @@ type ArkadeScript struct {
 	pubkey          *btcec.PublicKey
 	spendingTapLeaf txscript.TapLeaf
 	closurePubkeys  []*btcec.PublicKey
+	packetBound     bool
+	packetVin       uint16
 }
 
 type ExecuteOption func(*Engine)
@@ -189,16 +192,32 @@ func ReadArkadeScript(ptx *psbt.Packet, signerPublicKey *btcec.PublicKey, entry 
 			spendingTapscript.LeafVersion, spendingTapscript.Script,
 		),
 		closurePubkeys: pubkeys,
+		packetBound:    true,
+		packetVin:      entry.Vin,
 	}, nil
 }
 
 func (s *ArkadeScript) Execute(spendingTx *wire.MsgTx, prevOutFetcher ArkPrevOutFetcher, inputIndex int, opts ...ExecuteOption) error {
+	if spendingTx == nil {
+		return fmt.Errorf("spending transaction is required")
+	}
+	if inputIndex < 0 || inputIndex >= len(spendingTx.TxIn) {
+		return fmt.Errorf("input index %d out of range", inputIndex)
+	}
+	if prevOutFetcher == nil {
+		return fmt.Errorf("prevout fetcher is required")
+	}
+
 	// fail closed when the fetcher misses: the sighash midstates commit to every
 	// input's amount and script, so a miss is either signed as a fabricated zero
 	// value the introspection opcodes also see, or panics while hashing them
 	for i, txIn := range spendingTx.TxIn {
-		if prevOutFetcher.FetchPrevOutput(txIn.PreviousOutPoint) == nil {
+		prevOut := prevOutFetcher.FetchPrevOutput(txIn.PreviousOutPoint)
+		if prevOut == nil {
 			return fmt.Errorf("no prevout found for input %d", i)
+		}
+		if prevOut.Value < 0 || prevOut.Value > btcutil.MaxSatoshi {
+			return fmt.Errorf("prevout value out of range for input %d", i)
 		}
 	}
 
@@ -240,6 +259,13 @@ func (s *ArkadeScript) Execute(spendingTx *wire.MsgTx, prevOutFetcher ArkPrevOut
 	if err != nil {
 		return fmt.Errorf("failed to parse emulator packet: %w", err)
 	}
+	if s.packetBound {
+		if int(s.packetVin) != inputIndex || !packetContainsExactEntry(
+			packet, s.packetVin, s.script, s.witness,
+		) {
+			return fmt.Errorf("arkade script does not match transaction packet entry for input %d", inputIndex)
+		}
+	}
 	if packet != nil {
 		engine.SetEmulatorPacket(packet)
 	}
@@ -253,6 +279,28 @@ func (s *ArkadeScript) Execute(spendingTx *wire.MsgTx, prevOutFetcher ArkPrevOut
 	}
 
 	return nil
+}
+
+func packetContainsExactEntry(
+	packet EmulatorPacket, vin uint16, script []byte, witness wire.TxWitness,
+) bool {
+	for _, entry := range packet {
+		if entry.Vin != vin || !bytes.Equal(entry.Script, script) ||
+			len(entry.Witness) != len(witness) {
+			continue
+		}
+		matched := true
+		for i := range witness {
+			if !bytes.Equal(entry.Witness[i], witness[i]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ArkadeScript) Hash() []byte {

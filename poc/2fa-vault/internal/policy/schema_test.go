@@ -29,7 +29,56 @@ CREATE TABLE credential (
 	_ = db.Close()
 
 	_, err = OpenLedger(path, nil)
-	if err == nil || !strings.Contains(err.Error(), "stale POC database") {
+	if err == nil || !strings.Contains(err.Error(), "incompatible vault database") || !strings.Contains(err.Error(), "do not delete authoritative deployment data") {
 		t.Fatalf("want stale schema error, got %v", err)
+	}
+}
+
+func TestOpenLedgerRejectsMalformedIssuanceSchemaAfterPartialCreate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "malformed-issuance.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issuance (vault_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// The first open may create credential before CREATE TABLE issuance fails.
+	if led, err := OpenLedger(path, nil); err == nil {
+		_ = led.Close()
+		t.Fatal("malformed preexisting issuance table accepted")
+	}
+	// A restart must inspect issuance itself rather than accepting its name.
+	_, err = OpenLedger(path, nil)
+	if err == nil || !strings.Contains(err.Error(), "issuance columns") || !strings.Contains(err.Error(), "do not delete authoritative deployment data") {
+		t.Fatalf("malformed issuance schema was not rejected on restart: %v", err)
+	}
+}
+
+func TestOpenLedgerRejectsIssuanceColumnsWithoutStagedStateConstraints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing-staged-constraint.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := strings.Replace(
+		createPOCSchema,
+		"state TEXT NOT NULL CHECK (state IN ('reserved', 'provider_signed', 'completed'))",
+		"state TEXT NOT NULL",
+		1,
+	)
+	if broken == createPOCSchema {
+		t.Fatal("test failed to remove staged-state constraint")
+	}
+	if _, err := db.Exec(broken); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_, err = OpenLedger(path, nil)
+	if err == nil || !strings.Contains(err.Error(), "issuance constraints") || !strings.Contains(err.Error(), "do not delete authoritative deployment data") {
+		t.Fatalf("same-column issuance table without state constraint was accepted: %v", err)
 	}
 }

@@ -26,15 +26,17 @@ const (
 // Record is the single canonical policy used to derive every leaf, address
 // and descriptor for one vault.
 type Record struct {
-	Kind           Kind
-	Hot            *btcec.PublicKey
-	Offline        *btcec.PublicKey
-	ProviderBase   *btcec.PublicKey
-	DirectP256     []byte
-	CSV            arklib.RelativeLocktime
-	AuthScript     []byte
-	AuthScriptHash []byte
-	Network        string
+	Kind                Kind
+	Hot                 *btcec.PublicKey
+	Offline             *btcec.PublicKey
+	ProviderBase        *btcec.PublicKey
+	ArkadeBase          *btcec.PublicKey
+	DirectP256          []byte
+	CSV                 arklib.RelativeLocktime
+	AuthorizationPolicy AuthorizationPolicy
+	AuthScript          []byte
+	AuthScriptHash      []byte
+	Network             string
 }
 
 // Built is a fully derived vault tree.
@@ -46,6 +48,7 @@ type Built struct {
 	Address         string
 	Leaves          Leaves
 	TweakedProvider *btcec.PublicKey
+	TweakedArkade   *btcec.PublicKey
 }
 
 // Leaves holds decoded leaf scripts and control blocks.
@@ -64,36 +67,82 @@ type Leaf struct {
 	Hash         []byte
 }
 
-// NewOperational builds the Operational tree: hot+provider, hot+offline, CSV+offline.
-func NewOperational(hot, offline, providerBase *btcec.PublicKey, directP256 []byte) (*Built, error) {
-	auth, err := AuthorizationScript(directP256)
+// OperationalKeys are the independent key roles committed by one Operational
+// descriptor. DirectP256 gates both tweaked signers through the shared Arkade
+// authorization script; it is not itself a tapscript secp256k1 signer.
+type OperationalKeys struct {
+	Hot          *btcec.PublicKey
+	Offline      *btcec.PublicKey
+	ProviderBase *btcec.PublicKey
+	ArkadeBase   *btcec.PublicKey
+	DirectP256   []byte
+}
+
+// NewOperational builds the Operational tree: hot+both independently tweaked
+// cosigners, hot+offline, and CSV+offline.
+func NewOperational(keys OperationalKeys) (*Built, error) {
+	return NewOperationalForNetwork(keys, fixture.Network)
+}
+
+// NewOperationalForNetwork builds the same code-pinned Operational template
+// using the address encoding of an explicitly supported deployment network.
+func NewOperationalForNetwork(keys OperationalKeys, network string) (*Built, error) {
+	return NewOperationalWithPolicy(keys, network, fixture.OperationalCSV(), fixtureAuthorizationPolicy())
+}
+
+// NewOperationalWithPolicy makes the deployment CSV delay and every
+// transaction-local script limit explicit.
+func NewOperationalWithPolicy(keys OperationalKeys, network string, csv arklib.RelativeLocktime, policy AuthorizationPolicy) (*Built, error) {
+	auth, err := AuthorizationScript(keys.DirectP256, policy)
 	if err != nil {
 		return nil, err
 	}
 	rec := Record{
-		Kind:           Operational,
-		Hot:            hot,
-		Offline:        offline,
-		ProviderBase:   providerBase,
-		DirectP256:     append([]byte(nil), directP256...),
-		CSV:            fixture.OperationalCSV(),
-		AuthScript:     auth,
-		AuthScriptHash: arkade.ArkadeScriptHash(auth),
-		Network:        fixture.Network,
+		Kind:                Operational,
+		Hot:                 keys.Hot,
+		Offline:             keys.Offline,
+		ProviderBase:        keys.ProviderBase,
+		ArkadeBase:          keys.ArkadeBase,
+		DirectP256:          append([]byte(nil), keys.DirectP256...),
+		CSV:                 csv,
+		AuthorizationPolicy: policy,
+		AuthScript:          auth,
+		AuthScriptHash:      arkade.ArkadeScriptHash(auth),
+		Network:             network,
 	}
 	return NewFromRecord(rec)
 }
 
-// NewSavings builds the Savings tree: hot+offline, long CSV+offline. No provider.
-// forbidden is the Operational provider base key and/or tweaked provider key
-// that must not appear in any Savings leaf.
+func fixtureAuthorizationPolicy() AuthorizationPolicy {
+	return AuthorizationPolicy{
+		RecipientDustSats:      fixture.DustSats,
+		RecipientCapSats:       fixture.TxRecipientCapSats,
+		AbsoluteFeeCeilingSats: fixture.AbsoluteFeeCeiling,
+		FeerateCeilingSatPerV:  fixture.FeerateCeilingSatPerV,
+	}
+}
+
+// NewSavings builds the Savings tree: hot+offline, long CSV+offline. Neither
+// collaborative cosigner appears. forbidden contains the private Provider and
+// public Arkade base/tweaked identities that must not appear in any Savings
+// leaf.
 func NewSavings(hot, offline *btcec.PublicKey, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsForNetwork(hot, offline, fixture.Network, forbidden...)
+}
+
+// NewSavingsForNetwork builds the owner-only Savings template for network.
+func NewSavingsForNetwork(hot, offline *btcec.PublicKey, network string, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsWithPolicy(hot, offline, network, fixture.SavingsCSV(), forbidden...)
+}
+
+// NewSavingsWithPolicy makes the deployment CSV delay explicit.
+func NewSavingsWithPolicy(hot, offline *btcec.PublicKey, network string, csv arklib.RelativeLocktime, forbidden ...*btcec.PublicKey) (*Built, error) {
 	rec := Record{
 		Kind:    Savings,
 		Hot:     hot,
 		Offline: offline,
-		CSV:     fixture.SavingsCSV(),
-		Network: fixture.Network,
+		CSV:     csv,
+		Network: network,
 	}
 	b, err := NewFromRecord(rec)
 	if err != nil {
@@ -116,6 +165,9 @@ func NewFromRecord(rec Record) (*Built, error) {
 	if rec.Hot == nil || rec.Offline == nil {
 		return nil, fmt.Errorf("hot and offline keys required")
 	}
+	if err := requireIndependentXOnly(rec.Hot, rec.Offline); err != nil {
+		return nil, err
+	}
 	if rec.CSV.Value == 0 {
 		return nil, fmt.Errorf("csv required")
 	}
@@ -127,7 +179,13 @@ func NewFromRecord(rec Record) (*Built, error) {
 		if rec.ProviderBase == nil {
 			return nil, fmt.Errorf("provider base required")
 		}
-		auth, err := AuthorizationScript(rec.DirectP256)
+		if rec.ArkadeBase == nil {
+			return nil, fmt.Errorf("arkade emulator base required")
+		}
+		if err := requireIndependentXOnly(rec.ProviderBase, rec.ArkadeBase, rec.Hot, rec.Offline); err != nil {
+			return nil, err
+		}
+		auth, err := AuthorizationScript(rec.DirectP256, rec.AuthorizationPolicy)
 		if err != nil {
 			return nil, err
 		}
@@ -159,11 +217,18 @@ func build(rec Record) (*Built, error) {
 	}
 
 	var closures []arkscript.Closure
-	var tweaked *btcec.PublicKey
+	var tweakedProvider, tweakedArkade *btcec.PublicKey
 	switch rec.Kind {
 	case Operational:
-		tweaked = arkade.ComputeArkadeScriptPublicKey(rec.ProviderBase, rec.AuthScriptHash)
-		collab := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.Hot, tweaked}}
+		tweakedProvider = arkade.ComputeArkadeScriptPublicKey(rec.ProviderBase, rec.AuthScriptHash)
+		tweakedArkade = arkade.ComputeArkadeScriptPublicKey(rec.ArkadeBase, rec.AuthScriptHash)
+		if err := requireIndependentXOnly(
+			rec.Hot, rec.Offline, rec.ProviderBase, rec.ArkadeBase,
+			tweakedProvider, tweakedArkade,
+		); err != nil {
+			return nil, err
+		}
+		collab := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.Hot, tweakedProvider, tweakedArkade}}
 		closures = []arkscript.Closure{collab, owner, recovery}
 	case Savings:
 		closures = []arkscript.Closure{owner, recovery}
@@ -239,8 +304,27 @@ func build(rec Record) (*Built, error) {
 		PkScript:        pkScript,
 		Address:         addr.EncodeAddress(),
 		Leaves:          leaves,
-		TweakedProvider: tweaked,
+		TweakedProvider: tweakedProvider,
+		TweakedArkade:   tweakedArkade,
 	}, nil
+}
+
+// requireIndependentXOnly compares the identities Bitcoin Taproot actually
+// commits to. Opposite compressed-key parities are the same x-only role and
+// must not collapse any pair, including provider base versus tweaked provider.
+func requireIndependentXOnly(keys ...*btcec.PublicKey) error {
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if sameXOnlyKey(keys[i], keys[j]) {
+				return fmt.Errorf("secp256k1 key roles must be independent by x-only identity")
+			}
+		}
+	}
+	return nil
+}
+
+func sameXOnlyKey(a, b *btcec.PublicKey) bool {
+	return a != nil && b != nil && bytes.Equal(schnorr.SerializePubKey(a), schnorr.SerializePubKey(b))
 }
 
 // AssertNoProvider fails if any forbidden key appears in a serialized leaf
@@ -293,6 +377,15 @@ func (b *Built) ContainsTweakedProvider() bool {
 	return b.ContainsProvider(b.TweakedProvider)
 }
 
+// ContainsTweakedArkade reports whether the expected public Arkade
+// cosigner's tweaked key actually appears in a leaf.
+func (b *Built) ContainsTweakedArkade() bool {
+	if b == nil {
+		return false
+	}
+	return b.ContainsProvider(b.TweakedArkade)
+}
+
 func leafContainsKey(leaf *Leaf, want []byte) bool {
 	if leaf == nil || len(want) == 0 {
 		return false
@@ -342,6 +435,10 @@ func networkParams(name string) (*chaincfg.Params, error) {
 	switch name {
 	case "", fixture.Network, chaincfg.RegressionNetParams.Name:
 		return &chaincfg.RegressionNetParams, nil
+	case "mutinynet":
+		// Use ark-lib's pinned custom challenge/block interval rather than the
+		// generic signet params. Address prefixes remain standard signet/testnet.
+		return &arklib.MutinyNetSigNetParams, nil
 	default:
 		return nil, fmt.Errorf("unsupported network %q", name)
 	}

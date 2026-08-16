@@ -30,6 +30,7 @@ func newEnv(t *testing.T) *env {
 	hot, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
 	prov, _ := btcec.NewPrivateKey()
+	arkadeKey, _ := btcec.NewPrivateKey()
 	p256, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +49,11 @@ func newEnv(t *testing.T) *env {
 		Hot:         hot.PubKey(),
 		Offline:     offline.PubKey(),
 		ProviderPub: prov.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: prov},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 	credID := []byte{0x11}
 	if err := svc.Register(RegisterRequest{
@@ -179,7 +184,10 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 		t.Fatal("prf payload accepted")
 	}
 
-	if err := e.svc.Savings.AssertNoProvider(e.svc.ProviderPub, e.svc.Operational.TweakedProvider); err != nil {
+	if err := e.svc.Savings.AssertNoProvider(
+		e.svc.ProviderPub, e.svc.Operational.TweakedProvider,
+		e.svc.ArkadePub, e.svc.Operational.TweakedArkade,
+	); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -190,6 +198,10 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	prov, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	arkadeKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +222,11 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 		Ledger:      led,
 		Offline:     offline.PubKey(),
 		ProviderPub: prov.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: prov},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 	same := hex.EncodeToString(webauthn.CompressedP256(p256))
 	if err := svc.Register(RegisterRequest{
@@ -236,6 +252,10 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p256, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +273,11 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 		Ledger:      led,
 		Offline:     offline.PubKey(),
 		ProviderPub: prov.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: prov},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 	if err := svc.Register(RegisterRequest{
 		CredentialID: hex.EncodeToString([]byte{0x22}),

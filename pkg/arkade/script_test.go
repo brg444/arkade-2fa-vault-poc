@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	scriptlib "github.com/arkade-os/arkd/pkg/ark-lib/script"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
@@ -470,6 +472,77 @@ func TestArkadeScriptExecuteRejectsMissingPrevout(t *testing.T) {
 	err := script.Execute(tx, prevOutFetcher, 0)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no prevout")
+}
+
+func TestArkadeScriptExecuteRejectsOutOfRangePrevoutValue(t *testing.T) {
+	t.Parallel()
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x09}, Index: 0}
+	tx := &wire.MsgTx{
+		Version: 2,
+		TxIn: []*wire.TxIn{{
+			PreviousOutPoint: outpoint,
+			Sequence:         wire.MaxTxInSequenceNum,
+		}},
+		TxOut: []*wire.TxOut{{Value: 1, PkScript: []byte{OP_TRUE}}},
+	}
+	script := &ArkadeScript{
+		script:          []byte{OP_TRUE},
+		spendingTapLeaf: txscript.NewBaseTapLeaf([]byte{OP_TRUE}),
+	}
+
+	for _, value := range []int64{-1, btcutil.MaxSatoshi + 1} {
+		prevOutFetcher := newTestArkPrevOutFetcher(
+			txscript.NewMultiPrevOutFetcher(map[wire.OutPoint]*wire.TxOut{
+				outpoint: {Value: value, PkScript: []byte{OP_TRUE}},
+			}), nil, nil,
+		)
+
+		err := script.Execute(tx, prevOutFetcher, 0)
+		require.ErrorContains(t, err, "prevout value out of range")
+	}
+}
+
+func TestPacketBoundArkadeScriptRejectsEntrySubstitution(t *testing.T) {
+	t.Parallel()
+
+	outpoint := wire.OutPoint{Hash: chainhash.Hash{0x0a}, Index: 0}
+	packet, err := NewPacket(EmulatorEntry{Vin: 0, Script: []byte{OP_TRUE}})
+	require.NoError(t, err)
+	packetOutput, err := extension.Extension{packet}.TxOut()
+	require.NoError(t, err)
+	tx := &wire.MsgTx{
+		Version: 2,
+		TxIn: []*wire.TxIn{{
+			PreviousOutPoint: outpoint,
+			Sequence:         wire.MaxTxInSequenceNum,
+		}},
+		TxOut: []*wire.TxOut{packetOutput},
+	}
+	prevOutFetcher := newTestArkPrevOutFetcher(
+		txscript.NewMultiPrevOutFetcher(map[wire.OutPoint]*wire.TxOut{
+			outpoint: {Value: 1_000, PkScript: []byte{OP_TRUE}},
+		}), nil, nil,
+	)
+
+	exact := &ArkadeScript{
+		script:          []byte{OP_TRUE},
+		spendingTapLeaf: txscript.NewBaseTapLeaf([]byte{OP_TRUE}),
+		packetBound:     true,
+		packetVin:       0,
+	}
+	require.NoError(t, exact.Execute(tx, prevOutFetcher, 0))
+
+	// This alternate program also ends truthy, so only packet provenance—not
+	// script result—can reject substituting it for the committed entry.
+	substituted := &ArkadeScript{
+		script:          []byte{OP_1, OP_DROP, OP_TRUE},
+		spendingTapLeaf: txscript.NewBaseTapLeaf([]byte{OP_TRUE}),
+		packetBound:     true,
+		packetVin:       0,
+	}
+	err = substituted.Execute(tx, prevOutFetcher, 0)
+	require.ErrorContains(t, err, "does not match transaction packet entry")
 }
 
 // TestVerifyTaprootLeafCommitment covers the binding between a taproot leaf

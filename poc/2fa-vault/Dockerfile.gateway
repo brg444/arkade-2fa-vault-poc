@@ -1,0 +1,29 @@
+FROM caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+
+RUN addgroup -S -g 10002 gateway \
+    && adduser -S -D -H -u 10002 -G gateway gateway \
+    && install -d -o gateway -g gateway -m 0700 /caddy-data /caddy-config \
+    && install -d -o gateway -g gateway -m 0755 /srv
+
+COPY --chown=10002:10002 poc/2fa-vault/deploy/mutinynet/Caddyfile /etc/caddy/Caddyfile
+COPY --chown=10002:10002 \
+    poc/2fa-vault/web/index.html \
+    poc/2fa-vault/web/app.css \
+    poc/2fa-vault/web/app.js \
+    poc/2fa-vault/web/authorizeretry.js \
+    poc/2fa-vault/web/directauth.js \
+    poc/2fa-vault/web/enrollstore.js \
+    poc/2fa-vault/web/psbtcheck.js \
+    poc/2fa-vault/web/webauthnkey.js \
+    /srv/
+COPY --chown=10002:10002 \
+    poc/2fa-vault/web/vendor/LICENSE.* \
+    poc/2fa-vault/web/vendor/NOTICE.md \
+    poc/2fa-vault/web/vendor/btc-signer.js \
+    poc/2fa-vault/web/vendor/p256.js \
+    poc/2fa-vault/web/vendor/secp256k1.js \
+    /srv/vendor/
+
+ENV XDG_DATA_HOME=/caddy-data
+ENV XDG_CONFIG_HOME=/caddy-config
+USER 10002:10002

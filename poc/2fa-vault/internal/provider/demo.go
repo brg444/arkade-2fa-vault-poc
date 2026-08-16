@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
+	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/regtest"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -42,6 +42,9 @@ type Demo struct {
 func NewDemo(svc *Service, chain Chain) (*Demo, error) {
 	if svc == nil || chain == nil {
 		return nil, fmt.Errorf("demo requires service and chain")
+	}
+	if svc.runtimeConfig().Network != deployment.NetworkRegtest {
+		return nil, fmt.Errorf("demo funding and mining are regtest-only")
 	}
 	signer, err := requireRemoteSigner(svc.Signer)
 	if err != nil {
@@ -118,7 +121,7 @@ func (d *Demo) info() demoInfo {
 	}
 	return demoInfo{
 		Demo:                  true,
-		Network:               fixture.Network,
+		Network:               d.svc.runtimeConfig().Network,
 		SignerMode:            mode,
 		RemoteSignerSuccesses: d.signer.SuccessfulCalls(),
 		Note:                  "demo control is fail-closed unless VAULT_DEMO=1; fund/mine only; RemoteSigner only",

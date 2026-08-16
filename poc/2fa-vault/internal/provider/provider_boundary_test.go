@@ -43,10 +43,12 @@ type boundaryEnv struct {
 	hotPriv        *btcec.PrivateKey
 	offlinePriv    *btcec.PrivateKey
 	providerPriv   *btcec.PrivateKey
+	arkadePriv     *btcec.PrivateKey
 	credentialID   []byte
 	passkeyPriv    *ecdsa.PrivateKey
 	directPriv     *ecdsa.PrivateKey
 	countingSigner *boundaryCountingSigner
+	arkadeSigner   *boundaryCountingSigner
 }
 
 type boundaryCountingSigner struct {
@@ -127,6 +129,10 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	type candidate struct {
 		id      []byte
@@ -159,7 +165,11 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 				Ledger:      ledgers[i],
 				Offline:     offline.PubKey(),
 				ProviderPub: providerKey.PubKey(),
+				ArkadePub:   arkadeKey.PubKey(),
 				Signer:      LocalSigner{Priv: providerKey},
+				ArkadeSigner: LocalSigner{
+					Priv: arkadeKey,
+				},
 			},
 		}
 	}
@@ -228,7 +238,11 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 		Ledger:      restartLedger,
 		Offline:     offline.PubKey(),
 		ProviderPub: providerKey.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: providerKey},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 	if err := restarted.LoadVaults(); err != nil {
 		t.Fatalf("load persisted vaults: %v", err)
@@ -264,6 +278,10 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	passkey, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +294,11 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 		Ledger:      ledger,
 		Offline:     offline.PubKey(),
 		ProviderPub: providerKey.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: providerKey},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 
 	const readers = 8
@@ -346,6 +368,10 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadePriv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	passkeyPriv, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -369,12 +395,17 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 	counting := &boundaryCountingSigner{
 		delegate: LocalSigner{Priv: providerPriv},
 	}
+	arkadeCounting := &boundaryCountingSigner{
+		delegate: LocalSigner{Priv: arkadePriv},
+	}
 	service := &Service{
-		Ledger:      ledger,
-		Offline:     offlinePriv.PubKey(),
-		ProviderPub: providerPriv.PubKey(),
-		Signer:      counting,
-		SignTimeout: 250 * time.Millisecond,
+		Ledger:       ledger,
+		Offline:      offlinePriv.PubKey(),
+		ProviderPub:  providerPriv.PubKey(),
+		ArkadePub:    arkadePriv.PubKey(),
+		Signer:       counting,
+		ArkadeSigner: arkadeCounting,
+		SignTimeout:  250 * time.Millisecond,
 	}
 	credentialID := []byte("auditable-poc-credential")
 	if err := service.Register(RegisterRequest{
@@ -393,10 +424,12 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 		hotPriv:        hotPriv,
 		offlinePriv:    offlinePriv,
 		providerPriv:   providerPriv,
+		arkadePriv:     arkadePriv,
 		credentialID:   credentialID,
 		passkeyPriv:    passkeyPriv,
 		directPriv:     directPriv,
 		countingSigner: counting,
+		arkadeSigner:   arkadeCounting,
 	}
 }
 
@@ -575,13 +608,21 @@ func TestProviderBoundaryHappyPathAndExactRetry(t *testing.T) {
 		t.Fatalf("signer calls after first authorization: got %d, want 1", got)
 	}
 
-	// A retry is a fresh off-chain WebAuthn assertion and a fresh hot
-	// signature. The DirectP256 packet witness is sighash-bound, and Arkade
-	// witness masking keeps the issuance digest exactly the same.
+	// A retry may carry a fresh off-chain WebAuthn assertion, but must name the
+	// exact originally reserved PSBT. The Arkade sighash masks the packet
+	// witness, so a fresh DirectP256 signature could otherwise share a digest
+	// while naming different transaction bytes and txid.
 	retryRequest, retryDigest := e.requestFor(t, draft, e.passkeyPriv)
 	if !bytes.Equal(firstDigest, retryDigest) {
 		t.Fatalf("masked digest changed across assertion retry: %x != %x", firstDigest, retryDigest)
 	}
+	if _, _, err := e.service.Authorize(context.Background(), retryRequest); err == nil || !strings.Contains(err.Error(), "different exact request") {
+		t.Fatalf("same challenge with fresh DirectP256/hot bytes was not rejected: %v", err)
+	}
+	if got := e.countingSigner.callCount(); got != 1 {
+		t.Fatalf("changed same-digest request reached private signer: %d calls", got)
+	}
+	retryRequest.PSBT = firstRequest.PSBT
 	retryResponse, replay, err := e.service.Authorize(context.Background(), retryRequest)
 	if err != nil {
 		t.Fatalf("exact retry: %v", err)
@@ -603,6 +644,47 @@ func TestProviderBoundaryHappyPathAndExactRetry(t *testing.T) {
 	}
 	if spent != 20_500 {
 		t.Fatalf("retry double-debited allowance: got %d, want 20500", spent)
+	}
+}
+
+func TestProviderBoundaryPublicTimeoutResumesPersistedProviderStage(t *testing.T) {
+	e := newBoundaryEnv(t)
+	draft := e.canonicalDraft(t, 90_000, 20_000, 500)
+	request, _ := e.requestFor(t, draft, e.passkeyPriv)
+
+	e.arkadeSigner.mu.Lock()
+	e.arkadeSigner.err = errors.New("ambiguous public signer timeout")
+	e.arkadeSigner.mu.Unlock()
+	if _, _, err := e.service.Authorize(context.Background(), request); err == nil || !strings.Contains(err.Error(), "public signer timeout") {
+		t.Fatalf("first public failure = %v", err)
+	}
+	if got := e.countingSigner.callCount(); got != 1 {
+		t.Fatalf("private signer calls after public timeout = %d, want 1", got)
+	}
+	if got := e.arkadeSigner.callCount(); got != 1 {
+		t.Fatalf("public signer calls after timeout = %d, want 1", got)
+	}
+
+	e.arkadeSigner.mu.Lock()
+	e.arkadeSigner.err = nil
+	e.arkadeSigner.mu.Unlock()
+	signed, replay, err := e.service.Authorize(context.Background(), request)
+	if err != nil || replay || signed == "" {
+		t.Fatalf("exact resume after public timeout: signed=%d replay=%v err=%v", len(signed), replay, err)
+	}
+	if got := e.countingSigner.callCount(); got != 1 {
+		t.Fatalf("public-stage resume reinvoked private signer: %d calls", got)
+	}
+	if got := e.arkadeSigner.callCount(); got != 2 {
+		t.Fatalf("public signer calls after resume = %d, want 2", got)
+	}
+
+	replayed, replay, err := e.service.Authorize(context.Background(), request)
+	if err != nil || !replay || replayed != signed {
+		t.Fatalf("completed exact replay: replay=%v err=%v", replay, err)
+	}
+	if e.countingSigner.callCount() != 1 || e.arkadeSigner.callCount() != 2 {
+		t.Fatal("completed replay reached a signer")
 	}
 }
 
@@ -698,11 +780,11 @@ func TestProviderBoundarySignerFailureRemainsReserved(t *testing.T) {
 	e.countingSigner.mu.Lock()
 	e.countingSigner.err = nil
 	e.countingSigner.mu.Unlock()
-	if _, _, err := e.service.Authorize(context.Background(), request); err == nil {
-		t.Fatal("post-submit failure allowed same-digest re-sign")
+	if _, replay, err := e.service.Authorize(context.Background(), request); err != nil || replay {
+		t.Fatalf("exact reserved private-stage retry failed: replay=%v err=%v", replay, err)
 	}
-	if got := e.countingSigner.callCount(); got != 1 {
-		t.Fatalf("signer calls: got %d, want 1", got)
+	if got := e.countingSigner.callCount(); got != 2 {
+		t.Fatalf("private signer calls: got %d, want one failed and one exact retry", got)
 	}
 }
 
@@ -1049,6 +1131,9 @@ func TestEstimatedVBytesMatchesSerializedFinalWitness(t *testing.T) {
 	e := newBoundaryEnv(t)
 	base := e.canonicalDraft(t, 90_000, 20_000, 500)
 	leaf := e.service.Operational.Leaves.Collaborative
+	if got := estimatedWitnessBytes(e.service.Operational); got != int(vault.CollaborativeWitnessBytes) {
+		t.Fatalf("collaborative witness size = %d, Arkade policy commits to %d", got, vault.CollaborativeWitnessBytes)
+	}
 
 	// Vary stripped-size residue modulo four. A missing witness-stack-count byte
 	// can otherwise be hidden by vbyte rounding for one particular fixture.
@@ -1060,6 +1145,7 @@ func TestEstimatedVBytesMatchesSerializedFinalWitness(t *testing.T) {
 			finalTx.TxIn[0].Witness = wire.TxWitness{
 				bytes.Repeat([]byte{0x11}, 64),
 				bytes.Repeat([]byte{0x22}, 64),
+				bytes.Repeat([]byte{0x33}, 64),
 				append([]byte(nil), leaf.Script...),
 				append([]byte(nil), leaf.ControlBlock...),
 			}
@@ -1115,7 +1201,7 @@ func TestProviderBoundaryExactFeerateLimit(t *testing.T) {
 	if classified.Fee != limit {
 		t.Fatalf("classified boundary fee: got %d, want %d", classified.Fee, limit)
 	}
-	if err := enforceStaticPolicy(classified); err != nil {
+	if err := enforceStaticPolicy(classified, configuredAuthorizationPolicy()); err != nil {
 		t.Fatalf("exact %d sat/vB ceiling rejected: %v", fixture.FeerateCeilingSatPerV, err)
 	}
 
@@ -1125,12 +1211,12 @@ func TestProviderBoundaryExactFeerateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("structural classify rejected fee one sat over ceiling: %v", err)
 	}
-	if err := enforceStaticPolicy(over); err == nil {
+	if err := enforceStaticPolicy(over, configuredAuthorizationPolicy()); err == nil {
 		t.Fatalf("fee one sat above exact %d sat/vB boundary was accepted", fixture.FeerateCeilingSatPerV)
 	}
 }
 
-func TestProviderBoundaryFeeCeilingsHaveIndependentTriggerCases(t *testing.T) {
+func TestProviderBoundaryFeeCeilingsRejectRateAndAbsoluteLimits(t *testing.T) {
 	e := newBoundaryEnv(t)
 	base := e.canonicalDraft(t, 1_000_000, 20_000, 0)
 	smallVBytes := estimatedVBytes(base.UnsignedTx, e.service.Operational)
@@ -1147,33 +1233,16 @@ func TestProviderBoundaryFeeCeilingsHaveIndependentTriggerCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("structural classify rejected rate-only fee: %v", err)
 	}
-	if err := enforceStaticPolicy(rateCl); err == nil {
+	if err := enforceStaticPolicy(rateCl, configuredAuthorizationPolicy()); err == nil {
 		t.Fatalf("rate-only fee %d was accepted", rateOnlyFee)
 	}
 
-	// Inflate stripped size with a large consensus-spendable recipient
-	// script. Then bind a real DirectP256 signature over that spend's
-	// Arkade challenge. A 64-byte placeholder or 3-item WebAuthn
-	// witness is not a valid authorization.
+	// The native-Segwit recipient constraint deliberately rules out inflating
+	// stripped size with an arbitrary spendable script. Bind a real DirectP256
+	// signature and prove that the absolute cap is still checked before any
+	// signer call; this candidate may also exceed the feerate cap.
 	absOnly := boundaryClonePSBT(t, base)
 	absOnlyFee := fixture.AbsoluteFeeCeiling + 1
-	payload := 64
-	for {
-		candidate := boundaryClonePSBT(t, absOnly)
-		boundaryReplaceRecipientScript(t, candidate, e.service.Operational, boundarySpendableRecipient(t, payload))
-		largeVBytes := estimatedVBytes(candidate.UnsignedTx, e.service.Operational)
-		if absOnlyFee <= fixture.FeerateCeilingSatPerV*largeVBytes {
-			absOnly = candidate
-			break
-		}
-		payload += 64
-		if payload > 4_000 {
-			t.Fatalf(
-				"absolute fee policy is not independently reachable with a large spendable recipient: first absolute violation %d sats still exceeds %d sat/vB across %d vbytes",
-				absOnlyFee, fixture.FeerateCeilingSatPerV, largeVBytes,
-			)
-		}
-	}
 	boundarySetFee(t, absOnly, e.service.Operational, absOnlyFee)
 	challenge, err := vault.Challenge(absOnly, e.service.Operational)
 	if err != nil {
@@ -1192,51 +1261,23 @@ func TestProviderBoundaryFeeCeilingsHaveIndependentTriggerCases(t *testing.T) {
 	}
 	absCl, err := classify(absOnly, e.service.Operational)
 	if err != nil {
-		t.Fatalf("absolute-only fee was incorrectly rejected by structural classify: %v", err)
+		t.Fatalf("absolute-fee fixture was incorrectly rejected by structural classify: %v", err)
 	}
-	if err := enforceStaticPolicy(absCl); err == nil {
-		t.Fatalf("absolute-only fee %d was accepted", absOnlyFee)
+	if err := enforceStaticPolicy(absCl, configuredAuthorizationPolicy()); err == nil {
+		t.Fatalf("absolute fee %d was accepted", absOnlyFee)
 	}
 	raw, err := absOnly.B64Encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := e.service.Authorize(context.Background(), AuthorizeRequest{PSBT: raw}); err == nil {
-		t.Fatalf("absolute-only fee %d was accepted", absOnlyFee)
+		t.Fatalf("absolute fee %d was accepted", absOnlyFee)
 	} else if !strings.Contains(err.Error(), "fee exceeds ceiling") {
-		t.Fatalf("Authorize rejected absolute-only fee for the wrong reason: %v", err)
+		t.Fatalf("Authorize rejected absolute fee for the wrong reason: %v", err)
 	}
 	if got := e.countingSigner.callCount(); got != 0 {
 		t.Fatalf("fee policy rejection reached signer: got %d calls", got)
 	}
-}
-
-func boundarySpendableRecipient(t *testing.T, payload int) []byte {
-	t.Helper()
-	script, err := txscript.NewScriptBuilder().
-		AddData(bytes.Repeat([]byte{0x51}, payload)).
-		AddOp(txscript.OP_DROP).
-		AddOp(txscript.OP_TRUE).
-		Script()
-	if err != nil {
-		t.Fatalf("build spendable recipient: %v", err)
-	}
-	if txscript.IsUnspendable(script) || script[0] == txscript.OP_RETURN {
-		t.Fatal("recipient fixture is not consensus-spendable")
-	}
-	return script
-}
-
-func boundaryReplaceRecipientScript(t *testing.T, ptx *psbt.Packet, op *vault.Built, script []byte) {
-	t.Helper()
-	for _, out := range ptx.UnsignedTx.TxOut {
-		if extension.IsExtension(out.PkScript) || bytes.Equal(out.PkScript, op.PkScript) {
-			continue
-		}
-		out.PkScript = script
-		return
-	}
-	t.Fatal("fixture has no recipient output")
 }
 
 func TestProviderBoundaryPrevoutFieldRejectsDuplicate(t *testing.T) {
@@ -1726,7 +1767,7 @@ func TestRemoteSignerMalformedResponseIsAnErrorNotAPanic(t *testing.T) {
 			t.Fatalf("malformed emulator response panicked: %v", recovered)
 		}
 	}()
-	if _, err := extractVerifiedProviderSig(
+	if _, err := extractVerifiedSignerSig(
 		original,
 		malformed,
 		schnorr.SerializePubKey(e.service.Operational.TweakedProvider),

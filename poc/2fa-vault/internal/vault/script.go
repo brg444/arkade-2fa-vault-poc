@@ -5,29 +5,228 @@ import (
 	"crypto/elliptic"
 	"fmt"
 
+	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 )
 
-// AuthorizationScript is the static POC Arkade script:
-//
-//	OP_0 OP_SIGHASH <0x11 || compressed_direct_P256> OP_CHECKSIGFROMSTACK
+// CollaborativeWitnessBytes is the serialized witness contribution expected
+// by OP_TXWEIGHT for the Operational 3-of-3 collaborative leaf: marker+flag,
+// five witness items, three 64-byte signatures, the multisig script and its
+// three-leaf control block. Tests bind this constant to the generated tree and
+// a finalized witness so a template edit cannot silently weaken the feerate
+// check committed below.
+const CollaborativeWitnessBytes int64 = 399
+
+// AuthorizationScript is the committed transaction-local Operational policy.
+// It requires the canonical one-input recipient/change/packet shape, caps the
+// recipient and fee, requires recursive change to this exact vault, and then
+// verifies the transaction-bound DirectP256 signature.
 //
 // The initial stack is a single compact low-S 64-byte P-256 signature over
 // the current transaction's Arkade sighash. The enrolled key is the
 // PRF-derived direct-auth P-256 public key, never the WebAuthn credential
-// ES256 public key. WebAuthn clientDataJSON/authenticatorData stay off-chain.
-func AuthorizationScript(compressedDirectP256 []byte) ([]byte, error) {
+// ES256 public key. WebAuthn clientDataJSON/authenticatorData and the stateful
+// daily allowance stay in the private authorizer.
+func AuthorizationScript(compressedDirectP256 []byte, policy AuthorizationPolicy) ([]byte, error) {
 	if err := parseCanonicalCompressedP256(compressedDirectP256); err != nil {
 		return nil, err
 	}
+	if err := policy.validate(); err != nil {
+		return nil, err
+	}
+	// The script commits to the exact last extension output by reconstructing
+	// its constant envelope around OP_INSPECTPACKET's runtime content. Because
+	// the packet itself contains this script, derive the envelope by length
+	// until the script/envelope pair reaches a fixed point.
+	var packetOutputPrefix []byte
+	for i := 0; i < 8; i++ {
+		script, err := buildAuthorizationScript(compressedDirectP256, policy, packetOutputPrefix)
+		if err != nil {
+			return nil, err
+		}
+		next, err := exactPacketOutputPrefix(len(script))
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Equal(next, packetOutputPrefix) {
+			return script, nil
+		}
+		packetOutputPrefix = next
+	}
+	return nil, fmt.Errorf("authorization script packet envelope did not converge")
+}
+
+func buildAuthorizationScript(compressedDirectP256 []byte, policy AuthorizationPolicy, packetOutputPrefix []byte) ([]byte, error) {
 	key := append([]byte{0x11}, compressedDirectP256...)
-	return txscript.NewScriptBuilder().
+	b := txscript.NewScriptBuilder().
+		// Canonical transaction and input shape.
+		AddOp(arkade.OP_INSPECTVERSION).
+		AddInt64(2).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(arkade.OP_INSPECTLOCKTIME).
+		AddInt64(0).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(arkade.OP_INSPECTNUMINPUTS).
+		AddInt64(1).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTINPUTSEQUENCE).
+		AddInt64(int64(wire.MaxTxInSequenceNum)).
+		AddOp(txscript.OP_EQUALVERIFY).
+		// Output zero is the recipient.
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddInt64(policy.RecipientDustSats).
+		AddOp(txscript.OP_GREATERTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddInt64(policy.RecipientCapSats).
+		AddOp(txscript.OP_LESSTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		// A native witness recipient prevents a second/moved extension from
+		// occupying output zero. Combined with the exact extension-output hash
+		// below, this pins the single packet output to the final position.
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTOUTPUTSCRIPTPUBKEY).
+		AddInt64(0).
+		AddOp(txscript.OP_GREATERTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		AddOp(txscript.OP_DROP).
+		// There are either recipient+packet outputs or
+		// recipient+recursive-change+packet outputs. Each branch leaves the
+		// calculated fee above the DirectP256 signature.
+		AddOp(arkade.OP_INSPECTNUMOUTPUTS).
+		AddOp(txscript.OP_DUP).
+		AddInt64(2).
+		AddOp(txscript.OP_EQUAL).
+		AddOp(txscript.OP_IF).
+		AddOp(txscript.OP_DROP).
+		AddInt64(1).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddInt64(0).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(int64(arkade.PacketType)).
+		AddOp(arkade.OP_INSPECTPACKET).
+		AddOp(txscript.OP_VERIFY).
+		AddData(packetOutputPrefix).
+		AddOp(txscript.OP_SWAP).
+		AddOp(arkade.OP_CAT).
+		AddOp(txscript.OP_SHA256).
+		AddInt64(1).
+		AddOp(arkade.OP_INSPECTOUTPUTSCRIPTPUBKEY).
+		AddInt64(-1).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTINPUTVALUE).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddOp(txscript.OP_SUB).
+		AddOp(txscript.OP_ELSE).
+		AddInt64(3).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(1).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddInt64(policy.RecipientDustSats).
+		AddOp(txscript.OP_GREATERTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		// Compare the change witness program and Segwit version with the
+		// current input's prevout, committing change to the same vault.
+		AddInt64(1).
+		AddOp(arkade.OP_INSPECTOUTPUTSCRIPTPUBKEY).
+		AddInt64(1).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(arkade.OP_PUSHCURRENTINPUTINDEX).
+		AddOp(arkade.OP_INSPECTINPUTSCRIPTPUBKEY).
+		AddInt64(1).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(2).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddInt64(0).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(int64(arkade.PacketType)).
+		AddOp(arkade.OP_INSPECTPACKET).
+		AddOp(txscript.OP_VERIFY).
+		AddData(packetOutputPrefix).
+		AddOp(txscript.OP_SWAP).
+		AddOp(arkade.OP_CAT).
+		AddOp(txscript.OP_SHA256).
+		AddInt64(2).
+		AddOp(arkade.OP_INSPECTOUTPUTSCRIPTPUBKEY).
+		AddInt64(-1).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddOp(txscript.OP_EQUALVERIFY).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTINPUTVALUE).
+		AddInt64(0).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddOp(txscript.OP_SUB).
+		AddInt64(1).
+		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
+		AddOp(txscript.OP_SUB).
+		AddOp(txscript.OP_ENDIF).
+		// Fee must be non-negative and satisfy both absolute and exact
+		// feerate caps using the final three-signature witness size.
+		AddOp(txscript.OP_DUP).
+		AddInt64(0).
+		AddOp(txscript.OP_GREATERTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		AddOp(txscript.OP_DUP).
+		AddInt64(policy.AbsoluteFeeCeilingSats).
+		AddOp(txscript.OP_LESSTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		AddOp(txscript.OP_DUP).
+		AddOp(arkade.OP_TXWEIGHT).
+		AddInt64(CollaborativeWitnessBytes).
+		AddOp(txscript.OP_ADD).
+		AddInt64(3).
+		AddOp(txscript.OP_ADD).
+		AddInt64(4).
+		AddOp(txscript.OP_DIV).
+		AddInt64(policy.FeerateCeilingSatPerV).
+		AddOp(txscript.OP_MUL).
+		AddOp(txscript.OP_LESSTHANOREQUAL).
+		AddOp(txscript.OP_VERIFY).
+		AddOp(txscript.OP_DROP).
+		// Bind the user-authorized DirectP256 signature to this transaction.
 		AddOp(txscript.OP_0).
 		AddOp(arkade.OP_SIGHASH).
 		AddData(key).
-		AddOp(arkade.OP_CHECKSIGFROMSTACK).
-		Script()
+		AddOp(arkade.OP_CHECKSIGFROMSTACK)
+	return b.Script()
+}
+
+// exactPacketOutputPrefix returns every byte of the canonical one-packet ARK
+// extension script before the Emulator Packet content. Concatenating this
+// prefix with OP_INSPECTPACKET's content reconstructs the exact scriptPubKey.
+func exactPacketOutputPrefix(authScriptLen int) ([]byte, error) {
+	if authScriptLen <= 0 {
+		return nil, fmt.Errorf("authorization script length required")
+	}
+	packet, err := arkade.NewPacket(arkade.EmulatorEntry{
+		Vin:     0,
+		Script:  make([]byte, authScriptLen),
+		Witness: wire.TxWitness{make([]byte, 64)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	content, err := packet.Serialize()
+	if err != nil {
+		return nil, err
+	}
+	outputScript, err := extension.Extension{packet}.Serialize()
+	if err != nil {
+		return nil, err
+	}
+	if len(outputScript) <= len(content) || !bytes.Equal(outputScript[len(outputScript)-len(content):], content) {
+		return nil, fmt.Errorf("canonical packet output envelope")
+	}
+	return append([]byte(nil), outputScript[:len(outputScript)-len(content)]...), nil
 }
 
 // parseCanonicalCompressedP256 is a DirectP256 check, not a WebAuthn

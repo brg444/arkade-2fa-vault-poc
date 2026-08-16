@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/elliptic"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -53,6 +54,17 @@ func openTestLedger(t *testing.T, clock Clock) *Ledger {
 	return led
 }
 
+func TestOpenLedgerPinsFullSynchronousDurability(t *testing.T) {
+	led := openTestLedger(t, nil)
+	var mode int
+	if err := led.db.QueryRow(`PRAGMA synchronous`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != 2 { // SQLite FULL
+		t.Fatalf("PRAGMA synchronous = %d, want FULL (2)", mode)
+	}
+}
+
 func digest(tag byte) []byte {
 	return bytes.Repeat([]byte{tag}, 32)
 }
@@ -66,9 +78,11 @@ func validCredential(tag byte) Credential {
 	offPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 3}, 32))
 	provPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 5}, 32))
 	tweakPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 7}, 32))
+	arkadePriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 9}, 32))
+	arkadeTweakPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 11}, 32))
 	opCSV := fixture.OperationalCSV()
 	svCSV := fixture.SavingsCSV()
-	return Credential{
+	c := Credential{
 		ID:                  []byte{tag, tag + 1, tag + 2},
 		WebAuthnP256:        p256,
 		DirectP256:          directP256,
@@ -78,6 +92,8 @@ func validCredential(tag byte) Credential {
 		Offline:             offPriv.PubKey().SerializeCompressed(),
 		ProviderBase:        provPriv.PubKey().SerializeCompressed(),
 		TweakedProvider:     tweakPriv.PubKey().SerializeCompressed(),
+		ArkadeBase:          arkadePriv.PubKey().SerializeCompressed(),
+		TweakedArkade:       arkadeTweakPriv.PubKey().SerializeCompressed(),
 		TemplateVersion:     fixture.TemplateVersion,
 		PolicyVersion:       fixture.PolicyVersion,
 		Network:             fixture.Network,
@@ -90,6 +106,123 @@ func validCredential(tag byte) Credential {
 		OperationalScript:   []byte{0x51, 0x20, tag},
 		SavingsAddress:      fmt.Sprintf("bcrt1qsv-%d", tag),
 		SavingsScript:       []byte{0x51, 0x20, tag + 1},
+		RecipientDustSats:   fixture.DustSats,
+		TxRecipientCapSats:  fixture.TxRecipientCapSats,
+		PeriodAllowanceSats: fixture.PeriodAllowanceSats,
+		AbsoluteFeeCapSats:  fixture.AbsoluteFeeCeiling,
+		FeerateCapSatPerV:   fixture.FeerateCeilingSatPerV,
+	}
+	if err := SealCredential(&c, bytes.Repeat([]byte{0x42}, 32)); err != nil {
+		panic(err)
+	}
+	return c
+}
+
+func cloneCredential(c Credential) Credential {
+	clone := c
+	clone.ID = append([]byte(nil), c.ID...)
+	clone.WebAuthnP256 = append([]byte(nil), c.WebAuthnP256...)
+	clone.DirectP256 = append([]byte(nil), c.DirectP256...)
+	clone.Hot = append([]byte(nil), c.Hot...)
+	clone.Offline = append([]byte(nil), c.Offline...)
+	clone.ProviderBase = append([]byte(nil), c.ProviderBase...)
+	clone.TweakedProvider = append([]byte(nil), c.TweakedProvider...)
+	clone.ArkadeBase = append([]byte(nil), c.ArkadeBase...)
+	clone.TweakedArkade = append([]byte(nil), c.TweakedArkade...)
+	clone.OperationalScript = append([]byte(nil), c.OperationalScript...)
+	clone.SavingsScript = append([]byte(nil), c.SavingsScript...)
+	clone.IntegrityMAC = append([]byte(nil), c.IntegrityMAC...)
+	return clone
+}
+
+func TestCredentialIntegrityAuthenticatesEveryCanonicalFieldAndRestart(t *testing.T) {
+	key := bytes.Repeat([]byte{0x42}, 32)
+	path := filepath.Join(t.TempDir(), "integrity.sqlite")
+	led, err := OpenLedger(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := validCredential(0x31)
+	if err := led.Enroll(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenLedger(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	got, err := reopened.GetCredential()
+	if err != nil || got == nil {
+		t.Fatalf("credential after restart: %v", err)
+	}
+	if err := VerifyCredentialIntegrity(got, key); err != nil {
+		t.Fatalf("valid credential failed after restart: %v", err)
+	}
+
+	mutations := []struct {
+		name string
+		mut  func(*Credential)
+	}{
+		{"credential id", func(c *Credential) { c.ID[0] ^= 1 }},
+		{"webauthn key", func(c *Credential) { c.WebAuthnP256[1] ^= 1 }},
+		{"direct key", func(c *Credential) { c.DirectP256[1] ^= 1 }},
+		{"hot key", func(c *Credential) { c.Hot[1] ^= 1 }},
+		{"rp id", func(c *Credential) { c.RPID += "." }},
+		{"origin", func(c *Credential) { c.Origin += "/changed" }},
+		{"offline key", func(c *Credential) { c.Offline[1] ^= 1 }},
+		{"provider base", func(c *Credential) { c.ProviderBase[1] ^= 1 }},
+		{"tweaked provider", func(c *Credential) { c.TweakedProvider[1] ^= 1 }},
+		{"arkade emulator base", func(c *Credential) { c.ArkadeBase[1] ^= 1 }},
+		{"tweaked arkade emulator", func(c *Credential) { c.TweakedArkade[1] ^= 1 }},
+		{"arkade emulator origin", func(c *Credential) { c.ArkadeEmulatorOrigin += "/changed" }},
+		{"arkade emulator version", func(c *Credential) { c.ArkadeEmulatorVersion += "-changed" }},
+		{"template", func(c *Credential) { c.TemplateVersion += "-changed" }},
+		{"policy", func(c *Credential) { c.PolicyVersion += "-changed" }},
+		{"network", func(c *Credential) { c.Network += "-changed" }},
+		{"vault id", func(c *Credential) { c.VaultID += "-changed" }},
+		{"operational csv type", func(c *Credential) { c.OperationalCSVType++ }},
+		{"operational csv value", func(c *Credential) { c.OperationalCSVValue++ }},
+		{"savings csv type", func(c *Credential) { c.SavingsCSVType++ }},
+		{"savings csv value", func(c *Credential) { c.SavingsCSVValue++ }},
+		{"operational address", func(c *Credential) { c.OperationalAddress += "x" }},
+		{"operational script", func(c *Credential) { c.OperationalScript[0] ^= 1 }},
+		{"savings address", func(c *Credential) { c.SavingsAddress += "x" }},
+		{"savings script", func(c *Credential) { c.SavingsScript[0] ^= 1 }},
+		{"recipient dust", func(c *Credential) { c.RecipientDustSats++ }},
+		{"transaction cap", func(c *Credential) { c.TxRecipientCapSats++ }},
+		{"period allowance", func(c *Credential) { c.PeriodAllowanceSats++ }},
+		{"absolute fee cap", func(c *Credential) { c.AbsoluteFeeCapSats++ }},
+		{"feerate cap", func(c *Credential) { c.FeerateCapSatPerV++ }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cloneCredential(*got)
+			test.mut(&changed)
+			if err := VerifyCredentialIntegrity(&changed, key); err == nil {
+				t.Fatal("modified canonical field passed credential MAC verification")
+			}
+		})
+	}
+
+	wrongKey := bytes.Repeat([]byte{0x24}, 32)
+	if err := VerifyCredentialIntegrity(got, wrongKey); err == nil {
+		t.Fatal("wrong credential integrity key accepted")
+	}
+	missing := cloneCredential(*got)
+	missing.IntegrityMAC = nil
+	if err := VerifyCredentialIntegrity(&missing, key); err == nil {
+		t.Fatal("missing credential integrity MAC accepted")
+	}
+	changedMAC := cloneCredential(*got)
+	changedMAC.IntegrityMAC[0] ^= 1
+	if err := VerifyCredentialIntegrity(&changedMAC, key); err == nil {
+		t.Fatal("modified credential integrity MAC accepted")
+	}
+	if err := VerifyCredentialIntegrity(got, key[:31]); err == nil {
+		t.Fatal("malformed credential integrity key accepted")
 	}
 }
 
@@ -157,7 +290,8 @@ func assertCredentialEqual(t *testing.T, led *Ledger, want Credential) {
 		got.OperationalCSVType != want.OperationalCSVType || got.OperationalCSVValue != want.OperationalCSVValue ||
 		got.SavingsCSVType != want.SavingsCSVType || got.SavingsCSVValue != want.SavingsCSVValue ||
 		got.OperationalAddress != want.OperationalAddress || got.SavingsAddress != want.SavingsAddress ||
-		!bytes.Equal(got.OperationalScript, want.OperationalScript) || !bytes.Equal(got.SavingsScript, want.SavingsScript) {
+		!bytes.Equal(got.OperationalScript, want.OperationalScript) || !bytes.Equal(got.SavingsScript, want.SavingsScript) ||
+		!bytes.Equal(got.IntegrityMAC, want.IntegrityMAC) {
 		t.Fatalf("credential mismatch\n got: %+v\nwant: %+v", got, want)
 	}
 }
@@ -675,9 +809,11 @@ func TestReservedIssuanceCountsAgainstAllowanceAndCannotBeReissued(t *testing.T)
 	reservedDigest := digest(0x70)
 	_, err := led.db.Exec(
 		`INSERT INTO issuance
-		 (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"vault-a", reservedDigest, led.PeriodStart(), 60, 1, stateReserved, clock.Now().UTC().Format(time.RFC3339),
+		 (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, request_psbt, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"vault-a", reservedDigest, led.PeriodStart(), 60, 1, stateReserved,
+		"legacy-external-signer:"+fmt.Sprintf("%x", reservedDigest),
+		clock.Now().UTC().Format(time.RFC3339), clock.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		t.Fatalf("seed reserved issuance: %v", err)
@@ -710,6 +846,116 @@ func TestReservedIssuanceCountsAgainstAllowanceAndCannotBeReissued(t *testing.T)
 	}
 	if got := signerCalls.Load(); got != 0 {
 		t.Fatalf("signer called %d times for rejected reservations", got)
+	}
+}
+
+func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sequential.sqlite")
+	clock := newManualClock(time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC))
+	led, err := OpenLedger(path, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	d := digest(0x91)
+	const request = "exact-client-psbt"
+	const providerStage = "exact-provider-signed-psbt"
+	privateCalls := 0
+	publicCalls := 0
+
+	private := func(_ context.Context, stored string) (string, error) {
+		privateCalls++
+		if stored != request {
+			t.Fatalf("private stage received %q, want exact request", stored)
+		}
+		var state, storedRequest string
+		var providerPSBT, signedPSBT sql.NullString
+		if err := led.db.QueryRow(
+			`SELECT state, request_psbt, provider_psbt, signed_psbt FROM issuance
+			 WHERE vault_id = ? AND arkade_sighash = ?`,
+			"vault-a", d,
+		).Scan(&state, &storedRequest, &providerPSBT, &signedPSBT); err != nil {
+			t.Fatal(err)
+		}
+		if state != stateReserved || storedRequest != request || providerPSBT.Valid || signedPSBT.Valid {
+			t.Fatalf("private-key use preceded durable exact reservation: state=%q request=%q provider=%v signed=%v", state, storedRequest, providerPSBT, signedPSBT)
+		}
+		return providerStage, nil
+	}
+	publicFailure := func(_ context.Context, stored string) (string, error) {
+		publicCalls++
+		if stored != providerStage {
+			t.Fatalf("public stage received %q, want persisted provider stage", stored)
+		}
+		var state, storedRequest, storedProvider string
+		var signedPSBT sql.NullString
+		if err := led.db.QueryRow(
+			`SELECT state, request_psbt, provider_psbt, signed_psbt FROM issuance
+			 WHERE vault_id = ? AND arkade_sighash = ?`,
+			"vault-a", d,
+		).Scan(&state, &storedRequest, &storedProvider, &signedPSBT); err != nil {
+			t.Fatal(err)
+		}
+		if state != stateProviderSigned || storedRequest != request || storedProvider != providerStage || signedPSBT.Valid {
+			t.Fatalf("public dispatch preceded durable provider stage: state=%q request=%q provider=%q signed=%v", state, storedRequest, storedProvider, signedPSBT)
+		}
+		return "", errors.New("ambiguous public timeout")
+	}
+
+	if _, _, err := led.IssueSequential(ctx, "vault-a", d, request, 60, 1, 100, private, publicFailure); err == nil || !strings.Contains(err.Error(), "public timeout") {
+		t.Fatalf("first public attempt = %v", err)
+	}
+	if privateCalls != 1 || publicCalls != 1 {
+		t.Fatalf("first attempt calls private=%d public=%d", privateCalls, publicCalls)
+	}
+	spent, err := led.SpentInPeriod(ctx, "vault-a", led.PeriodStart())
+	if err != nil || spent != 61 {
+		t.Fatalf("provider-signed reservation spent=%d err=%v", spent, err)
+	}
+	if err := led.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenLedger(path, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	privateMustNotRun := func(context.Context, string) (string, error) {
+		privateCalls++
+		return "", errors.New("private signer must not run after provider stage persisted")
+	}
+	publicSuccess := func(_ context.Context, stored string) (string, error) {
+		publicCalls++
+		if stored != providerStage {
+			t.Fatalf("restart public stage received %q", stored)
+		}
+		return "exact-three-signed-psbt", nil
+	}
+
+	if _, _, err := reopened.IssueSequential(ctx, "vault-a", d, request+"-changed", 60, 1, 100, privateMustNotRun, publicSuccess); err == nil || !strings.Contains(err.Error(), "different exact request") {
+		t.Fatalf("changed same-digest request accepted after restart: %v", err)
+	}
+	if privateCalls != 1 || publicCalls != 1 {
+		t.Fatalf("changed request reached signer: private=%d public=%d", privateCalls, publicCalls)
+	}
+
+	signed, replay, err := reopened.IssueSequential(ctx, "vault-a", d, request, 60, 1, 100, privateMustNotRun, publicSuccess)
+	if err != nil || replay || signed != "exact-three-signed-psbt" {
+		t.Fatalf("resume = %q replay=%v err=%v", signed, replay, err)
+	}
+	if privateCalls != 1 || publicCalls != 2 {
+		t.Fatalf("resume calls private=%d public=%d; want private skipped", privateCalls, publicCalls)
+	}
+
+	privateReplay := privateCalls
+	publicReplay := publicCalls
+	signed, replay, err = reopened.IssueSequential(ctx, "vault-a", d, request, 60, 1, 100, privateMustNotRun, publicSuccess)
+	if err != nil || !replay || signed != "exact-three-signed-psbt" {
+		t.Fatalf("completed replay = %q replay=%v err=%v", signed, replay, err)
+	}
+	if privateCalls != privateReplay || publicCalls != publicReplay {
+		t.Fatalf("completed replay reached signer: private=%d public=%d", privateCalls, publicCalls)
 	}
 }
 

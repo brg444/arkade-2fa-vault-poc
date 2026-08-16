@@ -6,8 +6,8 @@
 #   - creates an internal vault-signer network (Compose project-scopes
 #     the Docker name; do not pin a global name)
 #   - forces emulator off nigiri and onto only vault-signer
-#   - attaches arkd and vault-provider to vault-signer so EMULATOR_ARKD_URL
-#     and VAULT_EMULATOR still resolve
+#   - runs a second, independent REGTEST Emulator as Arkade's public cosigner
+#   - attaches arkd and vault-provider to vault-signer so both cosigners resolve
 #   - keeps vault-provider on default (nigiri) for Bitcoin RPC
 #   - resets host publishes so only 127.0.0.1:8787 is published
 #
@@ -24,6 +24,21 @@ services:
     ports: !reset []
     expose: !reset []
     networks: !override
+      vault-signer:
+
+  arkade-emulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    container_name: arkade-emulator
+    environment:
+      # REGTEST ONLY: independent deterministic public-cosigner fixture.
+      EMULATOR_SECRET_KEY: "13b7f7f06e4f7c4fa33d3d2017e455496e883202e8b0b5e0d5f39f23532f45b1"
+      EMULATOR_ARKD_URL: arkd:7070
+    depends_on:
+      - arkd
+    networks:
       vault-signer:
 
   arkd:
@@ -50,6 +65,7 @@ services:
       - "127.0.0.1:8787:8787"
     environment:
       VAULT_EMULATOR: emulator:7073
+      VAULT_ARKADE_EMULATOR: arkade-emulator:7073
       # REGTEST ONLY — NEVER FUND WITH REAL BTC.
       # Public deterministic second-signer fixture: secp256k1 G (scalar 1).
       # Not opaque, not custody, not offline-key security.
@@ -66,6 +82,7 @@ services:
     restart: unless-stopped
     depends_on:
       - emulator
+      - arkade-emulator
 
 networks:
   vault-signer:

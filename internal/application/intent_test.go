@@ -113,6 +113,24 @@ func TestSubmitIntentMessageInputBinding(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("rejects a valid message different from the proof commitment", func(t *testing.T) {
+		ptx := newIntentProof(t, []intentVtxo{owned, owned}, entry)
+		svc := &service{signer: signer{signerKey}}
+
+		signed, err := svc.SubmitIntent(t.Context(), Intent{
+			Proof: intent.Proof{Packet: *ptx},
+			Message: &intent.GetDataMessage{
+				BaseMessage: intent.BaseMessage{Type: intent.IntentMessageTypeGetData},
+				ExpireAt:    time.Now().Add(time.Hour).Unix(),
+			},
+		})
+
+		require.ErrorContains(t, err, "does not commit the supplied message")
+		require.Nil(t, signed)
+		require.Empty(t, ptx.Inputs[0].TaprootScriptSpendSig)
+		require.Empty(t, ptx.Inputs[1].TaprootScriptSpendSig)
+	})
 }
 
 // TestSubmitIntentEntryResolution covers how SubmitIntent treats entries that do
@@ -182,8 +200,15 @@ func submitTestIntent(
 	svc := &service{signer: signer{signerKey}}
 	return svc.SubmitIntent(t.Context(), Intent{
 		Proof:   intent.Proof{Packet: *ptx},
-		Message: &intent.RegisterMessage{ExpireAt: time.Now().Add(time.Hour).Unix()},
+		Message: testIntentMessage(),
 	})
+}
+
+func testIntentMessage() *intent.RegisterMessage {
+	return &intent.RegisterMessage{
+		BaseMessage: intent.BaseMessage{Type: intent.IntentMessageTypeRegister},
+		ExpireAt:    4_102_444_800, // 2100-01-01T00:00:00Z
+	}
 }
 
 // intentVtxo is a taproot coin with a single multisig closure, enough for the
@@ -231,10 +256,27 @@ func newIntentProof(
 	t *testing.T, inputs []intentVtxo, entries ...arkade.EmulatorEntry,
 ) *psbt.Packet {
 	t.Helper()
+	require.GreaterOrEqual(t, len(inputs), 2)
+
+	message, err := testIntentMessage().Encode()
+	require.NoError(t, err)
+	messageHash := chainhash.TaggedHash(
+		[]byte("ark-intent-proof-message"), []byte(message),
+	)
+	toSpend := wire.NewMsgTx(0)
+	toSpend.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{
+			Hash:  chainhash.Hash{},
+			Index: wire.MaxPrevOutIndex,
+		},
+		Sequence:        0,
+		SignatureScript: append([]byte{txscript.OP_0, txscript.OP_DATA_32}, messageHash[:]...),
+	})
+	toSpend.AddTxOut(&wire.TxOut{Value: 0, PkScript: inputs[1].pkScript})
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
-		Hash: chainhash.Hash{1}, Index: 0,
+		Hash: toSpend.TxHash(), Index: 0,
 	}})
 	prevTxs := make(map[int]*wire.MsgTx)
 	for i := 1; i < len(inputs); i++ {

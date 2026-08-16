@@ -98,6 +98,10 @@ func buildFinalizedCollaborative(t *testing.T, prev *wire.MsgTx) (*wire.MsgTx, d
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	recipient, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +117,13 @@ func buildFinalizedCollaborative(t *testing.T, prev *wire.MsgTx) (*wire.MsgTx, d
 	if bytes.Equal(webauthn.CompressedP256(directP256), webauthn.CompressedP256(webauthnP256)) {
 		t.Fatal("test setup failed: WebAuthn and DirectP256 keys are not distinct")
 	}
-	op, err := vault.NewOperational(hot.PubKey(), offline.PubKey(), providerKey.PubKey(), webauthn.CompressedP256(directP256))
+	op, err := vault.NewOperational(vault.OperationalKeys{
+		Hot:          hot.PubKey(),
+		Offline:      offline.PubKey(),
+		ProviderBase: providerKey.PubKey(),
+		ArkadeBase:   arkadeKey.PubKey(),
+		DirectP256:   webauthn.CompressedP256(directP256),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +176,9 @@ func buildFinalizedCollaborative(t *testing.T, prev *wire.MsgTx) (*wire.MsgTx, d
 	}
 	vault.AddPartialSig(spend.Packet, hot.PubKey(), op.Leaves.Collaborative.Hash, hotSig)
 	if _, err := (provider.LocalSigner{Priv: providerKey}).Sign(context.Background(), spend.Packet); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (provider.LocalSigner{Priv: arkadeKey}).Sign(context.Background(), spend.Packet); err != nil {
 		t.Fatal(err)
 	}
 	if err := vault.FinalizeCollaborative(spend.Packet, op); err != nil {
@@ -309,11 +322,21 @@ func broadcastAgainstRegtest(t *testing.T, measured onchainSizes) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p256, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
 	}
-	op, err := vault.NewOperational(hot.PubKey(), offline.PubKey(), providerKey.PubKey(), webauthn.CompressedP256(p256))
+	op, err := vault.NewOperational(vault.OperationalKeys{
+		Hot:          hot.PubKey(),
+		Offline:      offline.PubKey(),
+		ProviderBase: providerKey.PubKey(),
+		ArkadeBase:   arkadeKey.PubKey(),
+		DirectP256:   webauthn.CompressedP256(p256),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

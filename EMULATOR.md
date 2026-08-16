@@ -2,9 +2,11 @@
 
 This file is the vendored [arkade-os/emulator](https://github.com/arkade-os/emulator)
 documentation. This repository is the **Arkade 2FA vault proof of concept**;
-start at the [root README](README.md). The emulator tree is pinned here
-because the vault Provider calls its private `SubmitOnchainTx` signing
-oracle. It is not the product of this repo.
+start at the [root README](README.md). Regtest uses two private Emulator
+instances. Mutinynet uses the hosted public Emulator only as its independent
+third cosigner through a release-pinned, narrow outbound HTTPS client; the
+private policy key never leaves `cmd/authorizer`. The Emulator itself is not
+the product of this repo.
 
 [![test](https://github.com/arkade-os/emulator/actions/workflows/test.yaml/badge.svg)](https://github.com/arkade-os/emulator/actions/workflows/test.yaml)
 [![quality](https://github.com/arkade-os/emulator/actions/workflows/quality.yaml/badge.svg)](https://github.com/arkade-os/emulator/actions/workflows/quality.yaml)
@@ -24,6 +26,11 @@ This is achieved by signing any Arkade transaction (offchain or intent proof) ex
 ### GetInfo
 
 Returns service metadata including the signer's public key. The public key should be tweaked with the Arkade script hash before being used in a VTXO tapscript. `deprecatedSignerPubkeys` lists only keys this emulator will still sign with: after `deprecatedKeysValidUntil` they are omitted, matching SubmitOnchainTx / SubmitTx / intent / finalization.
+
+The current response does not identify the backing Bitcoin/arkd network. The
+vault therefore pins the expected key and version here while independently
+pinning Mutinynet with its Esplora height-1 checkpoint; `GetInfo` is not a
+cryptographic network attestation.
 
 **Endpoint**: `GET /v1/info`
 
@@ -328,7 +335,7 @@ and can be up to the maximum script element size. `OP_NUM2BIN` and
 | Word | Opcode | Hex | Input | Output | Description |
 |------|--------|-----|-------|--------|-------------|
 | OP_DIGEST | 195 | 0xc3 | data hash_type | hash | Pushes the digest of `data` under the algorithm selected by `hash_type` (top of stack): `1`=SHA-256, `2`=SHA-1, `3`=RIPEMD-160, `4`=Keccak-256 (legacy/Ethereum, distinct from NIST SHA3), `5`=SHA3-256 (NIST). Any other `hash_type` fails the script. |
-| OP_CHECKSIGFROMSTACK | 204 | 0xcc | sig message pubkey | True/false | Verifies a 64-byte compact signature against the message and public key popped from the stack. Public keys are either legacy 32-byte x-only Schnorr/secp256k1 keys, `0x10 || compressed secp256k1` for ECDSA/secp256k1, or `0x11 || compressed P-256` for ECDSA/P-256. ECDSA messages must be 32-byte digests. If signature is empty, pushes empty vector. |
+| OP_CHECKSIGFROMSTACK | 204 | 0xcc | sig message pubkey | True/false or abort | Verifies a 64-byte compact signature against the message and public key popped from the stack. Public keys are either legacy 32-byte x-only Schnorr/secp256k1 keys, `0x10 || compressed secp256k1` for ECDSA/secp256k1, or `0x11 || compressed P-256` for ECDSA/P-256. ECDSA messages must be 32-byte digests. A valid signature pushes true; an empty signature pushes false; a non-empty invalid signature aborts under the BIP-348 NULLFAIL rule. |
 | OP_MERKLEBRANCHVERIFY | 179 | 0xb3 | leaf_tag branch_tag proof leaf_data | computed_root | Computes a Merkle root using BIP-341 tagged hashes. If leaf_tag is empty, leaf_data (32 bytes) is used as a raw hash; otherwise computes `tagged_hash(leaf_tag, leaf_data)`. Walks the proof path with lexicographic sibling ordering. Pushes the 32-byte computed root. Use with `OP_EQUALVERIFY` to verify against an expected root. |
 
 ### Elliptic Curve Operations

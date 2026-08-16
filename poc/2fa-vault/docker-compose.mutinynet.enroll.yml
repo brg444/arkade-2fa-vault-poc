@@ -1,0 +1,13 @@
+# Use this overlay only for first enrollment. After /v1/register succeeds,
+# restart from docker-compose.mutinynet.yml alone and remove this token file.
+services:
+  vault-authorizer:
+    environment:
+      VAULT_ENROLLMENT_TOKEN_FILE: /run/secrets/vault_enrollment_token
+    secrets:
+      - source: vault_enrollment_token
+        target: vault_enrollment_token
+
+secrets:
+  vault_enrollment_token:
+    file: ${VAULT_ENROLLMENT_TOKEN_FILE:?set VAULT_ENROLLMENT_TOKEN_FILE for first enrollment only}

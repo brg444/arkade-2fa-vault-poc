@@ -34,6 +34,39 @@ func TestReviewerDirectP256BrowserBundleIsVendoredAndPinned(t *testing.T) {
 	if !bytes.Contains(app, []byte("recoverEnrollment(enrollIO())")) {
 		t.Fatal("browser must recover a pending enrollment on load")
 	}
+	if !bytes.Contains(app, []byte("assertArkadeChallenge(reviewed.parsed.arkadeChallenge, pre.challenge)")) {
+		t.Fatal("browser ceremony must compare its independent Arkade digest to preflight")
+	}
+	recoveryStart := bytes.Index(app, []byte("async function recoverPendingEnrollment"))
+	recoveryEnd := bytes.Index(app, []byte("function operationalFrom"))
+	if recoveryStart < 0 || recoveryEnd <= recoveryStart {
+		t.Fatal("browser pending-enrollment recovery function missing")
+	}
+	recovery := app[recoveryStart:recoveryEnd]
+	getAt := bytes.Index(recovery, []byte("navigator.credentials.get"))
+	decryptAt := bytes.Index(recovery, []byte("crypto.subtle.decrypt"))
+	verifyHotAt := bytes.Index(recovery, []byte("assertHotPub(hotPub"))
+	registerAt := bytes.Index(recovery, []byte("enrollIO().register"))
+	promoteAt := bytes.Index(recovery, []byte("promotePending(localStorage)"))
+	if getAt < 0 || decryptAt <= getAt || verifyHotAt <= decryptAt || registerAt <= verifyHotAt || promoteAt <= registerAt ||
+		!bytes.Contains(recovery, []byte(`userVerification: "required"`)) ||
+		!bytes.Contains(recovery, []byte("extensions: { prf:")) {
+		t.Fatal("pending recovery must perform UV+PRF, decrypt and verify locally before exact registration and promotion")
+	}
+	enrollStart := bytes.Index(app, []byte("async function enroll()"))
+	if enrollStart < 0 {
+		t.Fatal("browser enrollment function missing")
+	}
+	enroll := app[enrollStart:recoveryStart]
+	pendingAt := bytes.Index(enroll, []byte(`recovery.action === "pending-requires-user-presence"`))
+	createAt := bytes.Index(enroll, []byte("navigator.credentials.create"))
+	stageAt := bytes.Index(enroll, []byte("stagePending(localStorage, rec)"))
+	if pendingAt < 0 || createAt <= pendingAt || stageAt <= createAt {
+		t.Fatal("pending recovery must run before creating or staging a replacement credential")
+	}
+	if bytes.Count(app, []byte("X-Vault-Enrollment-Token")) != 1 || !bytes.Contains(app, []byte(`"/v1/register"`)) {
+		t.Fatal("browser must send the bootstrap token only through the registration helper")
+	}
 	if !bytes.Contains(app, []byte("requireFrozenReview")) {
 		t.Fatal("browser must freeze the reviewed intent")
 	}

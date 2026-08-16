@@ -1,140 +1,151 @@
 # Arkade 2FA Vault POC
 
-Demonstrable **L1 Taproot 2FA cosigning vault** on Arkade. A localhost
-passkey authorizes a collaborative spend; a private Arkade Emulator
-cosigns only after the Provider checks the bound transaction.
+Demonstrable **L1 Taproot 2FA cosigning vault** on Arkade. A passkey
+ceremony authorizes a transaction, a separate PRF-derived P-256 key signs the
+Arkade transaction digest, and the hot key plus two independently tweaked
+cosigners produce the exact three-signature Taproot spend.
 
-**REGTEST ONLY — NEVER FUND WITH REAL BTC.** The second-signer pub
-(`VAULT_OFFLINE_PUB` / `OfflinePubHex`) is secp256k1 generator **G**
-(scalar **1**). That is a public deterministic fixture, not custody.
-Anyone who can spend a UTXO locked to it can take the coins.
+This is a proof of concept for non-mainnet funds. The Mutinynet deployment is
+a hardened software process, not an enclave, HSM, or production custody
+system. Never fund it with real BTC.
 
-Open **only** `http://localhost:8787` (WebAuthn RP ID and Origin are
-`localhost`). Compose binds `127.0.0.1:8787`, but a `127.0.0.1` URL
-fails origin checks.
+## Two execution profiles
 
-This tree vendors [arkade-os/emulator](https://github.com/arkade-os/emulator)
-at `66fd93cd` so the vault can call `SubmitOnchainTx` as a private
-client. Emulator API and opcode docs live in [EMULATOR.md](EMULATOR.md).
-Vault trust-boundary notes live in [poc/2fa-vault/README.md](poc/2fa-vault/README.md).
-
-## What this is
-
-Ordinary Bitcoin Taproot UTXOs, not Ark VTXOs.
-
-| Vault | Leaves | Provider key |
+| Profile | Purpose | Provider-key boundary |
 | --- | --- | --- |
-| Operational | hot + tweaked provider; hot + second signer; CSV + second signer | yes, collaborative leaf only |
-| Savings | hot + second signer; longer CSV + second signer | never |
+| Regtest | Reproducible local browser, two independent Emulators, mining, and restart demo | `cmd/provider` calls private Provider and Arkade signer fixtures; backup is public scalar 1 |
+| Mutinynet | Internet-deployable POC | `cmd/authorizer` alone owns the private Provider key and SQLite ledger; it then calls one release-pinned public Arkade cosigner through narrow outbound HTTPS |
+
+The Mutinynet topology contains no generic/gRPC signer client, generic signing
+RPC, demo funding/mining route, or inbound raw transaction-sign endpoint. The
+public gateway has neither the Provider key nor the policy database. The
+authorizer validates the descriptor, full previous transaction, PSBT, Arkade
+packet, WebAuthn assertion, DirectP256 signature, hot signature, fee limits,
+and period allowance before durably reserving budget and using its private
+Provider key. It persists that exact partial PSBT before sending it to the
+code-pinned public Arkade Emulator; its response may add only the one expected
+tweaked-Arkade signature.
+
+## Vault and key model
+
+These are ordinary Bitcoin Taproot UTXOs, not Ark VTXOs.
+
+| Vault | Leaves | Cosigner keys |
+| --- | --- | --- |
+| Operational | hot + tweaked private Provider + tweaked public Arkade; hot + backup; CSV + backup | collaborative leaf only |
+| Savings | hot + backup; longer CSV + backup | neither base nor tweaked cosigner identity appears |
 
 Collaborative authorization script:
 
+```text
+<canonical transaction-local policy> OP_0 OP_SIGHASH
+<0x11||directP256> OP_CHECKSIGFROMSTACK
 ```
-OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK
-```
 
-`directP256` is a PRF-derived P-256 key, **not** the WebAuthn credential
-key. The on-chain packet witness is one compact low-S 64-byte signature
-over the current Arkade sighash. WebAuthn `clientDataJSON` /
-`authenticatorData` stay off-chain.
+The WebAuthn credential key is used only for off-chain origin/RP/UV checks.
+`directP256` is a distinct PRF-derived P-256 key and signs the current Arkade
+sighash. The on-chain packet contains its compact low-S signature, not the
+WebAuthn assertion. A random secp256k1 hot key is encrypted under a
+PRF-derived key. The hot, Provider, public Arkade, and backup identities are
+pairwise independent under Taproot's x-only key semantics.
 
-Flow: register PRF passkey → draft → preflight → `credentials.get` →
-PRF-derive direct key → bind (assertion off-chain; packet gets only
-`directSig`) → hot-sign → authorize → publish by challenge.
+## Local regtest demonstration
 
-## Run
-
-Pin Go `1.26.6`. Needs Docker, Docker Compose, Nigiri, curl. Chrome +
-Bun for the browser proofs.
+Pin Go `1.26.6`. Docker, Docker Compose, Nigiri, curl, Chrome, and Bun are
+needed for the complete browser proof.
 
 ```bash
-# Private emulator + provider UI (Nigiri + Core 30+)
+# Private Emulator + provider UI. Open only http://localhost:8787.
 make vault-demo
-# Open http://localhost:8787
-make vault-demo-down   # keeps the vault-provider-data volume
+make vault-demo-down
 
 go test ./poc/2fa-vault/...
 
-# Chrome virtual authenticator, PRF primitive only
+# Chrome virtual-authenticator PRF primitive.
 make vault-browser-fixture
 
-# Full browser ceremony with the test-only unsafe local signer
+# Full browser ceremony with an explicitly unsafe in-process test signer.
 make vault-browser-e2e
 
-# Opt-in golden path: Chrome PRF -> RemoteSigner -> confirmed regtest tx
+# Opt-in Chrome -> RemoteSigner -> confirmed regtest transaction proof.
 VAULT_LIVE_ACCEPTANCE=1 make vault-regtest-e2e
 ```
 
-`vault-regtest-e2e` is the machine-checked path: unique Compose project,
-real browser enrollment, funded Operational prevout, DirectP256 bind,
-hot sign, RemoteSigner authorize, challenge-only publish, mine, provider
-restart, then Bitcoin Core confirmation of the same txid and 20,500-sat
-outflow. It refuses to touch an existing POC stack and never stops or
-deletes shared Nigiri data. Ordinary unit tests do not run it.
+The live acceptance path creates/unlocks the disposable arkd regtest wallet,
+funds the Operational output, completes the passkey/DirectP256/hot/private-
+Provider/public-Arkade flow, publishes, mines, restarts the provider, and
+verifies the same txid and durable policy state. It refuses to alter shared
+Nigiri data.
+
+The regtest launcher reads raw node JSON with
+`docker exec bitcoin bitcoin-cli getnetworkinfo`, requires numeric Core
+version `>= 300000`, and runs `testmempoolaccept` as the authoritative local
+relay-policy gate before broadcast.
+
+## Mutinynet demonstration
+
+Use [the Mutinynet runbook](poc/2fa-vault/deploy/mutinynet/README.md). It
+requires:
+
+- a stable HTTPS domain and WebAuthn RP ID;
+- a real compressed backup public key independent of every other role;
+- a file-backed random provider scalar and one-time enrollment token stored
+  outside this repository;
+- explicit Operational and Savings CSV block delays; and
+- the checkpoint-pinned Mutinynet Esplora backend.
+
+The public Arkade cosigner origin, compressed base key, and exact accepted
+version are build-time release pins. Its current `GetInfo` omits a network
+field, so it is not treated as network attestation; Esplora block-height 1
+pins Mutinynet independently. A funded descriptor from the earlier two-key
+template or v1 database is not auto-migrated.
+
+The first-enrollment overlay mounts the token only until the exact vault tuple
+is registered. Normal restarts use the base Compose file without that secret.
+Funding comes from an external Mutinynet faucet or wallet; demo fund/mine
+routes are regtest-only.
 
 ## Layout
 
+```text
+poc/2fa-vault/cmd/authorizer/       protected Mutinynet key+policy process
+poc/2fa-vault/internal/authorizer/  strict key/secret/runtime assembly
+poc/2fa-vault/internal/provider/    policy, PSBT checks, HTTP operations
+poc/2fa-vault/internal/vault/       Taproot trees and Arkade script
+poc/2fa-vault/web/                  current passkey POC client
+poc/2fa-vault/deploy/mutinynet/     TLS gateway and deployment runbook
+poc/2fa-vault/docs/                 wallet integration requirements
 ```
-poc/2fa-vault/          vault Provider, policy ledger, Taproot trees, WebAuthn, UI
-poc/2fa-vault/web/      localhost passkey page (vendored noble/scure)
-cmd/emulator.go         vendored Arkade signing oracle (not published to the host)
-docker-compose.regtest.yml   generic emulator/Nigiri harness (not the private boundary)
-poc/2fa-vault/docker-compose.yml   overlay: internal vault-signer net, :8787 only
-```
 
-The overlay creates an internal `vault-signer` network, takes the
-emulator off `nigiri` and off every host port, and publishes only
-`127.0.0.1:8787`. The image runs `poc/2fa-vault/cmd/provider`.
-`cmd/demo` is an optional local harness — do not deploy it.
+## Security claims and limits
 
-## What is implemented
-
-- Operational / Savings trees (`ark-lib` closures, NUMS internal key)
-- Provider HTTP API; Emulator `SubmitOnchainTx` is a private client only
-- TOFU enrollment of WebAuthn P-256 **and** distinct DirectP256; vault
-  built from the browser-generated hot pubkey; immutable descriptor in
-  SQLite
-- UTC-day budget (50k sat/tx, 100k sat/period, 5k sat / 10 sat/vB fee)
-  reserved before the external signer is invoked
-- Restart rebuilds trees from the stored record; signer/CSV/network/
-  template drift is refused
-- Same-origin CSP and vendored JS (blocks a CDN; does not survive a
-  compromised provider serving modified first-party JS)
-
-## What this does not prove
-
-| Claim | Status |
+| Claim | Current status |
 | --- | --- |
-| WebAuthn + period budget bind the provider key | **No.** They live in ordinary Provider Go. Raw `SubmitOnchainTx` still signs a policy-violating tx that already has a valid DirectP256 + hot signature. `TestKnownTrustBoundaryRawSignerDoesNotEnforceProviderSpendingPolicy` is green on purpose. |
-| Compromised-provider resistance | **No.** The provider serves the signing page. Stolen JS can read the PRF result, hot key, and PSBT. |
-| Independent client verification | **No.** The browser trusts the provider challenge; it does not recompute the Arkade sighash. |
-| Offline / second-signer custody | **No.** The second key is generator G. There is no offline ceremony. |
-| Crash-atomic budget + signature | **No.** A crash after Sign can leave a usable PSBT while the row stays reserved. |
-| Production WebAuthn | **No.** Local TOFU, no attestation. Unit tests still use `webauthn.Synth`. |
-| CI of the live path | **No.** `vault-regtest-e2e` is opt-in and local. Inherited emulator workflows fire only on `master` / PRs. |
-
-Hiding gRPC does not close the policy-oracle gap. That requires moving
-budget and WebAuthn state into the key-constrained signer.
-
-Packet size needs Bitcoin Core 30+ (`datacarriersize`). Publication
-still uses `testmempoolaccept` before broadcast.
+| A network caller can bypass private policy through a generic signer on Mutinynet | **Closed by topology and code surface.** The key-owning authorizer exposes only constrained operations; dependency/binary tests reject generic Emulator/gRPC clients and demo signing code. The sole outbound signer call targets the release-pinned HTTPS Arkade endpoint, whose response is reduced to one exact verified signature delta. |
+| Provider-key use is bound to WebAuthn, transaction, and budget checks | **Yes inside the Mutinynet software authorizer.** Key and authoritative ledger share one process; budget is reserved before key use. |
+| Compromise of the host/root cannot extract or misuse the provider key | **No.** Docker hardening is process isolation, not an HSM/enclave boundary. |
+| Compromised same-origin frontend is tolerated | **No.** Modified first-party JavaScript can steal the unlocked hot material or PRF result. The independent-wallet architecture is the next milestone. |
+| Browser independently derives and reconciles the Arkade sighash | **Yes for the supported one-input POC template.** Go/JavaScript parity vectors pin the witness-masked digest. |
+| Browser independently derives the complete versioned descriptor | **Not yet.** See the wallet Vault-mode requirements document. |
+| Backup-key generation/storage/signing is implemented | **No.** Mutinynet requires a real public key, but its ceremony remains out of scope. |
+| Both remote signatures and the completed ledger row are crash-atomic | **Staged, not atomic.** `reserved -> provider_signed -> completed` persists the exact request and private stage. An exact in-page retry resumes the public stage; a changed request is rejected and ambiguous reservations are never released. |
+| Mainnet readiness | **No.** Mutinynet only; one isolated vault per authorizer instance. |
 
 ## Tests
 
 ```bash
 go test ./poc/2fa-vault/...
-VAULT_TEST_DOCKER=1 go test ./poc/2fa-vault/ -run TestVaultComposeOverlay
+bun test poc/2fa-vault/web/*.test.js
 ```
 
-| Target | What it proves |
-| --- | --- |
-| `go test ./poc/2fa-vault/...` | Go policy, trees, packet, HTTP boundary (synthetic WebAuthn) |
-| `make vault-browser-fixture` | Real Chrome PRF / assertion primitive |
-| `make vault-browser-e2e` | Full browser register → bind → authorize (`-unsafe-local-signer`) |
-| `VAULT_LIVE_ACCEPTANCE=1 make vault-regtest-e2e` | RemoteSigner + confirmed regtest + restart durability |
+The suite covers every major module: tree/key separation, WebAuthn and P-256
+validation, transaction-bound DirectP256, exact PSBT correspondence, all
+three Taproot signatures, executable transaction/fee policy for both
+cosigners, durable staged reservations,
+enrollment/restart compatibility, explicit HTTP allowlists, Mutinynet chain
+checkpointing, secret parsing, Compose isolation, and a built-authorizer
+dependency/string scan.
 
-## License / provenance
-
-Vault code is under `poc/2fa-vault/`. The rest of the tree is the
-pinned emulator snapshot; see [EMULATOR.md](EMULATOR.md) and
-[SECURITY.md](SECURITY.md).
+Vault code is under `poc/2fa-vault/`; the rest is the pinned Emulator
+snapshot. See [EMULATOR.md](EMULATOR.md), [SECURITY.md](SECURITY.md), and
+[the detailed package notes](poc/2fa-vault/README.md).

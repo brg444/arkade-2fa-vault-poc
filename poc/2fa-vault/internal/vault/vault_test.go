@@ -2,8 +2,10 @@ package vault
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
+	arklib "github.com/arkade-os/arkd/pkg/ark-lib"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -11,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-func testKeys(t *testing.T) (hot, offline, provider *btcec.PrivateKey, p256 []byte) {
+func testKeys(t *testing.T) (hot, offline, provider, arkade *btcec.PrivateKey, p256 []byte) {
 	t.Helper()
 	hot, err := btcec.NewPrivateKey()
 	if err != nil {
@@ -25,16 +27,20 @@ func testKeys(t *testing.T) (hot, offline, provider *btcec.PrivateKey, p256 []by
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkade, err = btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return hot, offline, provider, webauthn.CompressedP256(p)
+	return hot, offline, provider, arkade, webauthn.CompressedP256(p)
 }
 
 func TestTreesAndSavingsExclusion(t *testing.T) {
-	hot, offline, provider, p256 := testKeys(t)
-	op, err := NewOperational(hot.PubKey(), offline.PubKey(), provider.PubKey(), p256)
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	op, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: p256})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,19 +50,22 @@ func TestTreesAndSavingsExclusion(t *testing.T) {
 	if !op.ContainsTweakedProvider() {
 		t.Fatal("operational must contain tweaked provider")
 	}
+	if !op.ContainsTweakedArkade() {
+		t.Fatal("operational must contain tweaked arkade emulator")
+	}
 
-	sv, err := NewSavings(hot.PubKey(), offline.PubKey(), provider.PubKey(), op.TweakedProvider)
+	sv, err := NewSavings(hot.PubKey(), offline.PubKey(), provider.PubKey(), op.TweakedProvider, arkade.PubKey(), op.TweakedArkade)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sv.Leaves.Collaborative != nil {
 		t.Fatal("savings must not have collaborative leaf")
 	}
-	if err := sv.AssertNoProvider(provider.PubKey(), op.TweakedProvider); err != nil {
+	if err := sv.AssertNoProvider(provider.PubKey(), op.TweakedProvider, arkade.PubKey(), op.TweakedArkade); err != nil {
 		t.Fatal(err)
 	}
-	if sv.ContainsProvider(provider.PubKey()) || sv.ContainsProvider(op.TweakedProvider) {
-		t.Fatal("savings contains provider key")
+	if sv.ContainsProvider(provider.PubKey()) || sv.ContainsProvider(op.TweakedProvider) || sv.ContainsProvider(arkade.PubKey()) || sv.ContainsProvider(op.TweakedArkade) {
+		t.Fatal("savings contains collaborative signer key")
 	}
 	if err := sv.AssertNoProvider(); err == nil {
 		t.Fatal("empty forbidden list must not prove exclusion")
@@ -69,13 +78,76 @@ func TestTreesAndSavingsExclusion(t *testing.T) {
 	}
 }
 
+func TestMutinynetTreeUsesPinnedCustomSignetParamsAndExplicitDelays(t *testing.T) {
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: 288}
+	savingsCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: 4032}
+	op, err := NewOperationalWithPolicy(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: p256}, "mutinynet", opCSV, fixtureAuthorizationPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(op.Address, "tb1p") || op.Record.Network != "mutinynet" || op.Record.CSV != opCSV {
+		t.Fatalf("mutinynet operational descriptor: address=%s network=%s csv=%+v", op.Address, op.Record.Network, op.Record.CSV)
+	}
+	sv, err := NewSavingsWithPolicy(hot.PubKey(), offline.PubKey(), "mutinynet", savingsCSV, provider.PubKey(), op.TweakedProvider, arkade.PubKey(), op.TweakedArkade)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(sv.Address, "tb1p") || sv.Record.Network != "mutinynet" || sv.Record.CSV != savingsCSV {
+		t.Fatalf("mutinynet savings descriptor: address=%s network=%s csv=%+v", sv.Address, sv.Record.Network, sv.Record.CSV)
+	}
+}
+
+func TestVaultRolesAreDistinctByXOnlyIdentity(t *testing.T) {
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	negatedHot := negateTestPub(t, hot.PubKey())
+	negatedOffline := negateTestPub(t, offline.PubKey())
+	for _, test := range []struct {
+		name  string
+		build func() error
+	}{
+		{name: "owner hot equals offline", build: func() error {
+			_, err := NewSavings(negatedOffline, offline.PubKey(), provider.PubKey())
+			return err
+		}},
+		{name: "provider equals hot", build: func() error {
+			_, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: negatedHot, ArkadeBase: arkade.PubKey(), DirectP256: p256})
+			return err
+		}},
+		{name: "provider equals offline", build: func() error {
+			_, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: negatedOffline, ArkadeBase: arkade.PubKey(), DirectP256: p256})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.build(); err == nil || !strings.Contains(err.Error(), "independent") {
+				t.Fatalf("collapsed key roles accepted: %v", err)
+			}
+		})
+	}
+	if err := requireIndependentXOnly(provider.PubKey(), negateTestPub(t, provider.PubKey()), hot.PubKey(), offline.PubKey()); err == nil || !strings.Contains(err.Error(), "independent") {
+		t.Fatalf("provider base and x-only-identical tweaked provider accepted: %v", err)
+	}
+}
+
+func negateTestPub(t *testing.T, pub *btcec.PublicKey) *btcec.PublicKey {
+	t.Helper()
+	raw := append([]byte(nil), pub.SerializeCompressed()...)
+	raw[0] ^= 1
+	negated, err := btcec.ParsePubKey(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return negated
+}
+
 func TestAuthorizationScriptExecutesOnCurrentTransaction(t *testing.T) {
-	hot, offline, provider, _ := testKeys(t)
+	hot, offline, provider, arkade, _ := testKeys(t)
 	direct, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
 	}
-	op, err := NewOperational(hot.PubKey(), offline.PubKey(), provider.PubKey(), webauthn.CompressedP256(direct))
+	op, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: webauthn.CompressedP256(direct)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +181,8 @@ func TestAuthorizationScriptExecutesOnCurrentTransaction(t *testing.T) {
 }
 
 func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
-	hot, offline, provider, p256 := testKeys(t)
-	op, err := NewOperational(hot.PubKey(), offline.PubKey(), provider.PubKey(), p256)
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	op, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: p256})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +200,7 @@ func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
 	if _, err := NewFromRecord(op.Record); err != nil {
 		t.Fatalf("operational record: %v", err)
 	}
-	sv, err := NewSavings(hot.PubKey(), offline.PubKey(), provider.PubKey(), op.TweakedProvider)
+	sv, err := NewSavings(hot.PubKey(), offline.PubKey(), provider.PubKey(), op.TweakedProvider, arkade.PubKey(), op.TweakedArkade)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +210,8 @@ func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
 }
 
 func TestNewFromRecordDirectP256IsCanonical(t *testing.T) {
-	hot, offline, provider, p256 := testKeys(t)
-	op, err := NewOperational(hot.PubKey(), offline.PubKey(), provider.PubKey(), p256)
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	op, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: p256})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +290,8 @@ func TestNewFromRecordDirectP256IsCanonical(t *testing.T) {
 }
 
 func TestOwnerSpendRejectsNegativeChange(t *testing.T) {
-	hot, offline, provider, p256 := testKeys(t)
-	op, err := NewOperational(hot.PubKey(), offline.PubKey(), provider.PubKey(), p256)
+	hot, offline, provider, arkade, p256 := testKeys(t)
+	op, err := NewOperational(OperationalKeys{Hot: hot.PubKey(), Offline: offline.PubKey(), ProviderBase: provider.PubKey(), ArkadeBase: arkade.PubKey(), DirectP256: p256})
 	if err != nil {
 		t.Fatal(err)
 	}

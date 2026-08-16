@@ -8,7 +8,6 @@ import (
 	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	"github.com/arkade-os/arkd/pkg/ark-lib/txutils"
 	"github.com/arkade-os/emulator/pkg/arkade"
-	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/btcutil/psbt"
@@ -31,26 +30,26 @@ func classifySpend(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := enforceStaticPolicy(cl); err != nil {
+	if err := enforceStaticPolicy(cl, op.Record.AuthorizationPolicy); err != nil {
 		return nil, err
 	}
 	return cl, nil
 }
 
-func enforceStaticPolicy(cl *Classified) error {
+func enforceStaticPolicy(cl *Classified, policy vault.AuthorizationPolicy) error {
 	if cl == nil || cl.Recipient == nil {
 		return fmt.Errorf("classified spend required")
 	}
-	if cl.Recipient.Value > fixture.TxRecipientCapSats {
+	if cl.Recipient.Value > policy.RecipientCapSats {
 		return fmt.Errorf("recipient exceeds transaction cap")
 	}
-	if cl.Fee > fixture.AbsoluteFeeCeiling {
+	if cl.Fee > policy.AbsoluteFeeCeilingSats {
 		return fmt.Errorf("fee exceeds ceiling")
 	}
 	if cl.VBytes <= 0 {
 		return fmt.Errorf("invalid transaction size")
 	}
-	if cl.Fee > fixture.FeerateCeilingSatPerV*cl.VBytes {
+	if cl.Fee > policy.FeerateCeilingSatPerV*cl.VBytes {
 		return fmt.Errorf("feerate exceeds ceiling")
 	}
 	return nil
@@ -102,7 +101,7 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 	}
 
 	var recipient, change, packet *wire.TxOut
-	for _, out := range ptx.UnsignedTx.TxOut {
+	for index, out := range ptx.UnsignedTx.TxOut {
 		switch {
 		case extension.IsExtension(out.PkScript):
 			if packet != nil {
@@ -131,12 +130,18 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 			if !bytes.Equal(pkt[0].Script, op.Record.AuthScript) {
 				return nil, fmt.Errorf("authorization script mismatch")
 			}
+			if index != len(ptx.UnsignedTx.TxOut)-1 {
+				return nil, fmt.Errorf("emulator packet output must be last")
+			}
 			packet = out
 		case bytes.Equal(out.PkScript, op.PkScript):
 			if change != nil {
 				return nil, fmt.Errorf("multiple change outputs")
 			}
-			if out.Value < fixture.DustSats {
+			if index != 1 || len(ptx.UnsignedTx.TxOut) != 3 {
+				return nil, fmt.Errorf("change output must be index one in the three-output form")
+			}
+			if out.Value < op.Record.AuthorizationPolicy.RecipientDustSats {
 				return nil, fmt.Errorf("change below dust")
 			}
 			change = out
@@ -144,13 +149,19 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 			if recipient != nil {
 				return nil, fmt.Errorf("multiple recipient outputs")
 			}
+			if !txscript.IsWitnessProgram(out.PkScript) {
+				return nil, fmt.Errorf("collaborative recipient must be a native segwit output")
+			}
 			if txscript.IsUnspendable(out.PkScript) || isOpReturn(out.PkScript) {
 				return nil, fmt.Errorf("unexpected op_return or unspendable output")
 			}
 			if bytes.Equal(out.PkScript, txutils.ANCHOR_PKSCRIPT) {
 				return nil, fmt.Errorf("p2a anchor recipient")
 			}
-			if out.Value < fixture.DustSats {
+			if index != 0 {
+				return nil, fmt.Errorf("recipient output must be index zero")
+			}
+			if out.Value < op.Record.AuthorizationPolicy.RecipientDustSats {
 				return nil, fmt.Errorf("recipient below dust")
 			}
 			recipient = out
@@ -214,9 +225,10 @@ func addSats(a, b int64) (int64, error) {
 func estimatedWitnessBytes(op *vault.Built) int {
 	script := op.Leaves.Collaborative.Script
 	control := op.Leaves.Collaborative.ControlBlock
-	// marker+flag, then one input witness: CompactSize(4 items), two
-	// 64-byte BIP342 sigs, script, control block.
-	return 2 + varintSize(4) +
+	// marker+flag, then one input witness: CompactSize(5 items), three
+	// 64-byte BIP342 signatures, script, control block.
+	return 2 + varintSize(5) +
+		varintSize(64) + 64 +
 		varintSize(64) + 64 +
 		varintSize(64) + 64 +
 		varintSize(len(script)) + len(script) +

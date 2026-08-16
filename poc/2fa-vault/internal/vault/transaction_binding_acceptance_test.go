@@ -39,10 +39,13 @@ func TestDirectP256AuthorizationIsTransactionBoundAndKeepsWebAuthnOffChain(t *te
 	}
 
 	f := newSecurityVaultFixture(t)
-	op, err := NewOperational(
-		f.hot.PubKey(), f.offline.PubKey(), f.provider.PubKey(),
-		directPub,
-	)
+	op, err := NewOperational(OperationalKeys{
+		Hot:          f.hot.PubKey(),
+		Offline:      f.offline.PubKey(),
+		ProviderBase: f.provider.PubKey(),
+		ArkadeBase:   f.arkade.PubKey(),
+		DirectP256:   directPub,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"crypto/ecdsa"
 	"math"
 	"testing"
 
@@ -20,6 +21,8 @@ type securityVaultFixture struct {
 	hot          *btcec.PrivateKey
 	offline      *btcec.PrivateKey
 	provider     *btcec.PrivateKey
+	arkade       *btcec.PrivateKey
+	direct       *ecdsa.PrivateKey
 	recipient    *btcec.PrivateKey
 	operational  *Built
 	savings      *Built
@@ -34,19 +37,26 @@ func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 	hot := mustSecurityK1Key(t)
 	offline := mustSecurityK1Key(t)
 	provider := mustSecurityK1Key(t)
+	arkade := mustSecurityK1Key(t)
 	recipient := mustSecurityK1Key(t)
 	p256, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatalf("generate P-256 key: %v", err)
 	}
-	operational, err := NewOperational(
-		hot.PubKey(), offline.PubKey(), provider.PubKey(), webauthn.CompressedP256(p256),
-	)
+	operational, err := NewOperational(OperationalKeys{
+		Hot:          hot.PubKey(),
+		Offline:      offline.PubKey(),
+		ProviderBase: provider.PubKey(),
+		ArkadeBase:   arkade.PubKey(),
+		DirectP256:   webauthn.CompressedP256(p256),
+	})
 	if err != nil {
 		t.Fatalf("build Operational vault: %v", err)
 	}
 	savings, err := NewSavings(
-		hot.PubKey(), offline.PubKey(), provider.PubKey(), operational.TweakedProvider,
+		hot.PubKey(), offline.PubKey(),
+		provider.PubKey(), operational.TweakedProvider,
+		arkade.PubKey(), operational.TweakedArkade,
 	)
 	if err != nil {
 		t.Fatalf("build Savings vault: %v", err)
@@ -67,6 +77,8 @@ func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 		hot:          hot,
 		offline:      offline,
 		provider:     provider,
+		arkade:       arkade,
+		direct:       p256,
 		recipient:    recipient,
 		operational:  operational,
 		savings:      savings,

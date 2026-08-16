@@ -1,4 +1,5 @@
-// Package fixture pins the single-provider, single-policy POC configuration.
+// Package fixture pins the two-independent-cosigner, single-policy POC
+// configuration.
 package fixture
 
 import (
@@ -38,17 +39,17 @@ const (
 	HKDFInfo           = "arkade-2fa-vault/kek/v1"
 	DirectP256HKDFInfo = "arkade-2fa-vault/direct-p256/v1"
 	HKDFHashName       = "SHA-256"
-	// OfflinePubHex is a known-valid compressed secp256k1 point (the generator).
-	// Compose uses it as the opaque VAULT_OFFLINE_PUB fixture. The runnable
-	// provider never holds the corresponding private scalar.
+	// OfflinePubHex is the public deterministic regtest-only generator-G
+	// fixture with known scalar 1. The regtest provider never holds that scalar;
+	// Mutinynet startup rejects this x-only identity in either parity.
 	OfflinePubHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
 	HTTPAddr = "localhost:8787"
 
 	// TemplateVersion / PolicyVersion / Network are persisted at enrollment.
 	// A restart with different values must refuse to rebuild the trees.
-	TemplateVersion = "2fa-vault-direct-p256-v1"
-	PolicyVersion   = "tx50k-day100k-fee5k-feerate10-v1"
+	TemplateVersion = "2fa-vault-direct-p256-3of3-v2"
+	PolicyVersion   = "tx50k-day100k-fee5k-feerate10-onchain-v2"
 	Network         = "regtest"
 )
 

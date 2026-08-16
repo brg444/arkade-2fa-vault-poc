@@ -1,11 +1,13 @@
 package vault
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
@@ -38,6 +40,26 @@ func TestFinalizeCollaborativeFailClosed(t *testing.T) {
 	dup.Inputs[0].TaprootScriptSpendSig = append(dup.Inputs[0].TaprootScriptSpendSig, dup.Inputs[0].TaprootScriptSpendSig[0])
 	if err := FinalizeCollaborative(dup, f.operational); err == nil {
 		t.Fatal("duplicate signature accepted")
+	}
+
+	for name, missing := range map[string][]byte{
+		"hot":              schnorr.SerializePubKey(f.hot.PubKey()),
+		"private provider": schnorr.SerializePubKey(f.operational.TweakedProvider),
+		"public arkade":    schnorr.SerializePubKey(f.operational.TweakedArkade),
+	} {
+		t.Run("missing "+name, func(t *testing.T) {
+			partial := clonePSBT(t, ptx)
+			kept := partial.Inputs[0].TaprootScriptSpendSig[:0]
+			for _, sig := range partial.Inputs[0].TaprootScriptSpendSig {
+				if !bytes.Equal(sig.XOnlyPubKey, missing) {
+					kept = append(kept, sig)
+				}
+			}
+			partial.Inputs[0].TaprootScriptSpendSig = kept
+			if err := FinalizeCollaborative(partial, f.operational); err == nil {
+				t.Fatalf("finalized without the %s signature", name)
+			}
+		})
 	}
 
 	wrongLeaf := clonePSBT(t, ptx)
@@ -95,6 +117,12 @@ func signedCollaborative(t *testing.T, f *securityVaultFixture) *psbt.Packet {
 		t.Fatal(err)
 	}
 	AddPartialSig(spend.Packet, prov.PubKey(), f.operational.Leaves.Collaborative.Hash, provSig)
+	arkadePriv := arkade.ComputeArkadeScriptPrivateKey(f.arkade, tweak)
+	arkadeSig, err := SignLeaf(spend.Packet.UnsignedTx, spend.Packet.Inputs[0].WitnessUtxo, f.operational.Leaves.Collaborative.Script, arkadePriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	AddPartialSig(spend.Packet, arkadePriv.PubKey(), f.operational.Leaves.Collaborative.Hash, arkadeSig)
 	return spend.Packet
 }
 

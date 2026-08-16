@@ -2,7 +2,9 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +14,52 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
 )
+
+func TestConcurrentExactRegisterAndStatusKeepRuntimeKeysImmutable(t *testing.T) {
+	svc, req := newRegisterableService(t)
+	if err := svc.Register(req); err != nil {
+		t.Fatal(err)
+	}
+	wantOffline, wantProvider := svc.Offline, svc.ProviderPub
+	start := make(chan struct{})
+	errs := make(chan error, 8)
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 20; i++ {
+				if worker%2 == 0 {
+					if err := svc.Register(req); err != nil {
+						errs <- err
+						return
+					}
+					continue
+				}
+				status, err := svc.Status(context.Background())
+				if err != nil {
+					errs <- err
+					return
+				}
+				if status.BackupPub == "" || status.ProviderBasePub == "" || status.OperationalAddr == "" {
+					errs <- fmt.Errorf("partial status during idempotent registration: %+v", status)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if svc.Offline != wantOffline || svc.ProviderPub != wantProvider {
+		t.Fatal("idempotent registration rewrote immutable runtime keys")
+	}
+}
 
 func TestRegisterExactRetryAcceptedAndMismatchesStayLocked(t *testing.T) {
 	svc, req := newRegisterableService(t)
@@ -76,6 +124,10 @@ func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	passkey, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +145,11 @@ func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 		Ledger:      led,
 		Offline:     offline.PubKey(),
 		ProviderPub: prov.PubKey(),
+		ArkadePub:   arkadeKey.PubKey(),
 		Signer:      LocalSigner{Priv: prov},
+		ArkadeSigner: LocalSigner{
+			Priv: arkadeKey,
+		},
 	}
 	req := RegisterRequest{
 		CredentialID: hex.EncodeToString([]byte("enroll-credential")),
@@ -169,6 +225,10 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 			t.Fatal(err)
 		}
 	}
+	arkadeKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req := RegisterRequest{
 		CredentialID: hex.EncodeToString([]byte("shared-credential")),
@@ -185,13 +245,21 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 			Ledger:      ledgers[0],
 			Offline:     offlineA.PubKey(),
 			ProviderPub: provA.PubKey(),
+			ArkadePub:   arkadeKey.PubKey(),
 			Signer:      LocalSigner{Priv: provA},
+			ArkadeSigner: LocalSigner{
+				Priv: arkadeKey,
+			},
 		}},
 		{svc: &Service{
 			Ledger:      ledgers[1],
 			Offline:     offlineB.PubKey(),
 			ProviderPub: provB.PubKey(),
+			ArkadePub:   arkadeKey.PubKey(),
 			Signer:      LocalSigner{Priv: provB},
+			ArkadeSigner: LocalSigner{
+				Priv: arkadeKey,
+			},
 		}},
 	}
 

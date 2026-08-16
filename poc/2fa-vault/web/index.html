@@ -11,9 +11,10 @@
   <main>
     <h1>2FA Operational Vault</h1>
     <p class="sub">Passkey PRF unlocks the hot key. The provider never sees PRF material.</p>
-    <section id="view-enroll">
-      <h2>1. Register</h2>
-      <button id="btn-enroll">Create passkey + encrypted hot key</button>
+	<section id="view-enroll">
+	  <h2>1. Register</h2>
+	  <label>One-time enrollment token <input id="bootstrap-token" type="password" autocomplete="off" /></label>
+	  <button id="btn-enroll">Create passkey + encrypted hot key</button>
     </section>
     <section id="view-status">
       <h2>2. Balances</h2>

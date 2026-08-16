@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/arkade-os/arkd/pkg/macaroons"
 	emulatorv1 "github.com/arkade-os/emulator/api-spec/protobuf/gen/emulator/v1"
@@ -31,7 +32,7 @@ type service struct {
 	grpcServer *grpc.Server
 	// macaroonSvc gates the signing endpoints when set. It is nil until a
 	// deployment configures macaroon auth, in which case requests are served
-	// unauthenticated.
+	// only after macaroon validation.
 	macaroonSvc *macaroons.Service
 }
 
@@ -107,6 +108,12 @@ const (
 	// ServeHTTP path used here concurrency is governed by net/http's HTTP/2
 	// server, which defaults to 250 streams per connection.
 	maxConcurrentStreams = 256
+
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 30 * time.Second
+	httpWriteTimeout      = 3 * time.Minute
+	httpIdleTimeout       = 2 * time.Minute
+	maxHTTPHeaderBytes    = 64 * 1024
 )
 
 func serverOptions() []grpc.ServerOption {
@@ -191,13 +198,22 @@ func (s *service) newServer() error {
 	protocols.SetUnencryptedHTTP2(true)
 
 	s.grpcServer = grpcServer
-	s.server = &http.Server{
-		Addr:      s.config.address(),
-		Handler:   httpServerHandler,
-		Protocols: protocols,
-	}
+	s.server = newHTTPServer(s.config.address(), httpServerHandler, protocols)
 
 	return nil
+}
+
+func newHTTPServer(addr string, handler http.Handler, protocols *http.Protocols) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		Protocols:         protocols,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    maxHTTPHeaderBytes,
+	}
 }
 
 func router(

@@ -139,7 +139,6 @@ func TestSubmitFinalizationRejectsUnknownCommitmentTx(t *testing.T) {
 	// keep the retry loop fast for the unit test
 	oldRetryConfig := commitmentTxRetryConfig
 	commitmentTxRetryConfig = retryConfig{
-		MinAttempts:  1,
 		MaxAttempts:  2,
 		InitialDelay: time.Millisecond,
 		MaxDelay:     time.Millisecond,

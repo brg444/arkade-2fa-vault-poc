@@ -34,10 +34,11 @@ func TestOfflineSignerRequiredOnOwnerRecoveryAndAbsentFromSavings(t *testing.T) 
 	if leafContainsSecurityKey(op.Leaves.Collaborative, f.offline.PubKey()) {
 		t.Fatal("collaborative leaf unexpectedly contains the offline key")
 	}
-	if err := sv.AssertNoProvider(f.provider.PubKey(), op.TweakedProvider); err != nil {
+	if err := sv.AssertNoProvider(f.provider.PubKey(), op.TweakedProvider, f.arkade.PubKey(), op.TweakedArkade); err != nil {
 		t.Fatal(err)
 	}
-	if sv.ContainsProvider(f.provider.PubKey()) || sv.ContainsProvider(op.TweakedProvider) {
+	if sv.ContainsProvider(f.provider.PubKey()) || sv.ContainsProvider(op.TweakedProvider) ||
+		sv.ContainsProvider(f.arkade.PubKey()) || sv.ContainsProvider(op.TweakedArkade) {
 		t.Fatal("Savings contains a provider key")
 	}
 	if sv.Leaves.Collaborative != nil {
@@ -58,23 +59,30 @@ func TestOperationalAndSavingsVaultKeyContainment(t *testing.T) {
 	if !op.ContainsTweakedProvider() {
 		t.Fatal("Operational vault does not contain its tweaked Provider key")
 	}
-	if op.ContainsProvider(f.provider.PubKey()) {
-		t.Fatal("Operational vault contains the untweaked Provider base key")
+	if !op.ContainsTweakedArkade() {
+		t.Fatal("Operational vault does not contain its tweaked Arkade Emulator key")
+	}
+	if op.ContainsProvider(f.provider.PubKey()) || op.ContainsProvider(f.arkade.PubKey()) {
+		t.Fatal("Operational vault contains an untweaked collaborator base key")
 	}
 	if !leafContainsSecurityKey(op.Leaves.Collaborative, f.hot.PubKey()) ||
-		!leafContainsSecurityKey(op.Leaves.Collaborative, op.TweakedProvider) {
-		t.Fatal("collaborative leaf must contain exactly the hot and tweaked Provider authorities")
+		!leafContainsSecurityKey(op.Leaves.Collaborative, op.TweakedProvider) ||
+		!leafContainsSecurityKey(op.Leaves.Collaborative, op.TweakedArkade) {
+		t.Fatal("collaborative leaf must contain exactly hot and both tweaked collaborators")
 	}
 	if leafContainsSecurityKey(op.Leaves.Owner, op.TweakedProvider) ||
-		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedProvider) {
-		t.Fatal("Provider key leaked into an owner-controlled Operational path")
+		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedProvider) ||
+		leafContainsSecurityKey(op.Leaves.Owner, op.TweakedArkade) ||
+		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedArkade) {
+		t.Fatal("collaborator key leaked into an owner-controlled Operational path")
 	}
 
 	if savings.Leaves.Collaborative != nil {
 		t.Fatal("Savings vault unexpectedly has a collaborative leaf")
 	}
-	if savings.ContainsProvider(f.provider.PubKey()) || savings.ContainsProvider(op.TweakedProvider) {
-		t.Fatal("Savings vault contains Provider signing authority")
+	if savings.ContainsProvider(f.provider.PubKey()) || savings.ContainsProvider(op.TweakedProvider) ||
+		savings.ContainsProvider(f.arkade.PubKey()) || savings.ContainsProvider(op.TweakedArkade) {
+		t.Fatal("Savings vault contains collaborative signing authority")
 	}
 	if bytes.Equal(op.PkScript, savings.PkScript) || op.Address == savings.Address {
 		t.Fatal("Operational and Savings vaults unexpectedly derived the same output")
@@ -88,7 +96,7 @@ func TestVaultClosuresHaveExpectedKeysAndDelays(t *testing.T) {
 	op := f.operational
 	savings := f.savings
 
-	assertSecurityMultisigKeys(t, op.Leaves.Collaborative, f.hot.PubKey(), op.TweakedProvider)
+	assertSecurityMultisigKeys(t, op.Leaves.Collaborative, f.hot.PubKey(), op.TweakedProvider, op.TweakedArkade)
 	assertSecurityMultisigKeys(t, op.Leaves.Owner, f.hot.PubKey(), f.offline.PubKey())
 	assertSecurityCSVKeyAndDelay(t, op.Leaves.Recovery, f.offline.PubKey(), op.Record.CSV.Value)
 	assertSecurityMultisigKeys(t, savings.Leaves.Owner, f.hot.PubKey(), f.offline.PubKey())

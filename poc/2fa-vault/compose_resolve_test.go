@@ -35,6 +35,11 @@ func TestVaultComposeOverlayBuildContextResolvesFromEmulatorRoot(t *testing.T) {
 	if !strings.Contains(text, "VAULT_OFFLINE_PUB") || !strings.Contains(text, fixture.OfflinePubHex) {
 		t.Fatal("compose must set the opaque known-valid VAULT_OFFLINE_PUB fixture")
 	}
+	for _, required := range []string{"arkade-emulator:", "VAULT_ARKADE_EMULATOR: arkade-emulator:7073", "13b7f7f06e4f7c4fa33d3d2017e455496e883202e8b0b5e0d5f39f23532f45b1"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("compose is missing independent regtest Arkade cosigner %q", required)
+		}
+	}
 	if !strings.Contains(text, "127.0.0.1:8787:8787") {
 		t.Fatal("UI port must remain loopback-only")
 	}
@@ -94,8 +99,8 @@ func TestVaultComposeOverlayBuildContextResolvesFromEmulatorRoot(t *testing.T) {
 	if !strings.Contains(sh, "300000") || !strings.Contains(sh, "-lt 300000") {
 		t.Fatal("regtest-up.sh must require a numeric Bitcoin Core version >= 300000")
 	}
-	if !strings.Contains(sh, "117-byte") || !strings.Contains(sh, "83-byte") {
-		t.Fatal("regtest-up.sh must explain the 117-byte packet vs the old 83-byte default")
+	if !strings.Contains(sh, "274-byte") || !strings.Contains(sh, "83-byte") {
+		t.Fatal("regtest-up.sh must explain the current 274-byte packet vs the old 83-byte default")
 	}
 	if !strings.Contains(sh, "testmempoolaccept remains the authoritative custom-policy gate") {
 		t.Fatal("regtest-up.sh must keep testmempoolaccept as the publish policy gate")
@@ -119,8 +124,8 @@ func TestVaultComposeOverlayBuildContextResolvesFromEmulatorRoot(t *testing.T) {
 	if !strings.Contains(sh, "http://localhost:8787") {
 		t.Fatal("regtest-up.sh must print the WebAuthn origin")
 	}
-	if !strings.Contains(sh, `emulator must have exactly one attached network`) {
-		t.Fatal("regtest-up.sh must require emulator to have exactly one attached network")
+	if !strings.Contains(sh, `for signer_container in emulator arkade-emulator`) || !strings.Contains(sh, `$signer_container must have exactly one attached network`) {
+		t.Fatal("regtest-up.sh must require both cosigners to have exactly one attached network")
 	}
 	if !strings.Contains(sh, "Internal=true") && !strings.Contains(sh, "{{.Internal}}") {
 		t.Fatal("regtest-up.sh must require the emulator network Internal=true")
@@ -253,19 +258,21 @@ func checkMergedComposeJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return fmt.Errorf("compose config json: %w\n%s", err, raw)
 	}
-	em, ok := cfg.Services["emulator"]
-	if !ok {
-		return fmt.Errorf("merged compose is missing emulator")
-	}
-	emNets, err := networkSet("emulator", em.Networks)
-	if err != nil {
-		return err
-	}
-	if strings.Join(emNets, ",") != "vault-signer" {
-		return fmt.Errorf("rendered emulator networks = %v, want exactly [vault-signer]", emNets)
-	}
-	if len(em.Ports) > 0 {
-		return fmt.Errorf("emulator must not publish host ports: %+v", em.Ports)
+	for _, name := range []string{"emulator", "arkade-emulator"} {
+		em, ok := cfg.Services[name]
+		if !ok {
+			return fmt.Errorf("merged compose is missing %s", name)
+		}
+		emNets, err := networkSet(name, em.Networks)
+		if err != nil {
+			return err
+		}
+		if strings.Join(emNets, ",") != "vault-signer" {
+			return fmt.Errorf("rendered %s networks = %v, want exactly [vault-signer]", name, emNets)
+		}
+		if len(em.Ports) > 0 {
+			return fmt.Errorf("%s must not publish host ports: %+v", name, em.Ports)
+		}
 	}
 
 	signer, ok := cfg.Networks["vault-signer"]
@@ -393,6 +400,7 @@ func TestMergedComposeJSONRequiresProjectScopedSignerAndNamedVolume(t *testing.T
 	raw := []byte(`{
 		"services": {
 			"emulator": {"networks": {"vault-signer": null}, "ports": []},
+			"arkade-emulator": {"networks": {"vault-signer": null}, "ports": []},
 			"arkd": {"networks": {"default": null, "vault-signer": null}, "ports": []},
 			"vault-provider": {
 				"networks": {"default": null, "vault-signer": null},
@@ -412,6 +420,7 @@ func TestMergedComposeJSONRequiresProjectScopedSignerAndNamedVolume(t *testing.T
 	bind := []byte(`{
 		"services": {
 			"emulator": {"networks": {"vault-signer": null}},
+			"arkade-emulator": {"networks": {"vault-signer": null}},
 			"arkd": {"networks": {"default": null, "vault-signer": null}},
 			"vault-provider": {
 				"networks": {"default": null, "vault-signer": null},
@@ -430,6 +439,7 @@ func TestMergedComposeJSONRequiresProjectScopedSignerAndNamedVolume(t *testing.T
 	global := []byte(`{
 		"services": {
 			"emulator": {"networks": {"vault-signer": null}},
+			"arkade-emulator": {"networks": {"vault-signer": null}},
 			"arkd": {"networks": {"default": null, "vault-signer": null}},
 			"vault-provider": {
 				"networks": {"default": null, "vault-signer": null},

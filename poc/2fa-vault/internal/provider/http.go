@@ -1,12 +1,14 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +16,12 @@ import (
 )
 
 const maxJSONBody = 1 << 20
+const EnrollmentTokenHeader = "X-Vault-Enrollment-Token"
+
+const (
+	publishOperationTimeout = 55 * time.Second
+	serverWriteTimeout      = 75 * time.Second
+)
 
 // NewServer wraps h with the POC listen timeouts.
 func NewServer(addr string, h http.Handler) *http.Server {
@@ -22,8 +30,10 @@ func NewServer(addr string, h http.Handler) *http.Server {
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// A publish operation has its own 55-second deadline. Leave a bounded
+		// response margin above it for error serialization and slow clients.
+		WriteTimeout: serverWriteTimeout,
+		IdleTimeout:  60 * time.Second,
 	}
 }
 
@@ -37,10 +47,76 @@ func Handler(svc *Service, webDir string) http.Handler {
 	return NewHandler(svc, webDir, nil)
 }
 
+// AuthorizerHandler is the protected software-box surface. It deliberately
+// has no static file handler, demo controller, or raw signing route.
+func AuthorizerHandler(svc *Service) http.Handler {
+	origin := serviceOrigin(svc)
+	mux := http.NewServeMux()
+	attachCoreRoutes(mux, svc, origin)
+	inner := withCORS(mux, origin)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods, known := authorizerRouteMethods[r.URL.Path]
+		if !known {
+			http.NotFound(w, r)
+			return
+		}
+		if _, allowed := methods[r.Method]; !allowed {
+			w.Header().Set("Allow", strings.Join(sortedMethods(methods), ", "))
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+var authorizerRouteMethods = map[string]map[string]struct{}{
+	"/health":       {http.MethodGet: {}},
+	"/v1/status":    {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/register":  {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/preflight": {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/draft":     {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/bind":      {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/authorize": {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/publish":   {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/tx":        {http.MethodGet: {}, http.MethodOptions: {}},
+}
+
+func sortedMethods(methods map[string]struct{}) []string {
+	out := make([]string, 0, len(methods))
+	for method := range methods {
+		out = append(out, method)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // NewHandler builds the public API. A nil demo is fail-closed: /v1/demo/*
 // is 404 and never reaches Bitcoin RPC.
 func NewHandler(svc *Service, webDir string, demo *Demo) http.Handler {
+	origin := serviceOrigin(svc)
 	mux := http.NewServeMux()
+	attachCoreRoutes(mux, svc, origin)
+	if demo != nil {
+		demo.attach(mux, origin)
+	} else {
+		mux.HandleFunc("/v1/demo/", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		})
+	}
+	if webDir != "" {
+		mux.Handle("/", http.FileServer(http.Dir(webDir)))
+	}
+	return withCORS(mux, origin)
+}
+
+func serviceOrigin(svc *Service) string {
+	if svc == nil {
+		return fixture.Origin
+	}
+	return svc.runtimeConfig().ClientOrigin
+}
+
+func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -51,43 +127,43 @@ func NewHandler(svc *Service, webDir string, demo *Demo) http.Handler {
 	})
 	mux.HandleFunc("POST /v1/register", func(w http.ResponseWriter, r *http.Request) {
 		var req RegisterRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		err := svc.Register(req)
+		err := svc.RegisterWithBootstrap(req, r.Header.Get(EnrollmentTokenHeader))
 		writeJSON(w, map[string]any{"ok": err == nil}, err)
 	})
 	mux.HandleFunc("POST /v1/preflight", func(w http.ResponseWriter, r *http.Request) {
 		var req PreflightRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		resp, err := svc.Preflight(req.PSBT)
+		resp, err := svc.PreflightContext(r.Context(), req.PSBT)
 		writeJSON(w, resp, err)
 	})
 	mux.HandleFunc("POST /v1/draft", func(w http.ResponseWriter, r *http.Request) {
 		var req DraftRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		psbt, err := svc.Draft(req)
+		psbt, err := svc.DraftContext(r.Context(), req)
 		writeJSON(w, map[string]any{"psbt": psbt}, err)
 	})
 	mux.HandleFunc("POST /v1/bind", func(w http.ResponseWriter, r *http.Request) {
 		var req BindRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		psbt, err := svc.Bind(req)
+		psbt, err := svc.BindContext(r.Context(), req)
 		writeJSON(w, map[string]any{"psbt": psbt}, err)
 	})
 	mux.HandleFunc("POST /v1/authorize", func(w http.ResponseWriter, r *http.Request) {
 		var req AuthorizeRequest
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
@@ -98,28 +174,21 @@ func NewHandler(svc *Service, webDir string, demo *Demo) http.Handler {
 		var req struct {
 			Challenge string `json:"challenge"`
 		}
-		if err := decodeMutation(r, &req); err != nil {
+		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		out, err := svc.Publish(r.Context(), req.Challenge)
+		opCtx, cancel := context.WithTimeout(r.Context(), publishOperationTimeout)
+		defer cancel()
+		out, err := svc.Publish(opCtx, req.Challenge)
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("GET /v1/tx", func(w http.ResponseWriter, r *http.Request) {
-		out, err := svc.PublicationStatus(r.Context(), r.URL.Query().Get("challenge"))
+		opCtx, cancel := context.WithTimeout(r.Context(), publishOperationTimeout)
+		defer cancel()
+		out, err := svc.PublicationStatus(opCtx, r.URL.Query().Get("challenge"))
 		writeJSON(w, out, err)
 	})
-	if demo != nil {
-		demo.attach(mux)
-	} else {
-		mux.HandleFunc("/v1/demo/", func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "404 page not found", http.StatusNotFound)
-		})
-	}
-	if webDir != "" {
-		mux.Handle("/", http.FileServer(http.Dir(webDir)))
-	}
-	return withCORS(mux)
 }
 
 type mutationError struct {
@@ -129,12 +198,12 @@ type mutationError struct {
 
 func (e *mutationError) Error() string { return e.msg }
 
-func decodeMutation(r *http.Request, dst any) error {
+func decodeMutation(r *http.Request, dst any, expectedOrigin string) error {
 	ct := r.Header.Get("Content-Type")
 	if ct != "application/json" && !strings.HasPrefix(ct, "application/json;") {
 		return &mutationError{http.StatusUnsupportedMediaType, "content-type"}
 	}
-	if r.Header.Get("Origin") != fixture.Origin {
+	if expectedOrigin == "" || r.Header.Get("Origin") != expectedOrigin {
 		return &mutationError{http.StatusForbidden, "origin"}
 	}
 	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
@@ -170,19 +239,25 @@ func writeMutationError(w http.ResponseWriter, err error) {
 func writeJSON(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		log.Printf("provider error: %s", redact(err.Error()))
-		w.WriteHeader(http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrVerificationBusy) {
+			status = http.StatusTooManyRequests
+			w.Header().Set("Retry-After", "1")
+		} else {
+			log.Printf("provider error: %s", redact(err.Error()))
+		}
+		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func withCORS(next http.Handler) http.Handler {
+func withCORS(next http.Handler, origin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", ContentSecurityPolicy)
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:8787")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+EnrollmentTokenHeader)
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
