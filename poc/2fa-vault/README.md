@@ -1,4 +1,7 @@
-# Arkade 2FA Vault POC
+# Arkade 2FA Vault — package notes
+
+Repository landing page: [../../README.md](../../README.md). This file is
+the trust-boundary and runbook detail for `poc/2fa-vault`.
 
 Go authorization harness plus a localhost browser page. Open **only**
 `http://localhost:8787` (RP ID and Origin are `localhost`). The compose
@@ -159,11 +162,11 @@ public generator-G fixture above, not a secret. Hot is enrolled by the
 browser. SQLite persists on the
 named volume `vault-provider-data`; `make vault-demo-down` keeps that volume.
 
-Run the merge from the emulator repo root: overlay `build.context` is `.`
+Run the merge from this repository root: overlay `build.context` is `.`
 because Compose resolves relative paths from the first `-f` file.
 
 ```bash
-# From the emulator repository root (requires docker, docker compose, nigiri, curl):
+# From this repository root (requires docker, docker compose, nigiri, curl):
 make vault-demo
 # Open http://localhost:8787
 make vault-demo-down
