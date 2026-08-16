@@ -23,6 +23,6 @@ WORKDIR /app
 # client, or generic signing server. It contains only the narrow release-pinned
 # HTTPS client for the independent public Arkade cosigner. The public
 # generator-G identity remains linked only so startup can reject that fixture
-# and its negation. Compose mounts the real provider key read-only and SQLite
+# and its negation. Compose mounts the real VaultCosigner key read-only and SQLite
 # at /app/data, then connects this listener only to the private gateway network.
 ENTRYPOINT ["vault-authorizer"]

@@ -126,7 +126,7 @@ func (s *RemoteSigner) BindExpectedProvider(expected []byte) {
 	s.BindExpectedSigner(expected)
 }
 
-func (s *RemoteSigner) expectedProvider() []byte {
+func (s *RemoteSigner) expectedSigner() []byte {
 	if s == nil {
 		return nil
 	}
@@ -136,7 +136,7 @@ func (s *RemoteSigner) expectedProvider() []byte {
 }
 
 // SuccessfulCalls counts responses that passed exact transaction and pinned
-// provider-signature verification and were reconstructed as original+sig.
+// signer-signature verification and were reconstructed as original+sig.
 func (s *RemoteSigner) SuccessfulCalls() uint64 {
 	if s == nil {
 		return 0
@@ -164,9 +164,9 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 	if isNilInterface(s.Client) {
 		return nil, fmt.Errorf("remote signer missing client")
 	}
-	expected := s.expectedProvider()
+	expected := s.expectedSigner()
 	if len(expected) != 32 {
-		return nil, fmt.Errorf("remote signer missing expected provider key")
+		return nil, fmt.Errorf("remote signer missing expected key")
 	}
 	if ptx == nil || ptx.UnsignedTx == nil || len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
 		return nil, fmt.Errorf("exactly one input required")
@@ -188,7 +188,7 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 	if err != nil {
 		return nil, err
 	}
-	providerSig, err := extractVerifiedSignerSig(ptx, out, expected)
+	signerSig, err := extractVerifiedSignerSig(ptx, out, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet
 	if clone == nil || len(clone.Inputs) != 1 {
 		return nil, fmt.Errorf("cloned packet missing input")
 	}
-	clone.Inputs[0].TaprootScriptSpendSig = append(clone.Inputs[0].TaprootScriptSpendSig, providerSig)
+	clone.Inputs[0].TaprootScriptSpendSig = append(clone.Inputs[0].TaprootScriptSpendSig, signerSig)
 	s.successes.Add(1)
 	return clone, nil
 }

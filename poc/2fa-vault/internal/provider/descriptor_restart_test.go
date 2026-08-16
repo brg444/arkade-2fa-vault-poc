@@ -28,6 +28,10 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	externalOwner, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	offline, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -49,27 +53,28 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	enrolled := &Service{
-		Ledger:      ledger,
-		Offline:     offline.PubKey(),
-		ProviderPub: providerKey.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: providerKey},
-		ArkadeSigner: LocalSigner{
+		Ledger:              ledger,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    providerKey.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: providerKey},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	if err := enrolled.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("descriptor-cred")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(p256)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("descriptor-cred")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(p256)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	wantOp := enrolled.Operational.Address
 	wantSv := enrolled.Savings.Address
-	wantTweak := schnorr.SerializePubKey(enrolled.Operational.TweakedProvider)
-	wantArkadeTweak := schnorr.SerializePubKey(enrolled.Operational.TweakedArkade)
+	wantTweak := schnorr.SerializePubKey(enrolled.Operational.TweakedVaultCosigner)
+	wantArkadeTweak := schnorr.SerializePubKey(enrolled.Operational.TweakedArkadeCosigner)
 	persisted, err := ledger.GetCredential()
 	if err != nil || persisted == nil {
 		t.Fatalf("persisted enrollment: %v", err)
@@ -93,16 +98,16 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		execCredentialUpdate(t, dbPath, `UPDATE credential SET direct_p256_compressed = ?`, webauthn.CompressedP256(alternate))
+		execCredentialUpdate(t, dbPath, `UPDATE credential SET phone_direct_p256_compressed = ?`, webauthn.CompressedP256(alternate))
 		t.Cleanup(func() {
-			execCredentialUpdate(t, dbPath, `UPDATE credential SET direct_p256_compressed = ?`, persisted.DirectP256)
+			execCredentialUpdate(t, dbPath, `UPDATE credential SET phone_direct_p256_compressed = ?`, persisted.PhoneDirectP256)
 		})
 		restart, err := policy.OpenLedger(dbPath, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = restart.Close() })
-		svc := &Service{Ledger: restart, Offline: offline.PubKey(), ProviderPub: providerKey.PubKey()}
+		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey()}
 		if err := svc.LoadVaults(); err == nil || !strings.Contains(err.Error(), "credential integrity") {
 			t.Fatalf("live credential substitution was not rejected before publish: %v", err)
 		}
@@ -114,21 +119,21 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 		execCredentialUpdate(t, dbPath, `UPDATE credential SET
-			operational_address = ?, operational_script = ?, savings_address = ?, savings_script = ?, tweaked_provider_compressed = ?`,
+			operational_address = ?, operational_script = ?, savings_address = ?, savings_script = ?, tweaked_vault_cosigner_compressed = ?`,
 			"bcrt1pmodified-operational", []byte{0x51, 0x20, 0x01},
 			"bcrt1pmodified-savings", []byte{0x51, 0x20, 0x02}, alternate.PubKey().SerializeCompressed())
 		t.Cleanup(func() {
 			execCredentialUpdate(t, dbPath, `UPDATE credential SET
-				operational_address = ?, operational_script = ?, savings_address = ?, savings_script = ?, tweaked_provider_compressed = ?`,
+				operational_address = ?, operational_script = ?, savings_address = ?, savings_script = ?, tweaked_vault_cosigner_compressed = ?`,
 				persisted.OperationalAddress, persisted.OperationalScript,
-				persisted.SavingsAddress, persisted.SavingsScript, persisted.TweakedProvider)
+				persisted.SavingsAddress, persisted.SavingsScript, persisted.TweakedVaultCosigner)
 		})
 		restart, err := policy.OpenLedger(dbPath, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = restart.Close() })
-		svc := &Service{Ledger: restart, Offline: offline.PubKey(), ProviderPub: providerKey.PubKey()}
+		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey()}
 		if err := svc.LoadVaults(); err == nil || !strings.Contains(err.Error(), "credential integrity") {
 			t.Fatalf("derived descriptor corruption was not rejected before rebuild: %v", err)
 		}
@@ -143,9 +148,10 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = restart.Close() })
 		svc := &Service{
-			Ledger:      restart,
-			Offline:     offline.PubKey(),
-			ProviderPub: providerKey.PubKey(),
+			Ledger:              restart,
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         offline.PubKey(),
+			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
 			t.Fatal("LoadVaults accepted a stored origin that does not match runtime")
@@ -161,9 +167,10 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = restart.Close() })
 		svc := &Service{
-			Ledger:      restart,
-			Offline:     offline.PubKey(),
-			ProviderPub: providerKey.PubKey(),
+			Ledger:              restart,
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         offline.PubKey(),
+			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
 			t.Fatal("LoadVaults accepted a stored RP ID that does not match runtime")
@@ -177,9 +184,10 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = restart.Close() })
 		svc := &Service{
-			Ledger:      restart,
-			Offline:     otherOffline.PubKey(),
-			ProviderPub: providerKey.PubKey(),
+			Ledger:              restart,
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         otherOffline.PubKey(),
+			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
 			t.Fatal("LoadVaults accepted a different offline pubkey")
@@ -193,9 +201,10 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = restart.Close() })
 		svc := &Service{
-			Ledger:      restart,
-			Offline:     offline.PubKey(),
-			ProviderPub: rotated.PubKey(),
+			Ledger:              restart,
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         offline.PubKey(),
+			VaultCosignerPub:    rotated.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
 			t.Fatal("LoadVaults accepted a rotated provider key with no deprecated list")
@@ -210,11 +219,12 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		t.Cleanup(func() { _ = restart.Close() })
 		remote := &RemoteSigner{}
 		svc := &Service{
-			Ledger:             restart,
-			Offline:            offline.PubKey(),
-			ProviderPub:        rotated.PubKey(),
-			DeprecatedProvider: []*btcec.PublicKey{providerKey.PubKey()},
-			Signer:             remote,
+			Ledger:                   restart,
+			ExternalOwnerWallet:      externalOwner.PubKey(),
+			RecoveryKey:              offline.PubKey(),
+			VaultCosignerPub:         rotated.PubKey(),
+			DeprecatedVaultCosigners: []*btcec.PublicKey{providerKey.PubKey()},
+			VaultSigner:              remote,
 		}
 		if err := svc.LoadVaults(); err != nil {
 			t.Fatalf("LoadVaults with deprecated enrolled key: %v", err)
@@ -223,13 +233,13 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 			t.Fatalf("restart derived different addresses: op %s want %s, sv %s want %s",
 				svc.Operational.Address, wantOp, svc.Savings.Address, wantSv)
 		}
-		if !bytes.Equal(svc.ProviderPub.SerializeCompressed(), providerKey.PubKey().SerializeCompressed()) {
+		if !bytes.Equal(svc.VaultCosignerPub.SerializeCompressed(), providerKey.PubKey().SerializeCompressed()) {
 			t.Fatal("runtime provider was not replaced with the stored enrolled base key")
 		}
 		if !bytes.Equal(remote.ExpectedXOnly, wantTweak) {
 			t.Fatal("RemoteSigner expected key was not the stored tweaked provider")
 		}
-		if !bytes.Equal(svc.Operational.TweakedProvider.SerializeCompressed(), enrolled.Operational.TweakedProvider.SerializeCompressed()) {
+		if !bytes.Equal(svc.Operational.TweakedVaultCosigner.SerializeCompressed(), enrolled.Operational.TweakedVaultCosigner.SerializeCompressed()) {
 			t.Fatal("rebuilt tweaked provider does not match enrollment")
 		}
 	})
@@ -242,17 +252,18 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		t.Cleanup(func() { _ = restart.Close() })
 		remote := &RemoteSigner{}
 		svc := &Service{
-			Ledger:           restart,
-			Offline:          offline.PubKey(),
-			ProviderPub:      providerKey.PubKey(),
-			ArkadePub:        rotatedArkade.PubKey(),
-			DeprecatedArkade: []*btcec.PublicKey{arkadeKey.PubKey()},
-			ArkadeSigner:     remote,
+			Ledger:                    restart,
+			ExternalOwnerWallet:       externalOwner.PubKey(),
+			RecoveryKey:               offline.PubKey(),
+			VaultCosignerPub:          providerKey.PubKey(),
+			ArkadeCosignerPub:         rotatedArkade.PubKey(),
+			DeprecatedArkadeCosigners: []*btcec.PublicKey{arkadeKey.PubKey()},
+			ArkadeCosignerSigner:      remote,
 		}
 		if err := svc.LoadVaults(); err != nil {
 			t.Fatalf("LoadVaults with actively deprecated Arkade key: %v", err)
 		}
-		if !bytes.Equal(svc.ArkadePub.SerializeCompressed(), arkadeKey.PubKey().SerializeCompressed()) {
+		if !bytes.Equal(svc.ArkadeCosignerPub.SerializeCompressed(), arkadeKey.PubKey().SerializeCompressed()) {
 			t.Fatal("runtime Arkade identity was not replaced with the exact enrolled base key")
 		}
 		if !bytes.Equal(remote.ExpectedXOnly, wantArkadeTweak) {

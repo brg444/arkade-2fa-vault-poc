@@ -7,7 +7,7 @@ const expectedTxid = "cd".repeat(32);
 
 function requestBody() {
   return {
-    psbt: "exact-hot-and-direct-signed-psbt",
+    psbt: "exact-phoneRoutineSecret-and-direct-signed-psbt",
     credentialId: "01",
     clientDataJSON: "02",
     authenticatorData: "03",
@@ -17,10 +17,10 @@ function requestBody() {
 
 function validation() {
   return {
-    submittedB64: "exact-hot-and-direct-signed-psbt",
-    hotPubHex: "02" + "11".repeat(32),
-    tweakedProviderXOnly: "22".repeat(32),
-    tweakedArkadeXOnly: "33".repeat(32),
+    submittedB64: "exact-phoneRoutineSecret-and-direct-signed-psbt",
+    phoneRoutineBip340PubHex: "02" + "11".repeat(32),
+    tweakedVaultCosignerXOnly: "22".repeat(32),
+    tweakedArkadeCosignerXOnly: "33".repeat(32),
   };
 }
 

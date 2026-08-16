@@ -38,7 +38,7 @@ type Demo struct {
 }
 
 // NewDemo binds a Bitcoin RPC client for gated fund and mine control.
-// It fails unless svc.Signer is a non-nil *RemoteSigner.
+// It fails unless svc.VaultSigner is a non-nil *RemoteSigner.
 func NewDemo(svc *Service, chain Chain) (*Demo, error) {
 	if svc == nil || chain == nil {
 		return nil, fmt.Errorf("demo requires service and chain")
@@ -46,7 +46,7 @@ func NewDemo(svc *Service, chain Chain) (*Demo, error) {
 	if svc.runtimeConfig().Network != deployment.NetworkRegtest {
 		return nil, fmt.Errorf("demo funding and mining are regtest-only")
 	}
-	signer, err := requireRemoteSigner(svc.Signer)
+	signer, err := requireRemoteSigner(svc.VaultSigner)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ type demoInfo struct {
 
 func (d *Demo) info() demoInfo {
 	mode := "invalid"
-	if current, ok := d.svc.Signer.(*RemoteSigner); ok && current == d.signer {
+	if current, ok := d.svc.VaultSigner.(*RemoteSigner); ok && current == d.signer {
 		mode = "remote"
 	}
 	return demoInfo{

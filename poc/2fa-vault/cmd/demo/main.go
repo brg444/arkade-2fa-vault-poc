@@ -1,6 +1,6 @@
-// Command demo is the labeled POC harness. It may generate fixture
-// hot.hex / offline.hex under -data. The offline key is just another
-// signer in this minimal POC, not an isolated offline ceremony.
+// Command demo is the labeled REGTEST POC harness. It may generate fixture
+// PhoneRoutineBIP340, ExternalOwnerWallet, and RecoveryKey files under -data.
+// These are ordinary test signers, not hardware or isolated ceremonies.
 package main
 
 import (
@@ -22,21 +22,21 @@ import (
 )
 
 func main() {
-	log.Print("POC harness: fixture hot.hex / offline.hex under -data. Offline is another signer, not an isolated ceremony.")
+	log.Print("POC harness: fixture PhoneRoutineBIP340, ExternalOwnerWallet, and RecoveryKey files under -data; no hardware claim.")
 	var (
 		addr           = flag.String("addr", fixture.HTTPAddr, "listen address")
 		data           = flag.String("data", "poc-2fa-data", "data directory")
 		webDir         = flag.String("web", "", "static web directory")
 		emulator       = flag.String("emulator", envOr("VAULT_EMULATOR", remotesigner.DefaultEmulatorAddr), "private emulator host:port")
 		arkadeEmulator = flag.String("arkade-emulator", os.Getenv("VAULT_ARKADE_EMULATOR"), "independent regtest Arkade emulator host:port")
-		unsafeLocal    = flag.Bool("unsafe-local-signer", false, "test-only local provider key")
+		unsafeLocal    = flag.Bool("unsafe-local-signer", false, "test-only local routine cosigner keys")
 	)
 	flag.Parse()
 	if err := os.MkdirAll(*data, 0o700); err != nil {
 		log.Fatal(err)
 	}
 
-	hot, offline, err := loadOrCreateUserKeys(*data)
+	phoneRoutine, externalOwner, recoveryKey, err := loadOrCreateUserKeys(*data)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -48,27 +48,28 @@ func main() {
 	defer led.Close()
 
 	svc := &provider.Service{
-		Ledger:  led,
-		Hot:     hot.PubKey(),
-		Offline: offline.PubKey(),
+		Ledger:              led,
+		PhoneRoutineBIP340:  phoneRoutine.PubKey(),
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         recoveryKey.PubKey(),
 	}
 
 	if *unsafeLocal {
-		prov, err := loadOrCreateKey(filepath.Join(*data, "provider.hex"))
+		vaultCosigner, err := loadOrCreateKey(filepath.Join(*data, "vault-cosigner.hex"))
 		if err != nil {
 			log.Fatal(err)
 		}
-		svc.ProviderPub = prov.PubKey()
+		svc.VaultCosignerPub = vaultCosigner.PubKey()
 		arkadePriv, err := loadOrCreateKey(filepath.Join(*data, "arkade-emulator.hex"))
 		if err != nil {
 			log.Fatal(err)
 		}
-		if prov.PubKey().IsEqual(arkadePriv.PubKey()) {
-			log.Fatal("provider and Arkade emulator keys must be independent")
+		if vaultCosigner.PubKey().IsEqual(arkadePriv.PubKey()) {
+			log.Fatal("VaultCosigner and ArkadeCosigner keys must be independent")
 		}
-		svc.ArkadePub = arkadePriv.PubKey()
-		svc.Signer = provider.LocalSigner{Priv: prov}
-		svc.ArkadeSigner = provider.LocalSigner{Priv: arkadePriv}
+		svc.ArkadeCosignerPub = arkadePriv.PubKey()
+		svc.VaultSigner = provider.LocalSigner{Priv: vaultCosigner}
+		svc.ArkadeCosignerSigner = provider.LocalSigner{Priv: arkadePriv}
 		log.Print("UNSAFE local signer enabled; not a deployment demonstration")
 	} else {
 		if *arkadeEmulator == "" {
@@ -89,17 +90,17 @@ func main() {
 		defer conn.Close()
 		defer arkadeConn.Close()
 		if pub.IsEqual(arkadePub) {
-			log.Fatal("provider and Arkade emulators advertise the same key")
+			log.Fatal("VaultCosigner and ArkadeCosigner emulators advertise the same key")
 		}
-		svc.ProviderPub = pub
-		svc.DeprecatedProvider = deprecated
-		svc.ArkadePub = arkadePub
-		svc.DeprecatedArkade = arkadeDeprecated
-		svc.Signer = &provider.RemoteSigner{Client: cli}
-		svc.ArkadeSigner = &provider.RemoteSigner{Client: arkadeCli}
+		svc.VaultCosignerPub = pub
+		svc.DeprecatedVaultCosigners = deprecated
+		svc.ArkadeCosignerPub = arkadePub
+		svc.DeprecatedArkadeCosigners = arkadeDeprecated
+		svc.VaultSigner = &provider.RemoteSigner{Client: cli}
+		svc.ArkadeCosignerSigner = &provider.RemoteSigner{Client: arkadeCli}
 		fmt.Printf("  emulator    %s\n", *emulator)
 		fmt.Printf("  arkade emu  %s\n", *arkadeEmulator)
-		fmt.Printf("  provider    %x\n", pub.SerializeCompressed())
+		fmt.Printf("  VaultCosigner %x\n", pub.SerializeCompressed())
 	}
 
 	if err := svc.LoadVaults(); err != nil {
@@ -122,9 +123,10 @@ func main() {
 
 	fmt.Printf("Arkade 2FA Vault demo\n")
 	fmt.Printf("  listen      %s\n", fixture.Origin)
-	fmt.Printf("  hot pub     %x\n", hot.PubKey().SerializeCompressed())
-	fmt.Printf("  offline pub %x\n", offline.PubKey().SerializeCompressed())
-	fmt.Printf("  hot priv    %s/hot.hex (harness only)\n", *data)
+	fmt.Printf("  PhoneRoutineBIP340  %x\n", phoneRoutine.PubKey().SerializeCompressed())
+	fmt.Printf("  ExternalOwnerWallet %x\n", externalOwner.PubKey().SerializeCompressed())
+	fmt.Printf("  RecoveryKey         %x\n", recoveryKey.PubKey().SerializeCompressed())
+	fmt.Printf("  routine key file     %s/phone-routine.hex (harness only)\n", *data)
 	if svc.Operational != nil {
 		fmt.Printf("  operational %s\n", svc.Operational.Address)
 		fmt.Printf("  savings     %s\n", svc.Savings.Address)
@@ -136,11 +138,14 @@ func main() {
 	log.Fatal(provider.NewServer(*addr, provider.Handler(svc, web)).ListenAndServe())
 }
 
-func loadOrCreateUserKeys(dir string) (hot, offline *btcec.PrivateKey, err error) {
-	if hot, err = loadOrCreateKey(filepath.Join(dir, "hot.hex")); err != nil {
+func loadOrCreateUserKeys(dir string) (phoneRoutine, externalOwner, recoveryKey *btcec.PrivateKey, err error) {
+	if phoneRoutine, err = loadOrCreateKey(filepath.Join(dir, "phone-routine.hex")); err != nil {
 		return
 	}
-	offline, err = loadOrCreateKey(filepath.Join(dir, "offline.hex"))
+	if externalOwner, err = loadOrCreateKey(filepath.Join(dir, "external-owner.hex")); err != nil {
+		return
+	}
+	recoveryKey, err = loadOrCreateKey(filepath.Join(dir, "recovery-key.hex"))
 	return
 }
 

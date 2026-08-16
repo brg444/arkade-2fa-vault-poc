@@ -131,13 +131,13 @@ export function assertDirectP256(derivedHex, persistedHex, statusHex) {
   return derived;
 }
 
-export function assertHotPub(derivedHex, persistedHex, statusHex) {
-  const derived = requireHex(derivedHex, "derived hot pub");
-  if (persistedHex && requireHex(persistedHex, "persisted hot pub") !== derived) {
-    throw new Error("derived hot pub does not match persisted hot pub");
+export function assertPhoneRoutineBIP340Pub(derivedHex, persistedHex, statusHex) {
+  const derived = requireHex(derivedHex, "derived PhoneRoutineBIP340 pub");
+  if (persistedHex && requireHex(persistedHex, "persisted PhoneRoutineBIP340 pub") !== derived) {
+    throw new Error("derived PhoneRoutineBIP340 pub does not match the persisted pub");
   }
-  if (statusHex && requireHex(statusHex, "status hot pub") !== derived) {
-    throw new Error("derived hot pub does not match vault status hot pub");
+  if (statusHex && requireHex(statusHex, "status PhoneRoutineBIP340 pub") !== derived) {
+    throw new Error("derived PhoneRoutineBIP340 pub does not match vault status");
   }
   return derived;
 }
@@ -204,7 +204,7 @@ export function assertArkadeChallenge(local, server) {
   const expected = String(local || "").toLowerCase();
   const received = String(server || "").toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(expected) || !/^[0-9a-f]{64}$/.test(received) || expected !== received) {
-    throw new Error("provider preflight challenge does not match the locally computed Arkade sighash");
+    throw new Error("authorizer preflight challenge does not match the locally computed Arkade sighash");
   }
   return expected;
 }
@@ -225,15 +225,15 @@ export function validateAuthorizedPSBT(args) {
   }
   const before = tapSigs(submitted.getInput(0));
   const after = tapSigs(authorized.getInput(0));
-  if (before.length !== 1) throw new Error("submitted psbt must carry the hot signature only");
+  if (before.length !== 1) throw new Error("submitted psbt must carry only the PhoneRoutineBIP340 signature");
   if (after.length !== 3) {
-    throw new Error("authorized psbt must contain hot, private provider, and public Arkade emulator signatures only");
+    throw new Error("authorized psbt must contain PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner signatures only");
   }
-  const hot = before[0];
-  const hotCompressed = requireHex(args.hotPubHex, "hot pub");
-  if (!/^(02|03)[0-9a-f]{64}$/.test(hotCompressed)) throw new Error("hot pub must be compressed secp256k1");
-  if (hot.pub !== hotCompressed.slice(2)) throw new Error("submitted hot signature key");
-  if (hot.sig.length !== 128) throw new Error("hot signature must be 64 bytes");
+  const phoneRoutine = before[0];
+  const phoneRoutineCompressed = requireHex(args.phoneRoutineBip340PubHex, "PhoneRoutineBIP340 pub");
+  if (!/^(02|03)[0-9a-f]{64}$/.test(phoneRoutineCompressed)) throw new Error("PhoneRoutineBIP340 pub must be compressed secp256k1");
+  if (phoneRoutine.pub !== phoneRoutineCompressed.slice(2)) throw new Error("submitted PhoneRoutineBIP340 signature key");
+  if (phoneRoutine.sig.length !== 128) throw new Error("PhoneRoutineBIP340 signature must be 64 bytes");
   const authInput = submitted.getInput(0);
   if (!authInput.witnessUtxo || !authInput.tapLeafScript || authInput.tapLeafScript.length !== 1) throw new Error("authorized tap leaf required");
   const leafBytes = toBytes(authInput.tapLeafScript[0][1]);
@@ -241,27 +241,27 @@ export function validateAuthorizedPSBT(args) {
   const script = leafBytes.subarray(0, -1);
   const ver = leafBytes[leafBytes.length - 1];
   const leafHash = bytesToHex(schnorr.utils.taggedHash("TapLeaf", Uint8Array.of(ver), writeCompactSize(script.length), script));
-  if (hot.leaf !== leafHash) throw new Error("hot signature leaf");
+  if (phoneRoutine.leaf !== leafHash) throw new Error("PhoneRoutineBIP340 signature leaf");
   const msg = submitted.preimageWitnessV1(0, [authInput.witnessUtxo.script], authInput.sighashType ?? SigHash.DEFAULT, [authInput.witnessUtxo.amount], -1, script, ver);
-  if (!schnorr.verify(hexToBytes(hot.sig), msg, hexToBytes(hot.pub))) throw new Error("hot signature invalid");
-  if (after.filter((s) => sameTapSig(s, hot)).length !== 1) throw new Error("authorized response mutated the hot signature");
-  const extras = after.filter((s) => !sameTapSig(s, hot));
-  if (extras.length !== 2) throw new Error("authorized collaborative signature delta");
-  const wantProvider = requireHex(args.tweakedProviderXOnly, "tweaked provider x-only");
-  if (!/^[0-9a-f]{64}$/.test(wantProvider)) throw new Error("tweaked provider x-only must be 32 bytes");
-  const wantArkade = requireHex(args.tweakedArkadeXOnly, "tweaked Arkade emulator x-only");
-  if (!/^[0-9a-f]{64}$/.test(wantArkade)) throw new Error("tweaked Arkade emulator x-only must be 32 bytes");
-  if (new Set([hot.pub, wantProvider, wantArkade]).size !== 3) {
-    throw new Error("collaborative signer keys must be independent");
+  if (!schnorr.verify(hexToBytes(phoneRoutine.sig), msg, hexToBytes(phoneRoutine.pub))) throw new Error("PhoneRoutineBIP340 signature invalid");
+  if (after.filter((s) => sameTapSig(s, phoneRoutine)).length !== 1) throw new Error("authorized response mutated the PhoneRoutineBIP340 signature");
+  const extras = after.filter((s) => !sameTapSig(s, phoneRoutine));
+  if (extras.length !== 2) throw new Error("authorized routine signature delta");
+  const wantVaultCosigner = requireHex(args.tweakedVaultCosignerXOnly, "tweaked VaultCosigner x-only");
+  if (!/^[0-9a-f]{64}$/.test(wantVaultCosigner)) throw new Error("tweaked VaultCosigner x-only must be 32 bytes");
+  const wantArkade = requireHex(args.tweakedArkadeCosignerXOnly, "tweaked ArkadeCosigner x-only");
+  if (!/^[0-9a-f]{64}$/.test(wantArkade)) throw new Error("tweaked ArkadeCosigner x-only must be 32 bytes");
+  if (new Set([phoneRoutine.pub, wantVaultCosigner, wantArkade]).size !== 3) {
+    throw new Error("routine signer keys must be independent");
   }
   const expected = new Map([
-    [wantProvider, "private provider"],
-    [wantArkade, "public Arkade emulator"],
+    [wantVaultCosigner, "VaultCosigner"],
+    [wantArkade, "ArkadeCosigner"],
   ]);
   for (const extra of extras) {
     const role = expected.get(extra.pub);
     if (!role) {
-      throw new Error("authorized response contains a duplicate or substituted collaborative signer");
+      throw new Error("authorized response contains a duplicate or substituted routine cosigner");
     }
     if (extra.leaf !== leafHash) throw new Error(`${role} signature leaf`);
     if (extra.sig.length !== 128) throw new Error(`${role} signature must be 64 bytes`);
@@ -270,12 +270,12 @@ export function validateAuthorizedPSBT(args) {
     }
     expected.delete(extra.pub);
   }
-  if (expected.size !== 0) throw new Error("authorized response is missing a required collaborative signature");
+  if (expected.size !== 0) throw new Error("authorized response is missing a required routine cosigner signature");
   // The txid excludes witness data, so the PSBT's exact unsigned transaction
   // independently commits to the txid that finalization and publication must
   // preserve. Signatures are verified above before this value is released.
   const transactionId = bytesToHex(Uint8Array.from(sha256d(authorized.toBytes(true, false))).reverse());
-  return { providerPub: wantProvider, arkadePub: wantArkade, transactionId };
+  return { vaultCosignerPub: wantVaultCosigner, arkadeCosignerPub: wantArkade, transactionId };
 }
 
 function tapSigs(input) {
@@ -294,7 +294,7 @@ function normalizeTapSig(entry) {
 
 function sameTapSig(a, b) { return a.pub === b.pub && a.leaf === b.leaf && a.sig === b.sig; }
 
-export function hotSignPSBT(b64, priv) {
+export function phoneRoutineSignPSBT(b64, priv) {
   const tx = parsePSBT(b64);
   if (tx.inputsLength !== 1) throw new Error("local sign requires exactly one input");
   const before = snapshotPSBT(tx);
@@ -320,10 +320,10 @@ function inspectPSBT(args) {
   if (tx.version !== 2) throw new Error("transaction version must be 2");
   if (tx.lockTime !== 0) throw new Error("locktime must be zero");
   if (tx.inputsLength !== 1) throw new Error("exactly one input required");
-  if (tx.outputsLength < 2) throw new Error("recipient and packet outputs required");
+  if (tx.outputsLength !== 3) throw new Error("routine spend requires recipient, recursive change, and packet outputs");
   const input = tx.getInput(0);
   if (input.sequence !== 0xffffffff) {
-    throw new Error("collaborative sequence must be final");
+    throw new Error("routine sequence must be final");
   }
   if ((input.sighashType ?? SigHash.DEFAULT) !== SigHash.DEFAULT) {
     throw new Error("sighash must be SIGHASH_DEFAULT");
@@ -331,7 +331,7 @@ function inspectPSBT(args) {
   if (!input.witnessUtxo) throw new Error("witness utxo required");
   assertMoneyRange(input.witnessUtxo.amount, "witness utxo amount");
   if (!input.tapLeafScript || input.tapLeafScript.length !== 1) {
-    throw new Error("exactly one collaborative tap leaf required");
+    throw new Error("exactly one routine tap leaf required");
   }
   const reviewedVout = parseExactVout(args.vout);
   const reviewedAmount = parseExactSats(args.recipientAmount, "recipient amount", DUST_SATS);
@@ -373,22 +373,26 @@ function inspectPSBT(args) {
       if (out.amount !== 0n) throw new Error("extension output must be zero value");
       packet = parseCanonicalPacket(script, args.expectEmptyWitness);
       packetIndex = i;
+      if (i !== 2) throw new Error("packet output must be last");
       continue;
     }
     if (bytesEqual(script, operational)) {
       if (change) throw new Error("multiple change outputs");
       if (out.amount < DUST_SATS) throw new Error("change below dust");
+      if (i !== 1) throw new Error("recursive change must be output one");
       change = { script, amount: out.amount };
       continue;
     }
     if (recipient) throw new Error("multiple recipient outputs");
     if (script.length === 0 || script[0] === 0x6a) throw new Error("unexpected op_return or unspendable output");
-    if (!isNativeWitnessProgram(script)) throw new Error("collaborative recipient must be a native segwit output");
+    if (!isNativeWitnessProgram(script)) throw new Error("routine recipient must be a native segwit output");
     if (out.amount < DUST_SATS) throw new Error("recipient below dust");
+    if (i !== 0) throw new Error("recipient must be output zero");
     recipient = { script, amount: out.amount };
   }
   if (!recipient) throw new Error("missing recipient");
   if (!packet) throw new Error("missing emulator packet output");
+  if (!change) throw new Error("routine spend requires non-dust recursive change");
 
   const wantRecipient = hexToBytes(args.recipientScript);
   if (!bytesEqual(recipient.script, wantRecipient)) {

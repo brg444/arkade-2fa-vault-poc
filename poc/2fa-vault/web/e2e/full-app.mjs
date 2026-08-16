@@ -17,8 +17,10 @@ const providerBin = join(temp, "vault-provider");
 const dbPath = join(temp, "vault.sqlite");
 const webDir = join(repoRoot, "poc/2fa-vault/web");
 const go = process.env.GO_BIN || "go";
-const offlinePub = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-const providerPriv = "00".repeat(31) + "02";
+const recoveryKeyPub = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const externalOwnerWalletPub = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const vaultCosignerPriv = "00".repeat(31) + "03";
+const arkadeCosignerPriv = "00".repeat(31) + "04";
 
 let provider;
 let providerExited = false;
@@ -33,9 +35,11 @@ try {
     "-addr", "127.0.0.1:8787",
     "-db", dbPath,
     "-web", webDir,
-    "-offline", offlinePub,
+    "-external-owner-wallet", externalOwnerWalletPub,
+    "-recovery-key", recoveryKeyPub,
     "-unsafe-local-signer",
-    "-provider-key", providerPriv,
+    "-vault-cosigner-key", vaultCosignerPriv,
+    "-arkade-key", arkadeCosignerPriv,
     "-demo=false",
     "-bitcoin-rpc", "",
   ], {
@@ -101,7 +105,7 @@ async function waitForHealth(exited) {
 
 function auditRequestShapes(requests) {
   const expected = new Map([
-    ["/v1/register", ["credentialId", "directP256", "hotPub", "webauthnP256"]],
+    ["/v1/register", ["credentialId", "phoneDirectP256", "phoneRoutineBip340Pub", "webauthnP256"]],
     ["/v1/bind", ["authenticatorData", "clientDataJSON", "credentialId", "directSig", "psbt", "signature"]],
     ["/v1/authorize", ["authenticatorData", "clientDataJSON", "credentialId", "psbt", "signature"]],
   ]);
@@ -152,7 +156,7 @@ async function runAppFlow() {
 
   await wait(() => typeof byID("btn-enroll").onclick === "function" && !byID("btn-enroll").disabled, "app bootstrap");
   byID("btn-enroll").click();
-  await wait(() => localStorage.getItem("vault-hot-v1") && !byID("btn-enroll").disabled, "passkey enrollment");
+  await wait(() => localStorage.getItem("arkade-vault-enrollment-v3") && !byID("btn-enroll").disabled, "passkey enrollment");
 
   const status = await fetch("/v1/status").then((response) => response.json());
   if (!status.enrolled || !/^[0-9a-f]{68}$/.test(status.operationalScript || "")) {

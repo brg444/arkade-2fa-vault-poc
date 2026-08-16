@@ -1,5 +1,5 @@
-// Package fixture pins the two-independent-cosigner, single-policy POC
-// configuration.
+// Package fixture pins the v3 Phone/VaultCosigner/ArkadeCosigner routine
+// policy and the separate ExternalOwnerWallet/RecoveryKey admin policy.
 package fixture
 
 import (
@@ -16,13 +16,13 @@ const (
 
 	// OperationalCSVBlocks is short so recovery tests can mine past it.
 	OperationalCSVBlocks uint32 = 6
-	// SavingsCSVBlocks is the longer owner-only recovery delay.
+	// SavingsCSVBlocks is the longer RecoveryKey-only delay.
 	SavingsCSVBlocks uint32 = 144
 
 	TxRecipientCapSats  int64 = 50_000
 	PeriodAllowanceSats int64 = 100_000
 	// Absolute and feerate ceilings are independent: 50 sat/vB on a
-	// typical ~273–516 vB collaborative template exceeds 5_000 sat, so
+	// typical ~273–516 vB routine template exceeds 5_000 sat, so
 	// that pair is unreachable as two separate checks. 10 sat/vB keeps
 	// the first rate-only violation under the absolute cap.
 	AbsoluteFeeCeiling    int64 = 5_000
@@ -39,17 +39,20 @@ const (
 	HKDFInfo           = "arkade-2fa-vault/kek/v1"
 	DirectP256HKDFInfo = "arkade-2fa-vault/direct-p256/v1"
 	HKDFHashName       = "SHA-256"
-	// OfflinePubHex is the public deterministic regtest-only generator-G
+	// RecoveryKeyPubHex is the public deterministic regtest-only generator-G
 	// fixture with known scalar 1. The regtest provider never holds that scalar;
 	// Mutinynet startup rejects this x-only identity in either parity.
-	OfflinePubHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+	RecoveryKeyPubHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+	// ExternalOwnerWalletPubHex is the equally public regtest-only scalar-2
+	// fixture. Mutinynet startup rejects this x-only identity too.
+	ExternalOwnerWalletPubHex = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 
 	HTTPAddr = "localhost:8787"
 
 	// TemplateVersion / PolicyVersion / Network are persisted at enrollment.
 	// A restart with different values must refuse to rebuild the trees.
-	TemplateVersion = "2fa-vault-direct-p256-3of3-v2"
-	PolicyVersion   = "tx50k-day100k-fee5k-feerate10-onchain-v2"
+	TemplateVersion = "phone-direct-p256-routine-3of3-admin-2of2-v3"
+	PolicyVersion   = "mandatory-change-tx50k-day100k-fee5k-feerate10-onchain-v3"
 	Network         = "regtest"
 )
 

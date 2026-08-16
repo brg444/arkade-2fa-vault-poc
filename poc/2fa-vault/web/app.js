@@ -6,13 +6,13 @@ import {
 } from "./directauth.js";
 import {
   assertDirectP256,
-  assertHotPub,
+  assertPhoneRoutineBIP340Pub,
   assertArkadeChallenge,
   bytesEqual,
   bytesToHex,
   DUST_SATS,
   hexToBytes,
-  hotSignPSBT,
+  phoneRoutineSignPSBT,
   MAX_MONEY_SATS,
   MAX_PREV_TX_BYTES,
   parseExactSats,
@@ -27,8 +27,7 @@ import {
   recoverEnrollment,
   stagePending,
   promotePending,
-  assertArkadeEmulatorIdentity,
-  assertTweakedProvider,
+  assertDescriptorIdentity,
 } from "./enrollstore.js";
 import { createAuthorizeRetryState } from "./authorizeretry.js";
 import { compressedES256PublicKey } from "./webauthnkey.js";
@@ -167,42 +166,30 @@ function intentKey(intent) {
 async function refresh() {
   const st = await api("/v1/status");
   const demo = await demoInfo();
-  st.savingsExcludesProvider = !!st.savingsExcludesProvider;
-  st.savingsExcludesCollaborators = !!st.savingsExcludesCollaborators;
+  st.savingsExcludesRoutineCosigners = !!st.savingsExcludesRoutineCosigners;
   $("status").textContent = JSON.stringify({
     ...st,
-    savingsExcludesProvider: st.savingsExcludesProvider,
-    savingsExcludesCollaborators: st.savingsExcludesCollaborators,
+    savingsExcludesRoutineCosigners: st.savingsExcludesRoutineCosigners,
     preflightChallengeTrust: "browser independently recomputes the witness-masked Arkade sighash and requires an exact preflight match",
   }, null, 2);
   if ($("savings-note")) {
     $("savings-note").textContent = st.savingsAddress
-      ? (st.savingsExcludesCollaborators
-        ? "Savings excludes both collaborative signer roles."
-        : "Savings collaborator exclusion check failed.")
+      ? (st.savingsExcludesRoutineCosigners
+        ? "Savings excludes PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner."
+        : "Savings routine-cosigner exclusion check failed.")
       : "";
   }
   toggleDemo(demo);
   const rec = loadRec();
-  if (rec?.hotPub && st.hotPub) assertHotPub(rec.hotPub, rec.hotPub, st.hotPub);
-  if (rec?.directP256) assertDirectP256(rec.directP256, rec.directP256, st.directP256);
+  if (rec?.phoneRoutineBip340Pub && st.phoneRoutineBip340Pub) assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
+  if (rec?.phoneDirectP256) assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, st.phoneDirectP256);
   if (rec) reconcileSignerIdentity(rec, st);
   return st;
 }
 
 function reconcileSignerIdentity(rec, status) {
-  const tweakedProviderXOnly = assertTweakedProvider(
-    rec?.tweakedProviderXOnly || "",
-    status?.tweakedProviderXOnly,
-  );
-  const arkade = assertArkadeEmulatorIdentity(
-    rec && Object.prototype.hasOwnProperty.call(rec, "arkadeEmulatorBasePub") ? rec : null,
-    status,
-  );
-  if (tweakedProviderXOnly === arkade.tweakedArkadeXOnly) {
-    throw new Error("provider and Arkade emulator tweaked keys must be independent");
-  }
-  return { tweakedProviderXOnly, ...arkade };
+  const hasDescriptor = rec && Object.prototype.hasOwnProperty.call(rec, "externalOwnerWalletPub");
+  return assertDescriptorIdentity(hasDescriptor ? rec : null, status);
 }
 
 async function demoInfo() {
@@ -246,7 +233,7 @@ function showParsed(parsed) {
 async function enroll() {
   let prf;
   let scalar;
-  let hot;
+  let phoneRoutineSecret;
   try {
     const recovery = await recoverEnrollment(enrollIO());
     if (recovery.action === "pending-requires-user-presence") {
@@ -293,34 +280,33 @@ async function enroll() {
     if (bytesToHex(webauthnP256) === bytesToHex(derivedAuth.pub)) {
       throw new Error("direct-auth P-256 collided with WebAuthn credential P-256");
     }
-    hot = crypto.getRandomValues(new Uint8Array(32));
-    const hotPub = secp256k1.getPublicKey(hot, true);
-    const derived = bytesToHex(hotPub);
+    phoneRoutineSecret = crypto.getRandomValues(new Uint8Array(32));
+    const phoneRoutineBip340Pub = secp256k1.getPublicKey(phoneRoutineSecret, true);
+    const derived = bytesToHex(phoneRoutineBip340Pub);
     const kek = await deriveKEK(prf);
     const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, kek, hot);
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, kek, phoneRoutineSecret);
     const rec = {
       credId: bytesToHex(cred.rawId),
       webauthnP256: bytesToHex(webauthnP256),
-      directP256: bytesToHex(derivedAuth.pub),
-      hotPub: derived,
+      phoneDirectP256: bytesToHex(derivedAuth.pub),
+      phoneRoutineBip340Pub: derived,
       nonce: bytesToHex(nonce),
       ciphertext: bytesToHex(ct),
       operationalAddress: "",
       operationalScript: "",
-      tweakedProviderXOnly: "",
     };
     stagePending(localStorage, rec);
     await enrollIO().register({
       credentialId: rec.credId,
       webauthnP256: rec.webauthnP256,
-      directP256: rec.directP256,
-      hotPub: rec.hotPub,
+      phoneDirectP256: rec.phoneDirectP256,
+      phoneRoutineBip340Pub: rec.phoneRoutineBip340Pub,
     });
     if ($("bootstrap-token")) $("bootstrap-token").value = "";
     const st = await refresh();
-    assertHotPub(derived, rec.hotPub, st.hotPub);
-    assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, st.directP256);
+    assertPhoneRoutineBIP340Pub(derived, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
+    assertDirectP256(bytesToHex(derivedAuth.pub), rec.phoneDirectP256, st.phoneDirectP256);
     Object.assign(rec, reconcileSignerIdentity(null, st));
     rec.operationalAddress = st.operationalAddress || "";
     rec.operationalScript = st.operationalScript || "";
@@ -328,14 +314,14 @@ async function enroll() {
     promotePending(localStorage);
     $("out").textContent = "enrolled; fund the Operational address shown in status";
   } finally {
-    zeroBytes(prf, scalar, hot);
+    zeroBytes(prf, scalar, phoneRoutineSecret);
   }
 }
 
 async function recoverPendingEnrollment(rec) {
   let prf;
   let scalar;
-  let hot;
+  let phoneRoutineSecret;
   try {
     const deployment = await refresh();
     const rpId = requireRPID(deployment);
@@ -355,25 +341,25 @@ async function recoverPendingEnrollment(rec) {
     if (!prf) throw new Error("PRF missing during enrollment recovery");
     const derivedAuth = await deriveDirectP256(prf);
     scalar = derivedAuth.scalar;
-    assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, rec.directP256);
+    assertDirectP256(bytesToHex(derivedAuth.pub), rec.phoneDirectP256, rec.phoneDirectP256);
     const kek = await deriveKEK(prf);
-    hot = new Uint8Array(await crypto.subtle.decrypt(
+    phoneRoutineSecret = new Uint8Array(await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: hexToBytes(rec.nonce, 12) },
       kek,
       hexToBytes(rec.ciphertext, 48),
     ));
-    const hotPub = bytesToHex(secp256k1.getPublicKey(hot, true));
-    assertHotPub(hotPub, rec.hotPub, rec.hotPub);
+    const phoneRoutineBip340Pub = bytesToHex(secp256k1.getPublicKey(phoneRoutineSecret, true));
+    assertPhoneRoutineBIP340Pub(phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub);
     await enrollIO().register({
       credentialId: rec.credId,
       webauthnP256: rec.webauthnP256,
-      directP256: rec.directP256,
-      hotPub: rec.hotPub,
+      phoneDirectP256: rec.phoneDirectP256,
+      phoneRoutineBip340Pub: rec.phoneRoutineBip340Pub,
     });
     if ($("bootstrap-token")) $("bootstrap-token").value = "";
     const st = await refresh();
-    assertHotPub(hotPub, rec.hotPub, st.hotPub);
-    assertDirectP256(rec.directP256, rec.directP256, st.directP256);
+    assertPhoneRoutineBIP340Pub(phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
+    assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, st.phoneDirectP256);
     const signerIdentity = reconcileSignerIdentity(rec, st);
     const next = {
       ...rec,
@@ -385,7 +371,7 @@ async function recoverPendingEnrollment(rec) {
     promotePending(localStorage);
     $("out").textContent = "pending enrollment recovered after fresh user verification";
   } finally {
-    zeroBytes(prf, scalar, hot);
+    zeroBytes(prf, scalar, phoneRoutineSecret);
   }
 }
 
@@ -401,7 +387,7 @@ async function prepareDraft() {
   const rec = loadRec();
   if (!rec) throw new Error("enroll first");
   const st = await refresh();
-  assertHotPub(rec.hotPub, rec.hotPub, st.hotPub);
+  assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
   const intent = readIntent();
   authorizeRetry.clearUnless(intentKey(intent));
   const draft = await api("/v1/draft", draftRequest(intent));
@@ -437,7 +423,7 @@ function invalidateReviewedIntent() {
 async function ceremony() {
   let prf;
   let scalar;
-  let hot;
+  let phoneRoutineSecret;
   try {
     const rec = loadRec();
     if (!rec) throw new Error("enroll first");
@@ -462,8 +448,8 @@ async function ceremony() {
     });
     requireFrozenReview();
     let live = await api("/v1/status");
-    assertHotPub(rec.hotPub, rec.hotPub, live.hotPub);
-    assertDirectP256(rec.directP256, rec.directP256, live.directP256);
+    assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, live.phoneRoutineBip340Pub);
+    assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, live.phoneDirectP256);
     reconcileSignerIdentity(rec, live);
     prf = toUint8(await prfFrom(get));
     if (!prf) throw new Error("PRF missing");
@@ -475,7 +461,7 @@ async function ceremony() {
     };
     const derivedAuth = await deriveDirectP256(prf);
     scalar = derivedAuth.scalar;
-    assertDirectP256(bytesToHex(derivedAuth.pub), rec.directP256, live.directP256);
+    assertDirectP256(bytesToHex(derivedAuth.pub), rec.phoneDirectP256, live.phoneDirectP256);
     const directSig = bytesToHex(signDirectP256(scalar, challenge));
     const bound = await api("/v1/bind", { psbt: draft.psbt, directSig, ...assertion });
     const parsed = validateBoundPSBT({
@@ -491,34 +477,34 @@ async function ceremony() {
     });
     showParsed(parsed);
     const kek = await deriveKEK(prf);
-    hot = new Uint8Array(await crypto.subtle.decrypt(
+    phoneRoutineSecret = new Uint8Array(await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: hexToBytes(rec.nonce) },
       kek,
       hexToBytes(rec.ciphertext),
     ));
-    const derived = bytesToHex(secp256k1.getPublicKey(hot, true));
+    const derived = bytesToHex(secp256k1.getPublicKey(phoneRoutineSecret, true));
     requireFrozenReview();
     live = await api("/v1/status");
-    assertHotPub(derived, rec.hotPub, live.hotPub);
-    assertDirectP256(rec.directP256, rec.directP256, live.directP256);
+    assertPhoneRoutineBIP340Pub(derived, rec.phoneRoutineBip340Pub, live.phoneRoutineBip340Pub);
+    assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, live.phoneDirectP256);
     reconcileSignerIdentity(rec, live);
-    const signed = hotSignPSBT(bound.psbt, hot);
+    const signed = phoneRoutineSignPSBT(bound.psbt, phoneRoutineSecret);
     if (bytesToHex(challenge) !== challengeHex) throw new Error("Arkade challenge changed during ceremony");
     authorizeRetry.stage(
       reviewKey,
       { psbt: signed, ...assertion },
       {
         submittedB64: signed,
-        hotPubHex: rec.hotPub,
-        tweakedProviderXOnly: rec.tweakedProviderXOnly,
-        tweakedArkadeXOnly: rec.tweakedArkadeXOnly,
+        phoneRoutineBip340PubHex: rec.phoneRoutineBip340Pub,
+        tweakedVaultCosignerXOnly: rec.tweakedVaultCosignerXOnly,
+        tweakedArkadeCosignerXOnly: rec.tweakedArkadeCosignerXOnly,
       },
       challengeHex,
     );
     const completed = await authorizePending(reviewKey);
     return finishAuthorized(completed);
   } finally {
-    zeroBytes(prf, scalar, hot);
+    zeroBytes(prf, scalar, phoneRoutineSecret);
   }
 }
 
@@ -530,8 +516,8 @@ async function resumeAuthorization(rec, reviewKey) {
   }
   if (!authorizeRetry.pendingFor(reviewKey)) return false;
   const live = await api("/v1/status");
-  assertHotPub(rec.hotPub, rec.hotPub, live.hotPub);
-  assertDirectP256(rec.directP256, rec.directP256, live.directP256);
+  assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, live.phoneRoutineBip340Pub);
+  assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, live.phoneDirectP256);
   reconcileSignerIdentity(rec, live);
   const resumed = await authorizePending(reviewKey);
   await finishAuthorized(resumed);
@@ -543,7 +529,8 @@ async function authorizePending(reviewKey) {
   if (!pending) throw new Error("authorize retry state missing");
   // bodyJSON is the one serialization staged before the first POST. Keeping
   // it in page memory lets a public-signer timeout resume the server's exact
-  // reserved PSBT without generating another WebAuthn, DirectP256, or hot
+    // reserved PSBT without generating another WebAuthn, PhoneDirectP256, or
+    // PhoneRoutineBIP340 signature.
   // signature.
   const out = await apiEncoded("/v1/authorize", pending.bodyJSON);
   const authorized = validateAuthorizedPSBT({
@@ -691,7 +678,7 @@ async function bootstrap() {
     try {
       const recovery = await recoverEnrollment(enrollIO());
       if (recovery.action === "pending-requires-user-presence") {
-        $("out").textContent = "pending enrollment found; click Create passkey + encrypted hot key to recover with user verification";
+        $("out").textContent = "pending enrollment found; click Create passkey + encrypted phoneRoutineSecret key to recover with user verification";
       }
     } catch (e) {
       $("out").textContent = e.message;

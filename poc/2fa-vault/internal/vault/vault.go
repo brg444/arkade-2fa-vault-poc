@@ -27,11 +27,12 @@ const (
 // and descriptor for one vault.
 type Record struct {
 	Kind                Kind
-	Hot                 *btcec.PublicKey
-	Offline             *btcec.PublicKey
-	ProviderBase        *btcec.PublicKey
-	ArkadeBase          *btcec.PublicKey
-	DirectP256          []byte
+	PhoneRoutineBIP340  *btcec.PublicKey
+	PhoneDirectP256     []byte
+	ExternalOwnerWallet *btcec.PublicKey
+	RecoveryKey         *btcec.PublicKey
+	VaultCosignerBase   *btcec.PublicKey
+	ArkadeCosignerBase  *btcec.PublicKey
 	CSV                 arklib.RelativeLocktime
 	AuthorizationPolicy AuthorizationPolicy
 	AuthScript          []byte
@@ -41,21 +42,21 @@ type Record struct {
 
 // Built is a fully derived vault tree.
 type Built struct {
-	Record          Record
-	Tree            *arkscript.TapscriptsVtxoScript
-	TapKey          *btcec.PublicKey
-	PkScript        []byte
-	Address         string
-	Leaves          Leaves
-	TweakedProvider *btcec.PublicKey
-	TweakedArkade   *btcec.PublicKey
+	Record                Record
+	Tree                  *arkscript.TapscriptsVtxoScript
+	TapKey                *btcec.PublicKey
+	PkScript              []byte
+	Address               string
+	Leaves                Leaves
+	TweakedVaultCosigner  *btcec.PublicKey
+	TweakedArkadeCosigner *btcec.PublicKey
 }
 
 // Leaves holds decoded leaf scripts and control blocks.
 type Leaves struct {
-	Collaborative *Leaf // Operational only
-	Owner         *Leaf
-	Recovery      *Leaf
+	Routine  *Leaf // Operational only
+	Admin    *Leaf
+	Recovery *Leaf
 }
 
 // Leaf is one tapscript path.
@@ -71,15 +72,17 @@ type Leaf struct {
 // descriptor. DirectP256 gates both tweaked signers through the shared Arkade
 // authorization script; it is not itself a tapscript secp256k1 signer.
 type OperationalKeys struct {
-	Hot          *btcec.PublicKey
-	Offline      *btcec.PublicKey
-	ProviderBase *btcec.PublicKey
-	ArkadeBase   *btcec.PublicKey
-	DirectP256   []byte
+	PhoneRoutineBIP340  *btcec.PublicKey
+	PhoneDirectP256     []byte
+	ExternalOwnerWallet *btcec.PublicKey
+	RecoveryKey         *btcec.PublicKey
+	VaultCosignerBase   *btcec.PublicKey
+	ArkadeCosignerBase  *btcec.PublicKey
 }
 
-// NewOperational builds the Operational tree: hot+both independently tweaked
-// cosigners, hot+offline, and CSV+offline.
+// NewOperational builds the Operational tree: the PhoneRoutineBIP340 signer
+// plus both independently tweaked routine cosigners, the two-key external
+// admin path, and the delayed RecoveryKey path.
 func NewOperational(keys OperationalKeys) (*Built, error) {
 	return NewOperationalForNetwork(keys, fixture.Network)
 }
@@ -93,17 +96,18 @@ func NewOperationalForNetwork(keys OperationalKeys, network string) (*Built, err
 // NewOperationalWithPolicy makes the deployment CSV delay and every
 // transaction-local script limit explicit.
 func NewOperationalWithPolicy(keys OperationalKeys, network string, csv arklib.RelativeLocktime, policy AuthorizationPolicy) (*Built, error) {
-	auth, err := AuthorizationScript(keys.DirectP256, policy)
+	auth, err := AuthorizationScript(keys.PhoneDirectP256, policy)
 	if err != nil {
 		return nil, err
 	}
 	rec := Record{
 		Kind:                Operational,
-		Hot:                 keys.Hot,
-		Offline:             keys.Offline,
-		ProviderBase:        keys.ProviderBase,
-		ArkadeBase:          keys.ArkadeBase,
-		DirectP256:          append([]byte(nil), keys.DirectP256...),
+		PhoneRoutineBIP340:  keys.PhoneRoutineBIP340,
+		PhoneDirectP256:     append([]byte(nil), keys.PhoneDirectP256...),
+		ExternalOwnerWallet: keys.ExternalOwnerWallet,
+		RecoveryKey:         keys.RecoveryKey,
+		VaultCosignerBase:   keys.VaultCosignerBase,
+		ArkadeCosignerBase:  keys.ArkadeCosignerBase,
 		CSV:                 csv,
 		AuthorizationPolicy: policy,
 		AuthScript:          auth,
@@ -122,33 +126,31 @@ func fixtureAuthorizationPolicy() AuthorizationPolicy {
 	}
 }
 
-// NewSavings builds the Savings tree: hot+offline, long CSV+offline. Neither
-// collaborative cosigner appears. forbidden contains the private Provider and
-// public Arkade base/tweaked identities that must not appear in any Savings
-// leaf.
-func NewSavings(hot, offline *btcec.PublicKey, forbidden ...*btcec.PublicKey) (*Built, error) {
-	return NewSavingsForNetwork(hot, offline, fixture.Network, forbidden...)
+// NewSavings builds the Savings tree: ExternalOwnerWallet+RecoveryKey and a
+// long CSV+RecoveryKey. Neither routine cosigner appears.
+func NewSavings(externalOwner, recovery *btcec.PublicKey, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsForNetwork(externalOwner, recovery, fixture.Network, forbidden...)
 }
 
-// NewSavingsForNetwork builds the owner-only Savings template for network.
-func NewSavingsForNetwork(hot, offline *btcec.PublicKey, network string, forbidden ...*btcec.PublicKey) (*Built, error) {
-	return NewSavingsWithPolicy(hot, offline, network, fixture.SavingsCSV(), forbidden...)
+// NewSavingsForNetwork builds the ExternalOwnerWallet/RecoveryKey Savings template for network.
+func NewSavingsForNetwork(externalOwner, recovery *btcec.PublicKey, network string, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsWithPolicy(externalOwner, recovery, network, fixture.SavingsCSV(), forbidden...)
 }
 
 // NewSavingsWithPolicy makes the deployment CSV delay explicit.
-func NewSavingsWithPolicy(hot, offline *btcec.PublicKey, network string, csv arklib.RelativeLocktime, forbidden ...*btcec.PublicKey) (*Built, error) {
+func NewSavingsWithPolicy(externalOwner, recovery *btcec.PublicKey, network string, csv arklib.RelativeLocktime, forbidden ...*btcec.PublicKey) (*Built, error) {
 	rec := Record{
-		Kind:    Savings,
-		Hot:     hot,
-		Offline: offline,
-		CSV:     csv,
-		Network: network,
+		Kind:                Savings,
+		ExternalOwnerWallet: externalOwner,
+		RecoveryKey:         recovery,
+		CSV:                 csv,
+		Network:             network,
 	}
 	b, err := NewFromRecord(rec)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.AssertNoProvider(forbidden...); err != nil {
+	if err := b.AssertNoRoutineCosigners(forbidden...); err != nil {
 		return nil, err
 	}
 	return b, nil
@@ -157,15 +159,15 @@ func NewSavingsWithPolicy(hot, offline *btcec.PublicKey, network string, csv ark
 // NewFromRecord rebuilds a vault solely from a persisted record. Callers must
 // not substitute the current process's GetInfo/config keys.
 //
-// Operational trees treat DirectP256 as canonical: AuthorizationScript and
+// Operational trees treat PhoneDirectP256 as canonical: AuthorizationScript and
 // ArkadeScriptHash are always derived from it. A nonempty supplied script or
 // hash that differs from the derived values is rejected; empty fields are
 // filled with the derived values.
 func NewFromRecord(rec Record) (*Built, error) {
-	if rec.Hot == nil || rec.Offline == nil {
-		return nil, fmt.Errorf("hot and offline keys required")
+	if rec.ExternalOwnerWallet == nil || rec.RecoveryKey == nil {
+		return nil, fmt.Errorf("external owner wallet and recovery key required")
 	}
-	if err := requireIndependentXOnly(rec.Hot, rec.Offline); err != nil {
+	if err := requireIndependentXOnly(rec.ExternalOwnerWallet, rec.RecoveryKey); err != nil {
 		return nil, err
 	}
 	if rec.CSV.Value == 0 {
@@ -176,25 +178,31 @@ func NewFromRecord(rec Record) (*Built, error) {
 	}
 	switch rec.Kind {
 	case Operational:
-		if rec.ProviderBase == nil {
-			return nil, fmt.Errorf("provider base required")
+		if rec.PhoneRoutineBIP340 == nil {
+			return nil, fmt.Errorf("phone routine bip340 key required")
 		}
-		if rec.ArkadeBase == nil {
-			return nil, fmt.Errorf("arkade emulator base required")
+		if rec.VaultCosignerBase == nil {
+			return nil, fmt.Errorf("vault cosigner base required")
 		}
-		if err := requireIndependentXOnly(rec.ProviderBase, rec.ArkadeBase, rec.Hot, rec.Offline); err != nil {
+		if rec.ArkadeCosignerBase == nil {
+			return nil, fmt.Errorf("arkade cosigner base required")
+		}
+		if err := requireIndependentXOnly(
+			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet, rec.RecoveryKey,
+			rec.VaultCosignerBase, rec.ArkadeCosignerBase,
+		); err != nil {
 			return nil, err
 		}
-		auth, err := AuthorizationScript(rec.DirectP256, rec.AuthorizationPolicy)
+		auth, err := AuthorizationScript(rec.PhoneDirectP256, rec.AuthorizationPolicy)
 		if err != nil {
 			return nil, err
 		}
 		wantHash := arkade.ArkadeScriptHash(auth)
 		if len(rec.AuthScript) > 0 && !bytes.Equal(rec.AuthScript, auth) {
-			return nil, fmt.Errorf("auth script does not match DirectP256")
+			return nil, fmt.Errorf("auth script does not match PhoneDirectP256")
 		}
 		if len(rec.AuthScriptHash) > 0 && !bytes.Equal(rec.AuthScriptHash, wantHash) {
-			return nil, fmt.Errorf("auth script hash does not match DirectP256")
+			return nil, fmt.Errorf("auth script hash does not match PhoneDirectP256")
 		}
 		rec.AuthScript = append([]byte(nil), auth...)
 		rec.AuthScriptHash = append([]byte(nil), wantHash...)
@@ -210,28 +218,29 @@ func build(rec Record) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	owner := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.Hot, rec.Offline}}
+	admin := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.ExternalOwnerWallet, rec.RecoveryKey}}
 	recovery := &arkscript.CSVMultisigClosure{
-		MultisigClosure: arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.Offline}},
+		MultisigClosure: arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.RecoveryKey}},
 		Locktime:        rec.CSV,
 	}
 
 	var closures []arkscript.Closure
-	var tweakedProvider, tweakedArkade *btcec.PublicKey
+	var tweakedVaultCosigner, tweakedArkadeCosigner *btcec.PublicKey
 	switch rec.Kind {
 	case Operational:
-		tweakedProvider = arkade.ComputeArkadeScriptPublicKey(rec.ProviderBase, rec.AuthScriptHash)
-		tweakedArkade = arkade.ComputeArkadeScriptPublicKey(rec.ArkadeBase, rec.AuthScriptHash)
+		tweakedVaultCosigner = arkade.ComputeArkadeScriptPublicKey(rec.VaultCosignerBase, rec.AuthScriptHash)
+		tweakedArkadeCosigner = arkade.ComputeArkadeScriptPublicKey(rec.ArkadeCosignerBase, rec.AuthScriptHash)
 		if err := requireIndependentXOnly(
-			rec.Hot, rec.Offline, rec.ProviderBase, rec.ArkadeBase,
-			tweakedProvider, tweakedArkade,
+			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet, rec.RecoveryKey,
+			rec.VaultCosignerBase, rec.ArkadeCosignerBase,
+			tweakedVaultCosigner, tweakedArkadeCosigner,
 		); err != nil {
 			return nil, err
 		}
-		collab := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.Hot, tweakedProvider, tweakedArkade}}
-		closures = []arkscript.Closure{collab, owner, recovery}
+		routine := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.PhoneRoutineBIP340, tweakedVaultCosigner, tweakedArkadeCosigner}}
+		closures = []arkscript.Closure{routine, admin, recovery}
 	case Savings:
-		closures = []arkscript.Closure{owner, recovery}
+		closures = []arkscript.Closure{admin, recovery}
 	default:
 		return nil, fmt.Errorf("invalid vault kind %d", rec.Kind)
 	}
@@ -272,11 +281,11 @@ func build(rec Record) (*Built, error) {
 	var leaves Leaves
 	switch rec.Kind {
 	case Operational:
-		leaves.Collaborative, err = leafOf("collaborative", closures[0])
+		leaves.Routine, err = leafOf("routine", closures[0])
 		if err != nil {
 			return nil, err
 		}
-		leaves.Owner, err = leafOf("owner", closures[1])
+		leaves.Admin, err = leafOf("admin", closures[1])
 		if err != nil {
 			return nil, err
 		}
@@ -285,7 +294,7 @@ func build(rec Record) (*Built, error) {
 			return nil, err
 		}
 	case Savings:
-		leaves.Owner, err = leafOf("owner", closures[0])
+		leaves.Admin, err = leafOf("admin", closures[0])
 		if err != nil {
 			return nil, err
 		}
@@ -298,14 +307,14 @@ func build(rec Record) (*Built, error) {
 	}
 
 	return &Built{
-		Record:          rec,
-		Tree:            tree,
-		TapKey:          tapKey,
-		PkScript:        pkScript,
-		Address:         addr.EncodeAddress(),
-		Leaves:          leaves,
-		TweakedProvider: tweakedProvider,
-		TweakedArkade:   tweakedArkade,
+		Record:                rec,
+		Tree:                  tree,
+		TapKey:                tapKey,
+		PkScript:              pkScript,
+		Address:               addr.EncodeAddress(),
+		Leaves:                leaves,
+		TweakedVaultCosigner:  tweakedVaultCosigner,
+		TweakedArkadeCosigner: tweakedArkadeCosigner,
 	}, nil
 }
 
@@ -327,33 +336,33 @@ func sameXOnlyKey(a, b *btcec.PublicKey) bool {
 	return a != nil && b != nil && bytes.Equal(schnorr.SerializePubKey(a), schnorr.SerializePubKey(b))
 }
 
-// AssertNoProvider fails if any forbidden key appears in a serialized leaf
+// AssertNoRoutineCosigners fails if any forbidden key appears in a serialized leaf
 // script or a decoded closure. Callers must pass the real Operational
-// provider base and tweaked keys as expected inputs; a nil list proves
-// nothing, and Built.TweakedProvider is not itself proof of containment.
-func (b *Built) AssertNoProvider(forbidden ...*btcec.PublicKey) error {
+// routine cosigner base and tweaked keys as expected inputs; a nil list proves
+// nothing, and Built.TweakedVaultCosigner is not itself proof of containment.
+func (b *Built) AssertNoRoutineCosigners(forbidden ...*btcec.PublicKey) error {
 	if len(forbidden) == 0 {
-		return fmt.Errorf("provider exclusion requires at least one key to check")
+		return fmt.Errorf("routine-cosigner exclusion requires at least one key to check")
 	}
 	for _, pub := range forbidden {
 		if pub == nil {
-			return fmt.Errorf("provider exclusion key must not be nil")
+			return fmt.Errorf("routine-cosigner exclusion key must not be nil")
 		}
-		if b.ContainsProvider(pub) {
-			return fmt.Errorf("provider key present in vault leaf")
+		if b.ContainsKey(pub) {
+			return fmt.Errorf("routine cosigner key present in vault leaf")
 		}
 	}
 	return nil
 }
 
-// ContainsProvider reports whether any serialized leaf script or decoded
-// closure key matches pub. The TweakedProvider field is ignored.
-func (b *Built) ContainsProvider(pub *btcec.PublicKey) bool {
+// ContainsKey reports whether any serialized leaf script or decoded closure
+// key matches pub. Derived-key fields alone do not prove leaf containment.
+func (b *Built) ContainsKey(pub *btcec.PublicKey) bool {
 	if b == nil || pub == nil {
 		return false
 	}
 	want := schnorr.SerializePubKey(pub)
-	for _, leaf := range []*Leaf{b.Leaves.Collaborative, b.Leaves.Owner, b.Leaves.Recovery} {
+	for _, leaf := range []*Leaf{b.Leaves.Routine, b.Leaves.Admin, b.Leaves.Recovery} {
 		if leafContainsKey(leaf, want) {
 			return true
 		}
@@ -368,22 +377,22 @@ func (b *Built) ContainsProvider(pub *btcec.PublicKey) bool {
 	return false
 }
 
-// ContainsTweakedProvider reports whether the expected TweakedProvider key
-// actually appears in a leaf. A populated TweakedProvider field is not enough.
-func (b *Built) ContainsTweakedProvider() bool {
+// ContainsTweakedVaultCosigner reports whether the expected tweaked private
+// VaultCosigner key actually appears in a leaf.
+func (b *Built) ContainsTweakedVaultCosigner() bool {
 	if b == nil {
 		return false
 	}
-	return b.ContainsProvider(b.TweakedProvider)
+	return b.ContainsKey(b.TweakedVaultCosigner)
 }
 
-// ContainsTweakedArkade reports whether the expected public Arkade
+// ContainsTweakedArkadeCosigner reports whether the expected public Arkade
 // cosigner's tweaked key actually appears in a leaf.
-func (b *Built) ContainsTweakedArkade() bool {
+func (b *Built) ContainsTweakedArkadeCosigner() bool {
 	if b == nil {
 		return false
 	}
-	return b.ContainsProvider(b.TweakedArkade)
+	return b.ContainsKey(b.TweakedArkadeCosigner)
 }
 
 func leafContainsKey(leaf *Leaf, want []byte) bool {

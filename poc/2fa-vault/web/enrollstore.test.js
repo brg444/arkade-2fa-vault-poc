@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import {
   STORE,
   STORE_PENDING,
-  assertArkadeEmulatorIdentity,
+  assertArkadeCosignerIdentity,
+  assertDescriptorIdentity,
   loadMain,
   loadPending,
   promotePending,
@@ -30,18 +31,23 @@ function rec(over = {}) {
   return {
     credId: "aa",
     webauthnP256: "02" + "bb".repeat(32),
-    directP256: "03" + "cc".repeat(32),
-    hotPub: "02" + "dd".repeat(32),
+    phoneDirectP256: "03" + "cc".repeat(32),
+    phoneRoutineBip340Pub: "02" + "dd".repeat(32),
     nonce: "ee".repeat(12),
     ciphertext: "ff".repeat(48),
-    tweakedProviderXOnly: "11".repeat(32),
-    arkadeEmulatorBasePub: "03" + "22".repeat(32),
-    tweakedArkadeXOnly: "33".repeat(32),
-    arkadeEmulatorOrigin: "",
-    arkadeEmulatorVersion: "",
+    externalOwnerWalletPub: "02" + "44".repeat(32),
+    recoveryKeyPub: "03" + "55".repeat(32),
+    vaultCosignerBasePub: "02" + "66".repeat(32),
+    tweakedVaultCosignerXOnly: "11".repeat(32),
+    arkadeCosignerBasePub: "03" + "22".repeat(32),
+    tweakedArkadeCosignerXOnly: "33".repeat(32),
+    arkadeCosignerOrigin: "",
+    arkadeCosignerVersion: "",
     network: "regtest",
-    operationalAddress: "",
-    operationalScript: "",
+    templateVersion: "phone-direct-p256-routine-3of3-admin-2of2-v3",
+    policyVersion: "mandatory-change-onchain-v3",
+    operationalAddress: "bcrt1ptest-v3",
+    operationalScript: "5120" + "77".repeat(32),
     ...over,
   };
 }
@@ -58,7 +64,7 @@ test("promotePending moves pending to main and removes pending", () => {
   stagePending(storage, rec({ operationalAddress: "bcrt1q" }));
   const main = promotePending(storage);
   expect(main.operationalAddress).toBe("bcrt1q");
-  expect(loadMain(storage).hotPub).toBe(rec().hotPub);
+  expect(loadMain(storage).phoneRoutineBip340Pub).toBe(rec().phoneRoutineBip340Pub);
   expect(loadPending(storage)).toBeNull();
 });
 
@@ -73,28 +79,34 @@ test("promotePending never overwrites a mismatched main record", () => {
 
 test("sameEnrollmentTuple is case-insensitive hex", () => {
   expect(sameEnrollmentTuple(rec({ credId: "AA" }), rec({ credId: "aa" }))).toBe(true);
-  expect(sameEnrollmentTuple(rec({ hotPub: "02" + "dd".repeat(32) }), rec({ hotPub: "02" + "ee".repeat(32) }))).toBe(false);
+  expect(sameEnrollmentTuple(rec({ phoneRoutineBip340Pub: "02" + "dd".repeat(32) }), rec({ phoneRoutineBip340Pub: "02" + "ee".repeat(32) }))).toBe(false);
   expect(sameEnrollmentTuple(rec({ nonce: "01".repeat(12) }), rec({ nonce: "02".repeat(12) }))).toBe(false);
   expect(sameEnrollmentTuple(rec({ ciphertext: "01".repeat(48) }), rec({ ciphertext: "02".repeat(48) }))).toBe(false);
-  expect(sameEnrollmentTuple(rec({ arkadeEmulatorBasePub: "02" + "44".repeat(32) }), rec())).toBe(false);
-  expect(sameEnrollmentTuple(rec({ tweakedArkadeXOnly: "44".repeat(32) }), rec())).toBe(false);
-  expect(sameEnrollmentTuple(rec({ arkadeEmulatorVersion: "v2" }), rec())).toBe(false);
+  expect(sameEnrollmentTuple(rec({ arkadeCosignerBasePub: "02" + "44".repeat(32) }), rec())).toBe(false);
+  expect(sameEnrollmentTuple(rec({ tweakedArkadeCosignerXOnly: "44".repeat(32) }), rec())).toBe(false);
+  expect(sameEnrollmentTuple(rec({ arkadeCosignerVersion: "v2" }), rec())).toBe(false);
 });
 
-test("pre-registration pending records may omit the Arkade identity only as a complete group", () => {
+test("pre-registration pending records may omit the full descriptor identity only as a complete group", () => {
   const storage = memoryStorage();
   const pending = rec();
   for (const key of [
-    "arkadeEmulatorBasePub",
-    "tweakedArkadeXOnly",
-    "arkadeEmulatorOrigin",
-    "arkadeEmulatorVersion",
+    "externalOwnerWalletPub",
+    "recoveryKeyPub",
+    "vaultCosignerBasePub",
+    "tweakedVaultCosignerXOnly",
+    "arkadeCosignerBasePub",
+    "tweakedArkadeCosignerXOnly",
+    "arkadeCosignerOrigin",
+    "arkadeCosignerVersion",
     "network",
+    "templateVersion",
+    "policyVersion",
   ]) delete pending[key];
   stagePending(storage, pending);
-  expect(loadPending(storage).arkadeEmulatorBasePub).toBeUndefined();
+  expect(loadPending(storage).arkadeCosignerBasePub).toBeUndefined();
 
-  pending.arkadeEmulatorBasePub = "03" + "22".repeat(32);
+  pending.arkadeCosignerBasePub = "03" + "22".repeat(32);
   expect(() => stagePending(storage, pending)).toThrow(/identity is incomplete/);
 });
 
@@ -108,7 +120,7 @@ test("pending-only recovery requires explicit user presence and does not call th
     status: async () => { called = true; },
   });
   expect(result.action).toBe("pending-requires-user-presence");
-  expect(result.pending.hotPub).toBe(rec().hotPub);
+  expect(result.pending.phoneRoutineBip340Pub).toBe(rec().phoneRoutineBip340Pub);
   expect(called).toBe(false);
   expect(loadMain(storage)).toBeNull();
   expect(loadPending(storage).credId).toBe("aa");
@@ -132,83 +144,114 @@ test("corrupted pending records are rejected before recovery", async () => {
   await expect(recoverEnrollment({ storage })).rejects.toThrow(/nonce/);
 });
 
-test("main enrollment records require a pinned tweaked provider", () => {
+test("main enrollment records require a pinned tweaked VaultCosigner", () => {
   const storage = memoryStorage();
-  storage.setItem(STORE, JSON.stringify(rec({ tweakedProviderXOnly: "" })));
-  expect(() => loadMain(storage)).toThrow(/persisted tweaked provider/);
+  storage.setItem(STORE, JSON.stringify(rec({ tweakedVaultCosignerXOnly: "" })));
+  expect(() => loadMain(storage)).toThrow(/descriptor/);
 });
 
-test("main enrollment records require the full pinned Arkade emulator identity", () => {
+test("main enrollment records require the full v3 descriptor identity", () => {
   for (const field of [
-    "arkadeEmulatorBasePub",
-    "tweakedArkadeXOnly",
-    "arkadeEmulatorOrigin",
-    "arkadeEmulatorVersion",
+    "externalOwnerWalletPub",
+    "recoveryKeyPub",
+    "vaultCosignerBasePub",
+    "tweakedVaultCosignerXOnly",
+    "arkadeCosignerBasePub",
+    "tweakedArkadeCosignerXOnly",
+    "arkadeCosignerOrigin",
+    "arkadeCosignerVersion",
     "network",
+    "templateVersion",
+    "policyVersion",
   ]) {
     const storage = memoryStorage();
     const broken = rec();
     delete broken[field];
     storage.setItem(STORE, JSON.stringify(broken));
-    expect(() => loadMain(storage)).toThrow(/Arkade emulator.*incomplete/);
+    expect(() => loadMain(storage)).toThrow(/descriptor.*incomplete/);
   }
+});
+
+test("descriptor reconciliation pins ExternalOwnerWallet, RecoveryKey, and both routine cosigners", () => {
+  const persisted = rec();
+  expect(assertDescriptorIdentity(persisted, { ...persisted })).toMatchObject({
+    externalOwnerWalletPub: persisted.externalOwnerWalletPub,
+    recoveryKeyPub: persisted.recoveryKeyPub,
+    vaultCosignerBasePub: persisted.vaultCosignerBasePub,
+    tweakedVaultCosignerXOnly: persisted.tweakedVaultCosignerXOnly,
+  });
+  for (const [field, replacement] of [
+    ["externalOwnerWalletPub", "02" + "88".repeat(32)],
+    ["recoveryKeyPub", "03" + "88".repeat(32)],
+    ["vaultCosignerBasePub", "02" + "88".repeat(32)],
+    ["tweakedVaultCosignerXOnly", "88".repeat(32)],
+    ["templateVersion", "v2"],
+    ["policyVersion", "v2"],
+  ]) {
+    expect(() => assertDescriptorIdentity(persisted, { ...persisted, [field]: replacement }))
+      .toThrow(/does not match vault status|not x-only independent/);
+  }
+  expect(() => assertDescriptorIdentity(persisted, {
+    ...persisted,
+    recoveryKeyPub: persisted.externalOwnerWalletPub,
+  })).toThrow(/x-only independent/);
 });
 
 test("Arkade emulator status reconciliation pins base, tweak, origin, version, and network", () => {
   const persisted = rec({
-    arkadeEmulatorOrigin: "https://arkade.example",
-    arkadeEmulatorVersion: "v1.2.3",
+    arkadeCosignerOrigin: "https://arkade.example",
+    arkadeCosignerVersion: "v1.2.3",
     network: "mutinynet",
   });
   const status = {
-    arkadeEmulatorBasePub: persisted.arkadeEmulatorBasePub.toUpperCase(),
-    tweakedArkadeXOnly: persisted.tweakedArkadeXOnly.toUpperCase(),
-    arkadeEmulatorOrigin: persisted.arkadeEmulatorOrigin,
-    arkadeEmulatorVersion: persisted.arkadeEmulatorVersion,
+    arkadeCosignerBasePub: persisted.arkadeCosignerBasePub.toUpperCase(),
+    tweakedArkadeCosignerXOnly: persisted.tweakedArkadeCosignerXOnly.toUpperCase(),
+    arkadeCosignerOrigin: persisted.arkadeCosignerOrigin,
+    arkadeCosignerVersion: persisted.arkadeCosignerVersion,
     network: persisted.network,
   };
-  expect(assertArkadeEmulatorIdentity(persisted, status)).toEqual({
-    arkadeEmulatorBasePub: persisted.arkadeEmulatorBasePub,
-    tweakedArkadeXOnly: persisted.tweakedArkadeXOnly,
-    arkadeEmulatorOrigin: persisted.arkadeEmulatorOrigin,
-    arkadeEmulatorVersion: persisted.arkadeEmulatorVersion,
+  expect(assertArkadeCosignerIdentity(persisted, status)).toEqual({
+    arkadeCosignerBasePub: persisted.arkadeCosignerBasePub,
+    tweakedArkadeCosignerXOnly: persisted.tweakedArkadeCosignerXOnly,
+    arkadeCosignerOrigin: persisted.arkadeCosignerOrigin,
+    arkadeCosignerVersion: persisted.arkadeCosignerVersion,
     network: persisted.network,
   });
 
   for (const [field, replacement] of [
-    ["arkadeEmulatorBasePub", "02" + "44".repeat(32)],
-    ["tweakedArkadeXOnly", "44".repeat(32)],
-    ["arkadeEmulatorOrigin", "https://other.example"],
-    ["arkadeEmulatorVersion", "v9"],
+    ["arkadeCosignerBasePub", "02" + "44".repeat(32)],
+    ["tweakedArkadeCosignerXOnly", "44".repeat(32)],
+    ["arkadeCosignerOrigin", "https://other.example"],
+    ["arkadeCosignerVersion", "v9"],
     ["network", "regtest"],
   ]) {
-    expect(() => assertArkadeEmulatorIdentity(persisted, { ...status, [field]: replacement }))
+    expect(() => assertArkadeCosignerIdentity(persisted, { ...status, [field]: replacement }))
       .toThrow(/does not match vault status/);
   }
 });
 
 test("Arkade emulator status identity fails closed on malformed or unattested public identity", () => {
   const persisted = rec({
-    arkadeEmulatorOrigin: "https://arkade.example",
-    arkadeEmulatorVersion: "v1",
+    arkadeCosignerOrigin: "https://arkade.example",
+    arkadeCosignerVersion: "v1",
     network: "mutinynet",
   });
-  expect(() => assertArkadeEmulatorIdentity(persisted, {
+  expect(() => assertArkadeCosignerIdentity(persisted, {
     ...persisted,
-    arkadeEmulatorOrigin: "http://arkade.example",
+    arkadeCosignerOrigin: "http://arkade.example",
   })).toThrow(/canonical HTTPS origin/);
-  expect(() => assertArkadeEmulatorIdentity(persisted, {
+  expect(() => assertArkadeCosignerIdentity(persisted, {
     ...persisted,
-    arkadeEmulatorVersion: "",
+    arkadeCosignerVersion: "",
   })).toThrow(/required outside regtest/);
-  expect(() => assertArkadeEmulatorIdentity(persisted, {
+  expect(() => assertArkadeCosignerIdentity(persisted, {
     ...persisted,
-    arkadeEmulatorBasePub: "04" + "22".repeat(32),
+    arkadeCosignerBasePub: "04" + "22".repeat(32),
   })).toThrow(/base pub/);
 
   const regtest = rec();
   const live = { ...regtest };
-  delete live.arkadeEmulatorOrigin;
-  delete live.arkadeEmulatorVersion;
-  expect(assertArkadeEmulatorIdentity(regtest, live).arkadeEmulatorOrigin).toBe("");
+  delete live.arkadeCosignerOrigin;
+  delete live.arkadeCosignerVersion;
+  expect(assertArkadeCosignerIdentity(regtest, live).arkadeCosignerOrigin).toBe("");
 });

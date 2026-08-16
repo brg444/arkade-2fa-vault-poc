@@ -67,9 +67,10 @@ services:
       VAULT_EMULATOR: emulator:7073
       VAULT_ARKADE_EMULATOR: arkade-emulator:7073
       # REGTEST ONLY — NEVER FUND WITH REAL BTC.
-      # Public deterministic second-signer fixture: secp256k1 G (scalar 1).
-      # Not opaque, not custody, not offline-key security.
-      VAULT_OFFLINE_PUB: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      # REGTEST ONLY public deterministic admin fixtures. These are known
+      # scalar-2 ExternalOwnerWallet and scalar-1 RecoveryKey identities.
+      VAULT_EXTERNAL_OWNER_WALLET_PUB: "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+      VAULT_RECOVERY_KEY_PUB: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
       # Demo fund/mine only. Publish uses the same RPC. Off unless set.
       VAULT_DEMO: "1"
       VAULT_BITCOIN_RPC: "http://admin1:123@bitcoin:18443"

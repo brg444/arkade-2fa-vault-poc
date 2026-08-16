@@ -12,37 +12,37 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 )
 
-func TestOfflineSignerRequiredOnOwnerRecoveryAndAbsentFromSavings(t *testing.T) {
+func TestRecoveryKeyRequiredOnAdminAndRecoveryPaths(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
 	op := f.operational
 	sv := f.savings
 
-	if !leafContainsSecurityKey(op.Leaves.Owner, f.offline.PubKey()) {
-		t.Fatal("Operational owner leaf does not require the offline key")
+	if !leafContainsSecurityKey(op.Leaves.Admin, f.recovery.PubKey()) {
+		t.Fatal("Operational admin leaf does not require the RecoveryKey")
 	}
-	if !leafContainsSecurityKey(op.Leaves.Recovery, f.offline.PubKey()) {
-		t.Fatal("Operational recovery leaf does not require the offline key")
+	if !leafContainsSecurityKey(op.Leaves.Recovery, f.recovery.PubKey()) {
+		t.Fatal("Operational recovery leaf does not require the RecoveryKey")
 	}
-	if !leafContainsSecurityKey(sv.Leaves.Owner, f.offline.PubKey()) {
-		t.Fatal("Savings owner leaf does not require the offline key")
+	if !leafContainsSecurityKey(sv.Leaves.Admin, f.recovery.PubKey()) {
+		t.Fatal("Savings admin leaf does not require the RecoveryKey")
 	}
-	if !leafContainsSecurityKey(sv.Leaves.Recovery, f.offline.PubKey()) {
-		t.Fatal("Savings recovery leaf does not require the offline key")
+	if !leafContainsSecurityKey(sv.Leaves.Recovery, f.recovery.PubKey()) {
+		t.Fatal("Savings recovery leaf does not require the RecoveryKey")
 	}
-	if leafContainsSecurityKey(op.Leaves.Collaborative, f.offline.PubKey()) {
-		t.Fatal("collaborative leaf unexpectedly contains the offline key")
+	if leafContainsSecurityKey(op.Leaves.Routine, f.recovery.PubKey()) {
+		t.Fatal("routine leaf unexpectedly contains the RecoveryKey")
 	}
-	if err := sv.AssertNoProvider(f.provider.PubKey(), op.TweakedProvider, f.arkade.PubKey(), op.TweakedArkade); err != nil {
+	if err := sv.AssertNoRoutineCosigners(f.vaultCosigner.PubKey(), op.TweakedVaultCosigner, f.arkadeCosigner.PubKey(), op.TweakedArkadeCosigner); err != nil {
 		t.Fatal(err)
 	}
-	if sv.ContainsProvider(f.provider.PubKey()) || sv.ContainsProvider(op.TweakedProvider) ||
-		sv.ContainsProvider(f.arkade.PubKey()) || sv.ContainsProvider(op.TweakedArkade) {
+	if sv.ContainsKey(f.vaultCosigner.PubKey()) || sv.ContainsKey(op.TweakedVaultCosigner) ||
+		sv.ContainsKey(f.arkadeCosigner.PubKey()) || sv.ContainsKey(op.TweakedArkadeCosigner) {
 		t.Fatal("Savings contains a provider key")
 	}
-	if sv.Leaves.Collaborative != nil {
-		t.Fatal("Savings must not have a provider collaborative path")
+	if sv.Leaves.Routine != nil {
+		t.Fatal("Savings must not have a provider routine path")
 	}
 }
 
@@ -53,36 +53,36 @@ func TestOperationalAndSavingsVaultKeyContainment(t *testing.T) {
 	op := f.operational
 	savings := f.savings
 
-	if op.Leaves.Collaborative == nil {
-		t.Fatal("Operational vault is missing collaborative leaf")
+	if op.Leaves.Routine == nil {
+		t.Fatal("Operational vault is missing routine leaf")
 	}
-	if !op.ContainsTweakedProvider() {
+	if !op.ContainsTweakedVaultCosigner() {
 		t.Fatal("Operational vault does not contain its tweaked Provider key")
 	}
-	if !op.ContainsTweakedArkade() {
+	if !op.ContainsTweakedArkadeCosigner() {
 		t.Fatal("Operational vault does not contain its tweaked Arkade Emulator key")
 	}
-	if op.ContainsProvider(f.provider.PubKey()) || op.ContainsProvider(f.arkade.PubKey()) {
+	if op.ContainsKey(f.vaultCosigner.PubKey()) || op.ContainsKey(f.arkadeCosigner.PubKey()) {
 		t.Fatal("Operational vault contains an untweaked collaborator base key")
 	}
-	if !leafContainsSecurityKey(op.Leaves.Collaborative, f.hot.PubKey()) ||
-		!leafContainsSecurityKey(op.Leaves.Collaborative, op.TweakedProvider) ||
-		!leafContainsSecurityKey(op.Leaves.Collaborative, op.TweakedArkade) {
-		t.Fatal("collaborative leaf must contain exactly hot and both tweaked collaborators")
+	if !leafContainsSecurityKey(op.Leaves.Routine, f.phoneRoutine.PubKey()) ||
+		!leafContainsSecurityKey(op.Leaves.Routine, op.TweakedVaultCosigner) ||
+		!leafContainsSecurityKey(op.Leaves.Routine, op.TweakedArkadeCosigner) {
+		t.Fatal("routine leaf must contain exactly hot and both tweaked collaborators")
 	}
-	if leafContainsSecurityKey(op.Leaves.Owner, op.TweakedProvider) ||
-		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedProvider) ||
-		leafContainsSecurityKey(op.Leaves.Owner, op.TweakedArkade) ||
-		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedArkade) {
+	if leafContainsSecurityKey(op.Leaves.Admin, op.TweakedVaultCosigner) ||
+		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedVaultCosigner) ||
+		leafContainsSecurityKey(op.Leaves.Admin, op.TweakedArkadeCosigner) ||
+		leafContainsSecurityKey(op.Leaves.Recovery, op.TweakedArkadeCosigner) {
 		t.Fatal("collaborator key leaked into an owner-controlled Operational path")
 	}
 
-	if savings.Leaves.Collaborative != nil {
-		t.Fatal("Savings vault unexpectedly has a collaborative leaf")
+	if savings.Leaves.Routine != nil {
+		t.Fatal("Savings vault unexpectedly has a routine leaf")
 	}
-	if savings.ContainsProvider(f.provider.PubKey()) || savings.ContainsProvider(op.TweakedProvider) ||
-		savings.ContainsProvider(f.arkade.PubKey()) || savings.ContainsProvider(op.TweakedArkade) {
-		t.Fatal("Savings vault contains collaborative signing authority")
+	if savings.ContainsKey(f.vaultCosigner.PubKey()) || savings.ContainsKey(op.TweakedVaultCosigner) ||
+		savings.ContainsKey(f.arkadeCosigner.PubKey()) || savings.ContainsKey(op.TweakedArkadeCosigner) {
+		t.Fatal("Savings vault contains routine signing authority")
 	}
 	if bytes.Equal(op.PkScript, savings.PkScript) || op.Address == savings.Address {
 		t.Fatal("Operational and Savings vaults unexpectedly derived the same output")
@@ -96,11 +96,11 @@ func TestVaultClosuresHaveExpectedKeysAndDelays(t *testing.T) {
 	op := f.operational
 	savings := f.savings
 
-	assertSecurityMultisigKeys(t, op.Leaves.Collaborative, f.hot.PubKey(), op.TweakedProvider, op.TweakedArkade)
-	assertSecurityMultisigKeys(t, op.Leaves.Owner, f.hot.PubKey(), f.offline.PubKey())
-	assertSecurityCSVKeyAndDelay(t, op.Leaves.Recovery, f.offline.PubKey(), op.Record.CSV.Value)
-	assertSecurityMultisigKeys(t, savings.Leaves.Owner, f.hot.PubKey(), f.offline.PubKey())
-	assertSecurityCSVKeyAndDelay(t, savings.Leaves.Recovery, f.offline.PubKey(), savings.Record.CSV.Value)
+	assertSecurityMultisigKeys(t, op.Leaves.Routine, f.phoneRoutine.PubKey(), op.TweakedVaultCosigner, op.TweakedArkadeCosigner)
+	assertSecurityMultisigKeys(t, op.Leaves.Admin, f.externalOwner.PubKey(), f.recovery.PubKey())
+	assertSecurityCSVKeyAndDelay(t, op.Leaves.Recovery, f.recovery.PubKey(), op.Record.CSV.Value)
+	assertSecurityMultisigKeys(t, savings.Leaves.Admin, f.externalOwner.PubKey(), f.recovery.PubKey())
+	assertSecurityCSVKeyAndDelay(t, savings.Leaves.Recovery, f.recovery.PubKey(), savings.Record.CSV.Value)
 	if savings.Record.CSV.Value <= op.Record.CSV.Value {
 		t.Fatalf("Savings delay %d must exceed Operational delay %d", savings.Record.CSV.Value, op.Record.CSV.Value)
 	}
@@ -111,7 +111,7 @@ func TestEveryVaultLeafCommitsToItsCanonicalOutput(t *testing.T) {
 
 	f := newSecurityVaultFixture(t)
 	for _, built := range []*Built{f.operational, f.savings} {
-		for _, leaf := range []*Leaf{built.Leaves.Collaborative, built.Leaves.Owner, built.Leaves.Recovery} {
+		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.Recovery} {
 			if leaf == nil {
 				continue
 			}
@@ -133,7 +133,7 @@ func TestEveryVaultPathUsesTheDocumentedNUMSInternalKey(t *testing.T) {
 	f := newSecurityVaultFixture(t)
 	want := schnorr.SerializePubKey(arkscript.UnspendableKey())
 	for _, built := range []*Built{f.operational, f.savings} {
-		for _, leaf := range []*Leaf{built.Leaves.Collaborative, built.Leaves.Owner, built.Leaves.Recovery} {
+		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.Recovery} {
 			if leaf == nil {
 				continue
 			}
@@ -153,10 +153,10 @@ func TestVaultTreeHasNoUndocumentedScriptPaths(t *testing.T) {
 
 	f := newSecurityVaultFixture(t)
 	if got := len(f.operational.Tree.Closures); got != 3 {
-		t.Fatalf("Operational closure count = %d, want collaborative + owner + recovery", got)
+		t.Fatalf("Operational closure count = %d, want routine + admin + recovery", got)
 	}
 	if got := len(f.savings.Tree.Closures); got != 2 {
-		t.Fatalf("Savings closure count = %d, want owner + recovery", got)
+		t.Fatalf("Savings closure count = %d, want admin + recovery", got)
 	}
 }
 
@@ -191,7 +191,7 @@ func assertSecurityCSVKeyAndDelay(t *testing.T, leaf *Leaf, want *btcec.PublicKe
 	}
 	if len(closure.PubKeys) != 1 ||
 		!bytes.Equal(schnorr.SerializePubKey(closure.PubKeys[0]), schnorr.SerializePubKey(want)) {
-		t.Fatalf("%s does not contain only the offline key", leaf.Name)
+		t.Fatalf("%s does not contain only the RecoveryKey", leaf.Name)
 	}
 	if closure.Locktime.Value != delay {
 		t.Fatalf("%s delay = %d, want %d", leaf.Name, closure.Locktime.Value, delay)

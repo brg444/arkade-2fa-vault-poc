@@ -18,45 +18,48 @@ const (
 )
 
 type securityVaultFixture struct {
-	hot          *btcec.PrivateKey
-	offline      *btcec.PrivateKey
-	provider     *btcec.PrivateKey
-	arkade       *btcec.PrivateKey
-	direct       *ecdsa.PrivateKey
-	recipient    *btcec.PrivateKey
-	operational  *Built
-	savings      *Built
-	prevTx       *wire.MsgTx
-	prevOutPoint wire.OutPoint
-	recipientPK  []byte
+	phoneRoutine   *btcec.PrivateKey
+	externalOwner  *btcec.PrivateKey
+	recovery       *btcec.PrivateKey
+	vaultCosigner  *btcec.PrivateKey
+	arkadeCosigner *btcec.PrivateKey
+	phoneDirect    *ecdsa.PrivateKey
+	recipient      *btcec.PrivateKey
+	operational    *Built
+	savings        *Built
+	prevTx         *wire.MsgTx
+	prevOutPoint   wire.OutPoint
+	recipientPK    []byte
 }
 
 func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 	t.Helper()
 
-	hot := mustSecurityK1Key(t)
-	offline := mustSecurityK1Key(t)
-	provider := mustSecurityK1Key(t)
-	arkade := mustSecurityK1Key(t)
+	phoneRoutine := mustSecurityK1Key(t)
+	externalOwner := mustSecurityK1Key(t)
+	recovery := mustSecurityK1Key(t)
+	vaultCosigner := mustSecurityK1Key(t)
+	arkadeCosigner := mustSecurityK1Key(t)
 	recipient := mustSecurityK1Key(t)
 	p256, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatalf("generate P-256 key: %v", err)
 	}
 	operational, err := NewOperational(OperationalKeys{
-		Hot:          hot.PubKey(),
-		Offline:      offline.PubKey(),
-		ProviderBase: provider.PubKey(),
-		ArkadeBase:   arkade.PubKey(),
-		DirectP256:   webauthn.CompressedP256(p256),
+		PhoneRoutineBIP340:  phoneRoutine.PubKey(),
+		PhoneDirectP256:     webauthn.CompressedP256(p256),
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         recovery.PubKey(),
+		VaultCosignerBase:   vaultCosigner.PubKey(),
+		ArkadeCosignerBase:  arkadeCosigner.PubKey(),
 	})
 	if err != nil {
 		t.Fatalf("build Operational vault: %v", err)
 	}
 	savings, err := NewSavings(
-		hot.PubKey(), offline.PubKey(),
-		provider.PubKey(), operational.TweakedProvider,
-		arkade.PubKey(), operational.TweakedArkade,
+		externalOwner.PubKey(), recovery.PubKey(),
+		vaultCosigner.PubKey(), operational.TweakedVaultCosigner,
+		arkadeCosigner.PubKey(), operational.TweakedArkadeCosigner,
 	)
 	if err != nil {
 		t.Fatalf("build Savings vault: %v", err)
@@ -74,21 +77,22 @@ func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 	prevTx.AddTxOut(&wire.TxOut{Value: securityPrevoutValue, PkScript: operational.PkScript})
 
 	return &securityVaultFixture{
-		hot:          hot,
-		offline:      offline,
-		provider:     provider,
-		arkade:       arkade,
-		direct:       p256,
-		recipient:    recipient,
-		operational:  operational,
-		savings:      savings,
-		prevTx:       prevTx,
-		prevOutPoint: wire.OutPoint{Hash: prevTx.TxHash(), Index: 0},
-		recipientPK:  recipientPK,
+		phoneRoutine:   phoneRoutine,
+		externalOwner:  externalOwner,
+		recovery:       recovery,
+		vaultCosigner:  vaultCosigner,
+		arkadeCosigner: arkadeCosigner,
+		phoneDirect:    p256,
+		recipient:      recipient,
+		operational:    operational,
+		savings:        savings,
+		prevTx:         prevTx,
+		prevOutPoint:   wire.OutPoint{Hash: prevTx.TxHash(), Index: 0},
+		recipientPK:    recipientPK,
 	}
 }
 
-func (f *securityVaultFixture) collaborativeParams() SpendParams {
+func (f *securityVaultFixture) routineParams() SpendParams {
 	return SpendParams{
 		Vault:           f.operational,
 		PrevTx:          f.prevTx,

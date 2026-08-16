@@ -6,7 +6,7 @@ const txid = "cd".repeat(32);
 
 function requests() {
   return [
-    { path: "/v1/register", body: { credentialId: "01", directP256: "02", hotPub: "03", webauthnP256: "04" } },
+    { path: "/v1/register", body: { credentialId: "01", phoneDirectP256: "02", phoneRoutineBip340Pub: "03", webauthnP256: "04" } },
     { path: "/v1/demo/fund", body: { amount: 100000 } },
     { path: "/v1/draft", body: { fee: 500, prevTxHex: "00", recipientAmount: 20000, recipientScript: "51", vout: 0 } },
     { path: "/v1/preflight", body: { psbt: "draft" } },

@@ -8,23 +8,26 @@ browser -> public Caddy TLS/static gateway -> internal authorizer
                                              `-> checkpoint-pinned HTTPS Esplora
 ```
 
-The authorizer is the only process with the provider key and authoritative
+The authorizer is the only process with the VaultCosigner key and authoritative
 SQLite ledger. Compose runs no local Emulator, generic inbound signer, demo
 wallet, funding route, or mining route. The authorizer does make one narrow
 outbound HTTPS call to the release-pinned public Arkade Emulator for the third
-collaborative signature; `/v1/onchain-tx` is never exposed through the gateway.
+routine signature; `/v1/onchain-tx` is never exposed through the gateway.
 
-The collaborative Operational leaf is exact 3-of-3: browser hot key, tweaked
-private Provider key, and tweaked public Arkade key. The two independent base
-keys are tweaked with the same `ArkadeScriptHash`. The Savings tree excludes
-both roles' base and tweaked identities.
+The Routine Operational leaf is exact 3-of-3: browser-memory
+`PhoneRoutineBIP340`, tweaked private `VaultCosigner`, and tweaked public
+`ArkadeCosigner`. Phone approval also requires the separate WebAuthn and
+`PhoneDirectP256` authorization. Admin/full sweep/policy migration is an
+offline 2-of-2 `ExternalOwnerWallet + RecoveryKey` leaf; emergency recovery
+is CSV + `RecoveryKey`. Savings has only those two external admin/recovery
+paths and excludes every routine signer.
 
 Issuance is staged as:
 
 ```text
 reserved(request_psbt)
-  → provider_signed(request_psbt, provider_psbt)
-  → completed(request_psbt, provider_psbt, signed_psbt)
+  → vault_signed(request_psbt, vault_psbt)
+  → completed(request_psbt, vault_psbt, signed_psbt)
 ```
 
 The exact request and allowance are durable before private key use; the private
@@ -47,17 +50,16 @@ does not provide an HSM or enclave security boundary.
 - `openssl`, `curl`, and optionally `jq` for the walkthrough.
 - Optionally `mutinynet-cli` with `mutinynet-cli login`; the hosted
   [Mutinynet faucet](https://faucet.mutinynet.com/) is the no-install path.
-- A separate backup wallet capable of producing a real compressed
-  secp256k1 public key and later signing the owner/recovery paths. Its key
-  ceremony is outside this repository.
+- An ExternalOwnerWallet and an independent RecoveryKey wallet, each capable
+  of exporting a real compressed secp256k1 public key and signing a Taproot
+  script-path PSBT. Their key ceremonies are outside this repository.
 
 Run every Compose command below from the repository root.
 
-This v2 3-of-3 release does not auto-migrate an old v1 SQLite database or an
-Operational UTXO funded to the former 2-of-2 tree. Preserve the old database
-and keys and complete a reviewed old-tree spend/migration before enrolling and
-funding a fresh v2 instance. Do not test migration by overwriting the only
-custody state.
+This v3 release does not reinterpret v1/v2 SQLite databases or funded outputs.
+Preserve the old database and keys and complete a reviewed old-tree
+spend/migration before enrolling and funding a fresh v3 instance. Do not test
+migration by overwriting the only custody state.
 
 ## 1. Prepare secrets outside the repository
 
@@ -66,9 +68,9 @@ context. Restrict it to the operator account.
 
 ```bash
 install -d -m 700 /absolute/operator/path/vault-secrets
-openssl rand -hex 32 > /absolute/operator/path/vault-secrets/provider-key
+openssl rand -hex 32 > /absolute/operator/path/vault-secrets/vault-cosigner-key
 openssl rand -hex 32 > /absolute/operator/path/vault-secrets/enrollment-token
-chmod 0444 /absolute/operator/path/vault-secrets/provider-key
+chmod 0444 /absolute/operator/path/vault-secrets/vault-cosigner-key
 chmod 0444 /absolute/operator/path/vault-secrets/enrollment-token
 ```
 
@@ -78,9 +80,9 @@ container UID 10001 can read the file-backed Compose secret after it is bind
 mounted. A normal owner-only mode 0600 file may be unreadable to that non-root
 UID on Linux. Compose `uid/gid/mode` fields are not a portable fix for `file:`
 sources because engines may ignore them. Do not make the authorizer root to
-work around this. The provider key remains mounted only into the authorizer.
+work around this. The VaultCosigner key remains mounted only into the authorizer.
 
-The provider-key file must contain exactly one valid 32-byte secp256k1 scalar
+The VaultCosigner-key file must contain exactly one valid 32-byte secp256k1 scalar
 as 64 hex characters, with an optional final LF. Startup rejects zero,
 out-of-range scalars, scalar 1, and scalar N-1. If the random value is rejected,
 replace it with a newly generated value.
@@ -90,10 +92,11 @@ browser for the first registration and is never logged or stored by the
 browser. Do not put either file in this repository or in a shell history as
 literal secret text.
 
-Export a real 33-byte compressed backup public key from the independent
-backup wallet. It must be independent of the hot and provider keys and must
-not be generator G or its negation. Only the public key is supplied here;
-generation and signing remain the backup wallet's responsibility.
+Export real 33-byte compressed public keys from ExternalOwnerWallet and
+RecoveryKey. They must be independent of each other, PhoneRoutineBIP340, and
+both cosigners. They must not be either known regtest fixture or its negation.
+Only public keys enter Compose; their private material remains in the external
+wallets.
 
 ## 2. Set deployment inputs
 
@@ -112,9 +115,10 @@ export YOUR_REAL_DOMAIN='YOUR_REAL_PUBLIC_DOMAIN'
 export YOUR_REAL_EMAIL='YOUR_REAL_OPERATOR_EMAIL'
 export VAULT_DOMAIN="vault.${YOUR_REAL_DOMAIN}"
 export ACME_EMAIL="${YOUR_REAL_EMAIL}"
-export VAULT_PROVIDER_KEY_FILE=/absolute/operator/path/vault-secrets/provider-key
+export VAULT_VAULT_COSIGNER_KEY_FILE=/absolute/operator/path/vault-secrets/vault-cosigner-key
 export VAULT_ENROLLMENT_TOKEN_FILE=/absolute/operator/path/vault-secrets/enrollment-token
-export VAULT_OFFLINE_PUB=02_REPLACE_WITH_REAL_66_HEX_COMPRESSED_BACKUP_PUB
+export VAULT_EXTERNAL_OWNER_WALLET_PUB=02_REPLACE_WITH_REAL_66_HEX_EXTERNAL_OWNER_PUB
+export VAULT_RECOVERY_KEY_PUB=02_REPLACE_WITH_REAL_66_HEX_RECOVERY_PUB
 export VAULT_OPERATIONAL_CSV_BLOCKS=288
 export VAULT_SAVINGS_CSV_BLOCKS=4032
 export VAULT_ESPLORA_URL=https://mempool.mutinynet.arkade.sh/api
@@ -164,20 +168,22 @@ curl --fail --show-error https://$VAULT_DOMAIN/v1/status
 
 Open `https://$VAULT_DOMAIN` in a PRF-capable browser. Paste the contents of
 the enrollment-token file into **One-time enrollment token**, then choose
-**Create passkey + encrypted hot key**. Verify status reports:
+**Create passkey + encrypted PhoneRoutine key**. Verify status reports:
 
 - `enrolled: true`;
 - `network: "mutinynet"`;
 - the exact HTTPS `clientOrigin` and RP ID;
-- `backupPub` exactly equal to `VAULT_OFFLINE_PUB`;
-- the independently derived `providerBasePub` for the provider scalar;
-- `arkadeEmulatorBasePub`, `arkadeEmulatorOrigin`, and
-  `arkadeEmulatorVersion` exactly equal to the release pins above;
-- distinct `tweakedProviderXOnly` and `tweakedArkadeXOnly` values;
+- `externalOwnerWalletPub` exactly equal to
+  `VAULT_EXTERNAL_OWNER_WALLET_PUB`;
+- `recoveryKeyPub` exactly equal to `VAULT_RECOVERY_KEY_PUB`;
+- the independently derived `vaultCosignerBasePub` for the mounted scalar;
+- `arkadeCosignerBasePub`, `arkadeCosignerOrigin`, and
+  `arkadeCosignerVersion` exactly equal to the release pins above;
+- distinct `phoneRoutineBip340Pub`, `tweakedVaultCosignerXOnly`, and
+  `tweakedArkadeCosignerXOnly` identities;
 - the intended template/policy versions and both CSV block delays;
 - both `tb1p...` addresses and the configured economic caps; and
-- both `savingsExcludesProvider: true` and
-  `savingsExcludesCollaborators: true`.
+- `savingsExcludesRoutineCosigners: true`.
 
 Registration is first-write locked. Record this public status before funding.
 The current POC exposes the immutable inputs but does not yet derive the full
@@ -243,10 +249,11 @@ p.bytesToHex(p.scriptFromAddress("tb1_REPLACE_WITH_RECIPIENT", "mutinynet"));
 ```
 
 Choose **Review**, verify the input, recipient, change, fee, and allowance,
-then choose **Passkey ceremony**. The page binds DirectP256, decrypts and uses
-the hot key locally, and submits the hot-signed request. The authorizer first
-persists the private Provider signature, then asks the pinned public Arkade
-Emulator for its signature. The page accepts only its submitted hot signature
+then choose **Phone approval + routine signature**. The page binds
+PhoneDirectP256, decrypts and uses PhoneRoutineBIP340 locally, and submits the
+phone-signed request. The authorizer first persists the VaultCosigner
+signature, then asks the pinned public ArkadeCosigner for its signature. The
+page accepts only its submitted PhoneRoutine signature
 plus exactly those two new valid cosigner signatures, in either order, with no
 duplicates, substitutions, or PSBT/transaction mutation. It then publishes
 through Esplora and displays the txid/challenge. Track it with:
@@ -260,14 +267,40 @@ The returned txid must equal the txid independently derived by the browser.
 
 If `/v1/authorize` fails because the public signer or network is temporarily
 unavailable, leave the reviewed fields and page unchanged and choose
-**Passkey ceremony** again. The page keeps the exact serialized authorize body
+**Phone approval + routine signature** again. The page keeps the exact serialized authorize body
 only in memory and resubmits those identical bytes; it does not generate a new
-WebAuthn assertion, DirectP256 signature, or hot signature for the reserved
+WebAuthn assertion, PhoneDirectP256 signature, or PhoneRoutine signature for the reserved
 challenge. Reloading the page loses this retry material. A verified success or
 any change of spend intent clears it. Assertion and PSBT material is never
 written to `localStorage` or `sessionStorage`.
 
-## 6. Restart proof
+## 6. File-only admin/full-sweep handoff
+
+Routine endpoints always require a non-dust recursive change output to the
+same Operational script; they cannot perform a full drain or replace policy.
+For an intentional sweep or migration, save the enrolled `/v1/status` JSON and
+an operator-reviewed build request, then use the offline reference tool:
+
+```bash
+go run ./poc/2fa-vault/cmd/adminpsbt \
+  -mode build -descriptor status.json -request admin-request.json \
+  -out unsigned-admin.psbt
+
+# Transfer the PSBT to ExternalOwnerWallet and RecoveryKey and obtain both
+# signatures without changing any PSBT field.
+go run ./poc/2fa-vault/cmd/adminpsbt \
+  -mode finalize -descriptor status.json -psbt signed-admin.psbt \
+  -out final-admin.psbt -tx-out final-admin.tx
+```
+
+The build request is JSON with `prevTxHex`, `vout`, `destinationScript`,
+`destinationAmount`, and `fee`. The tool pins and reconstructs the exact v3
+descriptor and Mutinynet Arkade release identity, verifies the full prevout,
+requires exactly ExternalOwnerWallet+RecoveryKey BIP340 signatures, executes
+the finalized witness locally, opens no listener, and reads no private key.
+Broadcast is an explicit operator step after reviewing `final-admin.tx`.
+
+## 7. Restart proof
 
 Restart only the protected authorizer and verify that descriptor and policy
 state survive:
@@ -279,11 +312,11 @@ docker compose \
 curl --fail --show-error https://$VAULT_DOMAIN/v1/status
 ```
 
-Changing the provider key, backup key, network, CSV delays, client origin, RP
+Changing the VaultCosigner key, ExternalOwnerWallet, RecoveryKey, network, CSV delays, client origin, RP
 ID, template, or policy version must make restart fail rather than silently
 derive a different vault. The credential/descriptor row carries a versioned
-HMAC under a domain-separated key derived from the provider scalar. A private
-Provider-key rotation therefore requires a reviewed migration with the old key
+HMAC under a domain-separated key derived from the VaultCosigner scalar. A
+VaultCosigner-key rotation therefore requires a reviewed migration with the old key
 available; never edit the SQLite row or MAC in place.
 
 Public Arkade Emulator rotation is deliberately separate. A fresh enrollment
@@ -296,9 +329,9 @@ still requires the signature under the stored tweak. Removing that deprecated
 key, changing the pinned origin, or using a non-allowlisted version makes
 startup fail closed.
 
-The current v2 credential and issuance schema is also exact. Pointing this
-binary at a v1 database fails with migration/restore guidance; startup does not
-rewrite the old descriptor, ledger, or already funded 2-of-2 UTXOs.
+The current v3 credential and issuance schema is also exact. Pointing this
+binary at a v1/v2 database fails with migration/restore guidance; startup does
+not rewrite the old descriptor, ledger, or already funded legacy UTXOs.
 
 ## Stop without deleting custody state
 
@@ -312,7 +345,7 @@ Do not add `--volumes`: the named authorizer volume contains the authoritative
 descriptor and issuance ledger. Take a file-level database/volume backup only
 while the authorizer is stopped, or use SQLite's online backup API/tool; a
 blind copy of a live SQLite file is not the documented procedure. Protect the
-matching provider-key backup under the operator's encrypted secret process.
+matching VaultCosigner-key backup under the operator's encrypted secret process.
 
 There is no anti-rollback store. Restoring an older database snapshot can
 restore an older allowance/reservation view while signatures and transactions
@@ -334,12 +367,13 @@ records before bringing the key-owning authorizer back online after restore.
   independent Mutinynet source.
 - The public Arkade Emulator is an availability and transaction-privacy
   dependency. Its signing response is treated as hostile and reconciled down
-  to the one expected signature, but an outage can stop the collaborative
+  to the one expected signature, but an outage can stop the routine
   path. Its `/v1/info` response has no network field; only the separate
   Esplora height-1 checkpoint pins Mutinynet.
 - The browser independently derives and reconciles the restricted POC Arkade
   sighash, but does not yet derive a complete versioned vault descriptor.
-- The backup wallet pairing/signing flow is not implemented here.
+- Friendly ExternalOwnerWallet/RecoveryKey pairing and transport UX is not
+  implemented; the file-only reference handoff is deliberately manual.
 - This is one vault per isolated authorizer, with code-pinned economic caps.
 - Container/root compromise is outside the protected-key claim.
 - Database snapshots have no anti-rollback protection.

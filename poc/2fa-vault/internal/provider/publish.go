@@ -101,10 +101,10 @@ func (s *Service) preparePublication(ctx context.Context, challengeHex string) (
 	if err != nil {
 		return nil, "", err
 	}
-	if err := vault.FinalizeCollaborative(clone, op); err != nil {
+	if err := vault.FinalizeRoutine(clone, op); err != nil {
 		return nil, "", err
 	}
-	if err := vault.ExecuteFinalizedCollaborative(clone, op); err != nil {
+	if err := vault.ExecuteFinalizedRoutine(clone, op); err != nil {
 		return nil, "", fmt.Errorf("local script engine: %w", err)
 	}
 	tx, err := vault.ExtractFinalizedTx(clone)
@@ -137,10 +137,10 @@ func verifyStoredDirectWitness(ptx *psbt.Packet, op *vault.Built, challenge []by
 }
 
 func ptxDirectPub(op *vault.Built) ([]byte, error) {
-	if op == nil || len(op.Record.DirectP256) == 0 {
+	if op == nil || len(op.Record.PhoneDirectP256) == 0 {
 		return nil, fmt.Errorf("direct p256 required")
 	}
-	return op.Record.DirectP256, nil
+	return op.Record.PhoneDirectP256, nil
 }
 
 func (s *Service) dispatchPublication(ctx context.Context, raw []byte, txid string) (*PublishResult, error) {

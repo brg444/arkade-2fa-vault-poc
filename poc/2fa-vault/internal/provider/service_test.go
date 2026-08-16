@@ -28,6 +28,7 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	hot, _ := btcec.NewPrivateKey()
+	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
 	prov, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
@@ -45,28 +46,29 @@ func newEnv(t *testing.T) *env {
 	}
 	t.Cleanup(func() { _ = led.Close() })
 	svc := &Service{
-		Ledger:      led,
-		Hot:         hot.PubKey(),
-		Offline:     offline.PubKey(),
-		ProviderPub: prov.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: prov},
-		ArkadeSigner: LocalSigner{
+		Ledger:              led,
+		PhoneRoutineBIP340:  hot.PubKey(),
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    prov.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: prov},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	credID := []byte{0x11}
 	if err := svc.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString(credID),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(p256)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
+		CredentialID:    hex.EncodeToString(credID),
+		WebAuthnP256:    hex.EncodeToString(webauthn.CompressedP256(p256)),
+		PhoneDirectP256: hex.EncodeToString(webauthn.CompressedP256(direct)),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Register(RegisterRequest{
-		CredentialID: "00",
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(p256)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
+		CredentialID:    "00",
+		WebAuthnP256:    hex.EncodeToString(webauthn.CompressedP256(p256)),
+		PhoneDirectP256: hex.EncodeToString(webauthn.CompressedP256(direct)),
 	}); err == nil {
 		t.Fatal("second enroll must lock")
 	}
@@ -95,7 +97,7 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 	e := newEnv(t)
 	prevTx, op := fundOp(t, e, 80_000)
 	dest := destScript(t)
-	built, err := vault.BuildCollaborativeSpend(vault.SpendParams{
+	built, err := vault.BuildRoutineSpend(vault.SpendParams{
 		Vault: e.svc.Operational, PrevTx: prevTx, PrevOutPoint: op,
 		RecipientScript: dest, RecipientAmount: 40_000, Fee: 500,
 	})
@@ -113,11 +115,11 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 	if err := vault.SetPacketWitness(built.Packet.UnsignedTx, [][]byte{directSig}); err != nil {
 		t.Fatal(err)
 	}
-	hotSig, err := vault.SignLeaf(built.Packet.UnsignedTx, built.Prevout, e.svc.Operational.Leaves.Collaborative.Script, e.hot)
+	hotSig, err := vault.SignLeaf(built.Packet.UnsignedTx, built.Prevout, e.svc.Operational.Leaves.Routine.Script, e.hot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vault.AddPartialSig(built.Packet, e.hot.PubKey(), e.svc.Operational.Leaves.Collaborative.Hash, hotSig)
+	vault.AddPartialSig(built.Packet, e.hot.PubKey(), e.svc.Operational.Leaves.Routine.Hash, hotSig)
 	enc, err := built.Packet.B64Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +140,7 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 		t.Fatalf("retry: %v replay=%v", err, replay)
 	}
 
-	built2, err := vault.BuildCollaborativeSpend(vault.SpendParams{
+	built2, err := vault.BuildRoutineSpend(vault.SpendParams{
 		Vault: e.svc.Operational, PrevTx: prevTx, PrevOutPoint: op,
 		RecipientScript: dest, RecipientAmount: 41_000, Fee: 500,
 	})
@@ -152,7 +154,7 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 	}
 
 	prevBig, opBig := fundOp(t, e, 200_000)
-	over, err := vault.BuildCollaborativeSpend(vault.SpendParams{
+	over, err := vault.BuildRoutineSpend(vault.SpendParams{
 		Vault: e.svc.Operational, PrevTx: prevBig, PrevOutPoint: opBig,
 		RecipientScript: dest, RecipientAmount: fixture.TxRecipientCapSats + 1, Fee: 500,
 	})
@@ -184,15 +186,19 @@ func TestAuthorizeHappyAndMutations(t *testing.T) {
 		t.Fatal("prf payload accepted")
 	}
 
-	if err := e.svc.Savings.AssertNoProvider(
-		e.svc.ProviderPub, e.svc.Operational.TweakedProvider,
-		e.svc.ArkadePub, e.svc.Operational.TweakedArkade,
+	if err := e.svc.Savings.AssertNoRoutineCosigners(
+		e.svc.VaultCosignerPub, e.svc.Operational.TweakedVaultCosigner,
+		e.svc.ArkadeCosignerPub, e.svc.Operational.TweakedArkadeCosigner,
 	); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
+	externalOwner, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	offline, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -219,21 +225,22 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = led.Close() })
 	svc := &Service{
-		Ledger:      led,
-		Offline:     offline.PubKey(),
-		ProviderPub: prov.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: prov},
-		ArkadeSigner: LocalSigner{
+		Ledger:              led,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    prov.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: prov},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	same := hex.EncodeToString(webauthn.CompressedP256(p256))
 	if err := svc.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte{0x33}),
-		WebAuthnP256: same,
-		DirectP256:   same,
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte{0x33}),
+		WebAuthnP256:          same,
+		PhoneDirectP256:       same,
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}); err == nil {
 		t.Fatal("register accepted the WebAuthn credential P-256 as the direct-auth key")
 	}
@@ -241,6 +248,10 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 
 func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 	hot, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalOwner, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,32 +281,33 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = led.Close() })
 	svc := &Service{
-		Ledger:      led,
-		Offline:     offline.PubKey(),
-		ProviderPub: prov.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: prov},
-		ArkadeSigner: LocalSigner{
+		Ledger:              led,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    prov.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: prov},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	if err := svc.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte{0x22}),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(p256)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
+		CredentialID:    hex.EncodeToString([]byte{0x22}),
+		WebAuthnP256:    hex.EncodeToString(webauthn.CompressedP256(p256)),
+		PhoneDirectP256: hex.EncodeToString(webauthn.CompressedP256(direct)),
 	}); err == nil {
-		t.Fatal("registration without a browser hot pubkey must fail when Service.Hot is nil")
+		t.Fatal("registration without a browser hot pubkey must fail when Service.PhoneRoutineBIP340 is nil")
 	}
 	browserHot := hex.EncodeToString(hot.PubKey().SerializeCompressed())
 	if err := svc.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte{0x22}),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(p256)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       browserHot,
+		CredentialID:          hex.EncodeToString([]byte{0x22}),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(p256)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: browserHot,
 	}); err != nil {
 		t.Fatalf("browser-supplied hot pubkey: %v", err)
 	}
-	if svc.Hot == nil || hex.EncodeToString(svc.Hot.SerializeCompressed()) != browserHot {
+	if svc.PhoneRoutineBIP340 == nil || hex.EncodeToString(svc.PhoneRoutineBIP340.SerializeCompressed()) != browserHot {
 		t.Fatal("enrolled hot pubkey is not the browser-supplied key")
 	}
 	st, err := svc.Status(context.Background())
@@ -303,11 +315,11 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantDirect := hex.EncodeToString(webauthn.CompressedP256(direct))
-	if st.DirectP256 != wantDirect {
-		t.Fatalf("status directP256 = %q, want persisted %q", st.DirectP256, wantDirect)
+	if st.PhoneDirectP256 != wantDirect {
+		t.Fatalf("status phoneDirectP256 = %q, want persisted %q", st.PhoneDirectP256, wantDirect)
 	}
-	wantProvider := hex.EncodeToString(schnorr.SerializePubKey(svc.Operational.TweakedProvider))
-	if st.TweakedProviderXOnly != wantProvider {
-		t.Fatalf("status tweakedProviderXOnly = %q, want persisted %q", st.TweakedProviderXOnly, wantProvider)
+	wantProvider := hex.EncodeToString(schnorr.SerializePubKey(svc.Operational.TweakedVaultCosigner))
+	if st.TweakedVaultCosignerXOnly != wantProvider {
+		t.Fatalf("status tweakedProviderXOnly = %q, want persisted %q", st.TweakedVaultCosignerXOnly, wantProvider)
 	}
 }

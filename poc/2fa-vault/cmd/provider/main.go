@@ -21,23 +21,24 @@ import (
 
 func main() {
 	var (
-		addr           = flag.String("addr", fixture.HTTPAddr, "listen address")
-		dbPath         = flag.String("db", "2fa-vault.sqlite", "sqlite path")
-		webDir         = flag.String("web", "", "optional static web directory")
-		hotHex         = flag.String("hot", os.Getenv("VAULT_HOT_PUB"), "optional enrolled hot pubkey hex; omit before browser enrollment")
-		offlineHex     = flag.String("offline", os.Getenv("VAULT_OFFLINE_PUB"), "offline compressed pubkey hex")
-		emulator       = flag.String("emulator", envOr("VAULT_EMULATOR", remotesigner.DefaultEmulatorAddr), "private emulator host:port")
-		arkadeEmulator = flag.String("arkade-emulator", os.Getenv("VAULT_ARKADE_EMULATOR"), "independent regtest Arkade emulator host:port")
-		unsafeLocal    = flag.Bool("unsafe-local-signer", false, "test-only: sign with a local provider private key")
-		provHex        = flag.String("provider-key", os.Getenv("VAULT_PROVIDER_PRIV"), "provider private key hex (unsafe-local-signer only)")
-		arkadeHex      = flag.String("arkade-key", os.Getenv("VAULT_ARKADE_PRIV"), "Arkade emulator private key hex (unsafe-local-signer only)")
-		demoOn         = flag.Bool("demo", envOr("VAULT_DEMO", "") == "1", "enable gated fund/mine demo RPC")
-		bitcoinRPC     = flag.String("bitcoin-rpc", os.Getenv("VAULT_BITCOIN_RPC"), "regtest Bitcoin JSON-RPC URL for Publish and demo funding")
-		clientOrigin   = flag.String("client-origin", envOr("VAULT_CLIENT_ORIGIN", fixture.Origin), "exact regtest WebAuthn signing-client origin")
-		rpID           = flag.String("rp-id", envOr("VAULT_RP_ID", fixture.RPID), "exact regtest WebAuthn relying-party ID")
-		network        = flag.String("network", envOr("VAULT_NETWORK", deployment.NetworkRegtest), "must be regtest; Mutinynet uses cmd/authorizer")
-		opCSV          = flag.Uint64("operational-csv-blocks", envUint64("VAULT_OPERATIONAL_CSV_BLOCKS"), "Operational recovery delay in blocks")
-		savingsCSV     = flag.Uint64("savings-csv-blocks", envUint64("VAULT_SAVINGS_CSV_BLOCKS"), "Savings recovery delay in blocks")
+		addr            = flag.String("addr", fixture.HTTPAddr, "listen address")
+		dbPath          = flag.String("db", "2fa-vault.sqlite", "sqlite path")
+		webDir          = flag.String("web", "", "optional static web directory")
+		phoneRoutineHex = flag.String("phone-routine", os.Getenv("VAULT_PHONE_ROUTINE_BIP340_PUB"), "optional enrolled PhoneRoutineBIP340 public key; omit before browser enrollment")
+		ownerHex        = flag.String("external-owner-wallet", os.Getenv("VAULT_EXTERNAL_OWNER_WALLET_PUB"), "ExternalOwnerWallet compressed public key")
+		recoveryHex     = flag.String("recovery-key", os.Getenv("VAULT_RECOVERY_KEY_PUB"), "RecoveryKey compressed public key")
+		emulator        = flag.String("emulator", envOr("VAULT_EMULATOR", remotesigner.DefaultEmulatorAddr), "private emulator host:port")
+		arkadeEmulator  = flag.String("arkade-emulator", os.Getenv("VAULT_ARKADE_EMULATOR"), "independent regtest Arkade emulator host:port")
+		unsafeLocal     = flag.Bool("unsafe-local-signer", false, "test-only: sign with a local provider private key")
+		vaultHex        = flag.String("vault-cosigner-key", os.Getenv("VAULT_VAULT_COSIGNER_PRIV"), "VaultCosigner private key hex (unsafe-local-signer only)")
+		arkadeHex       = flag.String("arkade-key", os.Getenv("VAULT_ARKADE_PRIV"), "Arkade emulator private key hex (unsafe-local-signer only)")
+		demoOn          = flag.Bool("demo", envOr("VAULT_DEMO", "") == "1", "enable gated fund/mine demo RPC")
+		bitcoinRPC      = flag.String("bitcoin-rpc", os.Getenv("VAULT_BITCOIN_RPC"), "regtest Bitcoin JSON-RPC URL for Publish and demo funding")
+		clientOrigin    = flag.String("client-origin", envOr("VAULT_CLIENT_ORIGIN", fixture.Origin), "exact regtest WebAuthn signing-client origin")
+		rpID            = flag.String("rp-id", envOr("VAULT_RP_ID", fixture.RPID), "exact regtest WebAuthn relying-party ID")
+		network         = flag.String("network", envOr("VAULT_NETWORK", deployment.NetworkRegtest), "must be regtest; Mutinynet uses cmd/authorizer")
+		opCSV           = flag.Uint64("operational-csv-blocks", envUint64("VAULT_OPERATIONAL_CSV_BLOCKS"), "Operational recovery delay in blocks")
+		savingsCSV      = flag.Uint64("savings-csv-blocks", envUint64("VAULT_SAVINGS_CSV_BLOCKS"), "Savings recovery delay in blocks")
 	)
 	flag.Parse()
 	if err := requireRegtestProvider(*network); err != nil {
@@ -59,10 +60,17 @@ func main() {
 	if err := runtime.Validate(); err != nil {
 		log.Fatalf("deployment: %v", err)
 	}
-	if *offlineHex == "" {
-		log.Fatal("VAULT_OFFLINE_PUB / -offline is required (compressed pubkey only)")
+	if *ownerHex == "" {
+		log.Fatal("VAULT_EXTERNAL_OWNER_WALLET_PUB / -external-owner-wallet is required (compressed pubkey only)")
 	}
-	offline, err := parseCompressedPub(*offlineHex, "offline pubkey")
+	externalOwner, err := parseCompressedPub(*ownerHex, "ExternalOwnerWallet public key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *recoveryHex == "" {
+		log.Fatal("VAULT_RECOVERY_KEY_PUB / -recovery-key is required (compressed pubkey only)")
+	}
+	recoveryKey, err := parseCompressedPub(*recoveryHex, "RecoveryKey public key")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -73,13 +81,18 @@ func main() {
 	}
 	defer led.Close()
 
-	svc := &provider.Service{Ledger: led, Offline: offline, Deployment: runtime}
-	if *hotHex != "" {
-		hot, err := parsePub(*hotHex)
+	svc := &provider.Service{
+		Ledger:              led,
+		ExternalOwnerWallet: externalOwner,
+		RecoveryKey:         recoveryKey,
+		Deployment:          runtime,
+	}
+	if *phoneRoutineHex != "" {
+		phoneRoutine, err := parsePub(*phoneRoutineHex)
 		if err != nil {
 			log.Fatal(err)
 		}
-		svc.Hot = hot
+		svc.PhoneRoutineBIP340 = phoneRoutine
 	}
 
 	if *demoOn && *unsafeLocal {
@@ -87,12 +100,12 @@ func main() {
 	}
 
 	if *unsafeLocal {
-		if *provHex == "" || *arkadeHex == "" {
-			log.Fatal("-provider-key and -arkade-key are required with -unsafe-local-signer")
+		if *vaultHex == "" || *arkadeHex == "" {
+			log.Fatal("-vault-cosigner-key and -arkade-key are required with -unsafe-local-signer")
 		}
-		privBytes, err := hex.DecodeString(*provHex)
+		privBytes, err := hex.DecodeString(*vaultHex)
 		if err != nil || len(privBytes) != 32 {
-			log.Fatal("provider-key must be 32-byte hex")
+			log.Fatal("vault-cosigner-key must be 32-byte hex")
 		}
 		priv, _ := btcec.PrivKeyFromBytes(privBytes)
 		arkadeBytes, err := hex.DecodeString(*arkadeHex)
@@ -101,12 +114,12 @@ func main() {
 		}
 		arkadePriv, _ := btcec.PrivKeyFromBytes(arkadeBytes)
 		if priv.PubKey().IsEqual(arkadePriv.PubKey()) {
-			log.Fatal("provider and Arkade emulator keys must be independent")
+			log.Fatal("VaultCosigner and ArkadeCosigner keys must be independent")
 		}
-		svc.ProviderPub = priv.PubKey()
-		svc.ArkadePub = arkadePriv.PubKey()
-		svc.Signer = provider.LocalSigner{Priv: priv}
-		svc.ArkadeSigner = provider.LocalSigner{Priv: arkadePriv}
+		svc.VaultCosignerPub = priv.PubKey()
+		svc.ArkadeCosignerPub = arkadePriv.PubKey()
+		svc.VaultSigner = provider.LocalSigner{Priv: priv}
+		svc.ArkadeCosignerSigner = provider.LocalSigner{Priv: arkadePriv}
 		log.Print("UNSAFE local signer enabled; not a deployment demonstration")
 	} else {
 		if *arkadeEmulator == "" {
@@ -127,16 +140,16 @@ func main() {
 		defer conn.Close()
 		defer arkadeConn.Close()
 		if pub.IsEqual(arkadePub) {
-			log.Fatal("provider and Arkade emulators advertise the same key")
+			log.Fatal("VaultCosigner and ArkadeCosigner emulators advertise the same key")
 		}
-		svc.ProviderPub = pub
-		svc.DeprecatedProvider = deprecated
-		svc.ArkadePub = arkadePub
-		svc.DeprecatedArkade = arkadeDeprecated
-		svc.Signer = &provider.RemoteSigner{Client: cli}
-		svc.ArkadeSigner = &provider.RemoteSigner{Client: arkadeCli}
-		log.Printf("remote provider emulator %s pubkey %x", *emulator, pub.SerializeCompressed())
-		log.Printf("remote arkade emulator %s pubkey %x", *arkadeEmulator, arkadePub.SerializeCompressed())
+		svc.VaultCosignerPub = pub
+		svc.DeprecatedVaultCosigners = deprecated
+		svc.ArkadeCosignerPub = arkadePub
+		svc.DeprecatedArkadeCosigners = arkadeDeprecated
+		svc.VaultSigner = &provider.RemoteSigner{Client: cli}
+		svc.ArkadeCosignerSigner = &provider.RemoteSigner{Client: arkadeCli}
+		log.Printf("remote VaultCosigner emulator %s pubkey %x", *emulator, pub.SerializeCompressed())
+		log.Printf("remote ArkadeCosigner emulator %s pubkey %x", *arkadeEmulator, arkadePub.SerializeCompressed())
 		log.Printf("open %s", runtime.ClientOrigin)
 	}
 

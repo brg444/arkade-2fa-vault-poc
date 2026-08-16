@@ -53,7 +53,7 @@ func TestAuthorizeQueuedRequestGetsFreshSigningWindow(t *testing.T) {
 		delegate:   e.countingSigner.delegate,
 		firstDelay: 3 * signTimeout,
 	}
-	e.service.Signer = delayed
+	e.service.VaultSigner = delayed
 
 	reqA, _ := e.requestFor(t, e.canonicalDraft(t, 90_000, 20_000, 500), e.passkeyPriv)
 	reqB, _ := e.requestFor(t, e.canonicalDraft(t, 90_000, 21_000, 500), e.passkeyPriv)

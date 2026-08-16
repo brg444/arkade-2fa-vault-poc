@@ -32,8 +32,11 @@ func TestVaultComposeOverlayBuildContextResolvesFromEmulatorRoot(t *testing.T) {
 	if !strings.Contains(text, "vault-provider-data") {
 		t.Fatal("compose is missing named volume vault-provider-data")
 	}
-	if !strings.Contains(text, "VAULT_OFFLINE_PUB") || !strings.Contains(text, fixture.OfflinePubHex) {
-		t.Fatal("compose must set the opaque known-valid VAULT_OFFLINE_PUB fixture")
+	if !strings.Contains(text, "VAULT_EXTERNAL_OWNER_WALLET_PUB") || !strings.Contains(text, fixture.ExternalOwnerWalletPubHex) {
+		t.Fatal("compose must set the labeled regtest ExternalOwnerWallet fixture")
+	}
+	if !strings.Contains(text, "VAULT_RECOVERY_KEY_PUB") || !strings.Contains(text, fixture.RecoveryKeyPubHex) {
+		t.Fatal("compose must set the labeled regtest RecoveryKey fixture")
 	}
 	for _, required := range []string{"arkade-emulator:", "VAULT_ARKADE_EMULATOR: arkade-emulator:7073", "13b7f7f06e4f7c4fa33d3d2017e455496e883202e8b0b5e0d5f39f23532f45b1"} {
 		if !strings.Contains(text, required) {

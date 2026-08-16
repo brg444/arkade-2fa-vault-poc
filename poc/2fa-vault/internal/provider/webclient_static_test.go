@@ -45,10 +45,10 @@ func TestReviewerDirectP256BrowserBundleIsVendoredAndPinned(t *testing.T) {
 	recovery := app[recoveryStart:recoveryEnd]
 	getAt := bytes.Index(recovery, []byte("navigator.credentials.get"))
 	decryptAt := bytes.Index(recovery, []byte("crypto.subtle.decrypt"))
-	verifyHotAt := bytes.Index(recovery, []byte("assertHotPub(hotPub"))
+	verifyRoutineAt := bytes.Index(recovery, []byte("assertPhoneRoutineBIP340Pub(phoneRoutineBip340Pub"))
 	registerAt := bytes.Index(recovery, []byte("enrollIO().register"))
 	promoteAt := bytes.Index(recovery, []byte("promotePending(localStorage)"))
-	if getAt < 0 || decryptAt <= getAt || verifyHotAt <= decryptAt || registerAt <= verifyHotAt || promoteAt <= registerAt ||
+	if getAt < 0 || decryptAt <= getAt || verifyRoutineAt <= decryptAt || registerAt <= verifyRoutineAt || promoteAt <= registerAt ||
 		!bytes.Contains(recovery, []byte(`userVerification: "required"`)) ||
 		!bytes.Contains(recovery, []byte("extensions: { prf:")) {
 		t.Fatal("pending recovery must perform UV+PRF, decrypt and verify locally before exact registration and promotion")

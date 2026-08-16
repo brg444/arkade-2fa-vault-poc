@@ -20,7 +20,7 @@ func TestConcurrentExactRegisterAndStatusKeepRuntimeKeysImmutable(t *testing.T) 
 	if err := svc.Register(req); err != nil {
 		t.Fatal(err)
 	}
-	wantOffline, wantProvider := svc.Offline, svc.ProviderPub
+	wantOffline, wantProvider := svc.RecoveryKey, svc.VaultCosignerPub
 	start := make(chan struct{})
 	errs := make(chan error, 8)
 	var wg sync.WaitGroup
@@ -43,7 +43,7 @@ func TestConcurrentExactRegisterAndStatusKeepRuntimeKeysImmutable(t *testing.T) 
 					errs <- err
 					return
 				}
-				if status.BackupPub == "" || status.ProviderBasePub == "" || status.OperationalAddr == "" {
+				if status.RecoveryKeyPub == "" || status.VaultCosignerBasePub == "" || status.OperationalAddr == "" {
 					errs <- fmt.Errorf("partial status during idempotent registration: %+v", status)
 					return
 				}
@@ -56,7 +56,7 @@ func TestConcurrentExactRegisterAndStatusKeepRuntimeKeysImmutable(t *testing.T) 
 	for err := range errs {
 		t.Fatal(err)
 	}
-	if svc.Offline != wantOffline || svc.ProviderPub != wantProvider {
+	if svc.RecoveryKey != wantOffline || svc.VaultCosignerPub != wantProvider {
 		t.Fatal("idempotent registration rewrote immutable runtime keys")
 	}
 }
@@ -71,8 +71,8 @@ func TestRegisterExactRetryAcceptedAndMismatchesStayLocked(t *testing.T) {
 	retry := req
 	retry.CredentialID = strings.ToUpper(req.CredentialID)
 	retry.WebAuthnP256 = strings.ToUpper(req.WebAuthnP256)
-	retry.DirectP256 = strings.ToUpper(req.DirectP256)
-	retry.HotPub = strings.ToUpper(req.HotPub)
+	retry.PhoneDirectP256 = strings.ToUpper(req.PhoneDirectP256)
+	retry.PhoneRoutineBIP340Pub = strings.ToUpper(req.PhoneRoutineBIP340Pub)
 	if err := svc.Register(retry); err != nil {
 		t.Fatalf("exact retry: %v", err)
 	}
@@ -81,10 +81,10 @@ func TestRegisterExactRetryAcceptedAndMismatchesStayLocked(t *testing.T) {
 	}
 
 	if err := svc.Register(RegisterRequest{
-		CredentialID: "zz",
-		WebAuthnP256: req.WebAuthnP256,
-		DirectP256:   req.DirectP256,
-		HotPub:       req.HotPub,
+		CredentialID:          "zz",
+		WebAuthnP256:          req.WebAuthnP256,
+		PhoneDirectP256:       req.PhoneDirectP256,
+		PhoneRoutineBIP340Pub: req.PhoneRoutineBIP340Pub,
 	}); err == nil || !strings.Contains(err.Error(), "hex") {
 		t.Fatalf("malformed retry before compare: %v", err)
 	}
@@ -95,8 +95,8 @@ func TestRegisterExactRetryAcceptedAndMismatchesStayLocked(t *testing.T) {
 	}{
 		{"credential id", func(r *RegisterRequest) { r.CredentialID = hex.EncodeToString([]byte{0x99}) }},
 		{"webauthn p256", func(r *RegisterRequest) { r.WebAuthnP256 = otherP256(t) }},
-		{"direct p256", func(r *RegisterRequest) { r.DirectP256 = otherP256(t) }},
-		{"hot pub", func(r *RegisterRequest) { r.HotPub = otherHot(t) }},
+		{"direct p256", func(r *RegisterRequest) { r.PhoneDirectP256 = otherP256(t) }},
+		{"hot pub", func(r *RegisterRequest) { r.PhoneRoutineBIP340Pub = otherHot(t) }},
 	}
 	for _, test := range mismatches {
 		t.Run(test.name, func(t *testing.T) {
@@ -113,6 +113,10 @@ func TestRegisterExactRetryAcceptedAndMismatchesStayLocked(t *testing.T) {
 func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 	t.Helper()
 	hot, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalOwner, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,20 +146,21 @@ func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 	}
 	t.Cleanup(func() { _ = led.Close() })
 	svc := &Service{
-		Ledger:      led,
-		Offline:     offline.PubKey(),
-		ProviderPub: prov.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: prov},
-		ArkadeSigner: LocalSigner{
+		Ledger:              led,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    prov.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: prov},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	req := RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("enroll-credential")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("enroll-credential")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}
 	return svc, req
 }
@@ -203,6 +208,10 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 	if err != nil {
 		t.Fatal(err)
 	}
+	externalOwner, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	offlineA, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -231,10 +240,10 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 	}
 
 	req := RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("shared-credential")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("shared-credential")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}
 	type handle struct {
 		svc *Service
@@ -242,22 +251,24 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 	}
 	handles := []handle{
 		{svc: &Service{
-			Ledger:      ledgers[0],
-			Offline:     offlineA.PubKey(),
-			ProviderPub: provA.PubKey(),
-			ArkadePub:   arkadeKey.PubKey(),
-			Signer:      LocalSigner{Priv: provA},
-			ArkadeSigner: LocalSigner{
+			Ledger:              ledgers[0],
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         offlineA.PubKey(),
+			VaultCosignerPub:    provA.PubKey(),
+			ArkadeCosignerPub:   arkadeKey.PubKey(),
+			VaultSigner:         LocalSigner{Priv: provA},
+			ArkadeCosignerSigner: LocalSigner{
 				Priv: arkadeKey,
 			},
 		}},
 		{svc: &Service{
-			Ledger:      ledgers[1],
-			Offline:     offlineB.PubKey(),
-			ProviderPub: provB.PubKey(),
-			ArkadePub:   arkadeKey.PubKey(),
-			Signer:      LocalSigner{Priv: provB},
-			ArkadeSigner: LocalSigner{
+			Ledger:              ledgers[1],
+			ExternalOwnerWallet: externalOwner.PubKey(),
+			RecoveryKey:         offlineB.PubKey(),
+			VaultCosignerPub:    provB.PubKey(),
+			ArkadeCosignerPub:   arkadeKey.PubKey(),
+			VaultSigner:         LocalSigner{Priv: provB},
+			ArkadeCosignerSigner: LocalSigner{
 				Priv: arkadeKey,
 			},
 		}},
@@ -286,10 +297,10 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 		t.Fatalf("want exactly one success: err0=%v err1=%v", handles[0].err, handles[1].err)
 	}
 	lost := handles[loser].svc
-	if lost.Hot != nil || lost.Operational != nil || lost.Savings != nil {
+	if lost.PhoneRoutineBIP340 != nil || lost.Operational != nil || lost.Savings != nil {
 		t.Fatal("losing handle published vault state")
 	}
-	if snap := lost.enrolled(); snap.Hot != nil || snap.Operational != nil || snap.Savings != nil {
+	if snap := lost.enrolled(); snap.PhoneRoutineBIP340 != nil || snap.Operational != nil || snap.Savings != nil {
 		t.Fatal("losing handle published an enrollment snapshot")
 	}
 
@@ -297,17 +308,17 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 	if err != nil || persisted == nil {
 		t.Fatalf("persisted enrollment: %v", err)
 	}
-	wantProv := handles[winner].svc.ProviderPub.SerializeCompressed()
-	wantOff := handles[winner].svc.Offline.SerializeCompressed()
-	if !bytes.Equal(persisted.ProviderBase, wantProv) || !bytes.Equal(persisted.Offline, wantOff) {
+	wantProv := handles[winner].svc.VaultCosignerPub.SerializeCompressed()
+	wantOff := handles[winner].svc.RecoveryKey.SerializeCompressed()
+	if !bytes.Equal(persisted.VaultCosignerBase, wantProv) || !bytes.Equal(persisted.RecoveryKey, wantOff) {
 		t.Fatal("persisted descriptor is not the winner's runtime keys")
 	}
 	if handles[winner].svc.Operational == nil ||
 		handles[winner].svc.Operational.Address != persisted.OperationalAddress {
 		t.Fatal("winner did not publish the persisted operational vault")
 	}
-	if bytes.Equal(lost.ProviderPub.SerializeCompressed(), persisted.ProviderBase) &&
-		bytes.Equal(lost.Offline.SerializeCompressed(), persisted.Offline) {
+	if bytes.Equal(lost.VaultCosignerPub.SerializeCompressed(), persisted.VaultCosignerBase) &&
+		bytes.Equal(lost.RecoveryKey.SerializeCompressed(), persisted.RecoveryKey) {
 		t.Fatal("test setup failed: loser runtime matches persisted descriptor")
 	}
 }

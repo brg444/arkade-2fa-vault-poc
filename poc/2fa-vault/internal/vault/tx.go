@@ -18,7 +18,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// SpendParams describes one Operational collaborative spend.
+// SpendParams describes one Operational routine spend.
 type SpendParams struct {
 	Vault           *Built
 	PrevTx          *wire.MsgTx
@@ -30,7 +30,7 @@ type SpendParams struct {
 	Witness         wire.TxWitness // empty for challenge computation
 }
 
-// BuiltSpend is the unsigned/collaborative PSBT plus derived digests.
+// BuiltSpend is the unsigned routine PSBT plus derived digests.
 type BuiltSpend struct {
 	Packet       *psbt.Packet
 	Challenge    []byte
@@ -40,17 +40,19 @@ type BuiltSpend struct {
 	Prevout      *wire.TxOut
 }
 
-// BuildCollaborativeSpend builds the exact one-in / recipient / optional change
-// / packet-out template. The emulator packet witness is params.Witness.
-func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
-	if p.Vault == nil || p.Vault.Leaves.Collaborative == nil {
-		return nil, fmt.Errorf("operational collaborative leaf required")
+// BuildRoutineSpend builds the exact one-input / recipient / mandatory
+// recursive-change / packet template. A routine request can never fully drain
+// or replace this descriptor because it must return non-dust change to the
+// identical current vault script.
+func BuildRoutineSpend(p SpendParams) (*BuiltSpend, error) {
+	if p.Vault == nil || p.Vault.Leaves.Routine == nil {
+		return nil, fmt.Errorf("operational routine leaf required")
 	}
 	if len(p.RecipientScript) == 0 {
 		return nil, fmt.Errorf("recipient script required")
 	}
 	if !txscript.IsWitnessProgram(p.RecipientScript) {
-		return nil, fmt.Errorf("collaborative recipient must be a native segwit output")
+		return nil, fmt.Errorf("routine recipient must be a native segwit output")
 	}
 	prev, err := checkedPrevout(p.Vault, p.PrevTx, p.PrevOutPoint)
 	if err != nil {
@@ -67,9 +69,8 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 	if err != nil {
 		return nil, err
 	}
-	hasChange := change > 0
-	if hasChange && change < p.Vault.Record.AuthorizationPolicy.RecipientDustSats {
-		return nil, fmt.Errorf("change below dust")
+	if change < p.Vault.Record.AuthorizationPolicy.RecipientDustSats {
+		return nil, fmt.Errorf("routine spend requires non-dust recursive change")
 	}
 
 	tx := wire.NewMsgTx(2)
@@ -82,9 +83,7 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 		Sequence:         seq,
 	})
 	tx.AddTxOut(&wire.TxOut{Value: p.RecipientAmount, PkScript: p.RecipientScript})
-	if hasChange {
-		tx.AddTxOut(&wire.TxOut{Value: change, PkScript: p.Vault.PkScript})
-	}
+	tx.AddTxOut(&wire.TxOut{Value: change, PkScript: p.Vault.PkScript})
 
 	entry := arkade.EmulatorEntry{
 		Vin:     0,
@@ -102,8 +101,8 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 	packet.Inputs[0].WitnessUtxo = &wire.TxOut{Value: prev.Value, PkScript: prev.PkScript}
 	packet.Inputs[0].SighashType = txscript.SigHashDefault
 	packet.Inputs[0].TaprootLeafScript = []*psbt.TaprootTapLeafScript{{
-		ControlBlock: p.Vault.Leaves.Collaborative.ControlBlock,
-		Script:       p.Vault.Leaves.Collaborative.Script,
+		ControlBlock: p.Vault.Leaves.Routine.ControlBlock,
+		Script:       p.Vault.Leaves.Routine.Script,
 		LeafVersion:  txscript.BaseLeafVersion,
 	}}
 	if err := txutils.SetArkPsbtField(packet, 0, arkade.PrevoutTxField, *p.PrevTx); err != nil {
@@ -118,7 +117,7 @@ func BuildCollaborativeSpend(p SpendParams) (*BuiltSpend, error) {
 		Packet:       packet,
 		Challenge:    challenge,
 		ChangeAmount: change,
-		HasChange:    hasChange,
+		HasChange:    true,
 		InputValue:   prev.Value,
 		Prevout:      prev,
 	}, nil
@@ -151,7 +150,10 @@ func Challenge(ptx *psbt.Packet, vault *Built) ([]byte, error) {
 		return nil, fmt.Errorf("missing witness utxo")
 	}
 	fetcher := NewPrevFetcher(ptx.UnsignedTx.TxIn[0].PreviousOutPoint, prev)
-	leaf := txscript.NewBaseTapLeaf(vault.Leaves.Collaborative.Script)
+	if vault == nil || vault.Leaves.Routine == nil {
+		return nil, fmt.Errorf("routine leaf required")
+	}
+	leaf := txscript.NewBaseTapLeaf(vault.Leaves.Routine.Script)
 	sigHashes := txscript.NewTxSigHashes(ptx.UnsignedTx, fetcher)
 	return arkade.CalcArkadeScriptSignatureHash(
 		sigHashes, txscript.SigHashDefault, ptx.UnsignedTx, 0, fetcher, leaf,
@@ -268,20 +270,20 @@ func AddPartialSig(ptx *psbt.Packet, pub *btcec.PublicKey, leafHash, sig []byte)
 	})
 }
 
-// FinalizeCollaborative builds the Bitcoin witness from the hot, private
-// Provider, and public Arkade Emulator partial signatures.
+// FinalizeRoutine builds the Bitcoin witness from the PhoneRoutineBIP340,
+// private VaultCosigner, and public ArkadeCosigner partial signatures.
 // It fail-closes on nil inputs, a preexisting final script, the wrong leaf,
 // duplicate/extra keys, a non-default sighash, or an invalid signature.
-func FinalizeCollaborative(ptx *psbt.Packet, v *Built) error {
-	if err := verifyCollaborativePartials(ptx, v); err != nil {
+func FinalizeRoutine(ptx *psbt.Packet, v *Built) error {
+	if err := verifyRoutinePartials(ptx, v); err != nil {
 		return err
 	}
-	return writeFinalWitness(ptx, v.Leaves.Collaborative)
+	return writeFinalWitness(ptx, v.Leaves.Routine)
 }
 
-func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
-	if ptx == nil || ptx.UnsignedTx == nil || v == nil || v.Leaves.Collaborative == nil || v.Record.Hot == nil || v.TweakedProvider == nil || v.TweakedArkade == nil {
-		return fmt.Errorf("collaborative finalize inputs")
+func verifyRoutinePartials(ptx *psbt.Packet, v *Built) error {
+	if ptx == nil || ptx.UnsignedTx == nil || v == nil || v.Leaves.Routine == nil || v.Record.PhoneRoutineBIP340 == nil || v.TweakedVaultCosigner == nil || v.TweakedArkadeCosigner == nil {
+		return fmt.Errorf("routine finalize inputs")
 	}
 	if len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
 		return fmt.Errorf("exactly one input required")
@@ -297,17 +299,17 @@ func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
 		return fmt.Errorf("exactly one taproot leaf required")
 	}
 	leaf := in.TaprootLeafScript[0]
-	if !bytes.Equal(leaf.Script, v.Leaves.Collaborative.Script) || !bytes.Equal(leaf.ControlBlock, v.Leaves.Collaborative.ControlBlock) {
-		return fmt.Errorf("leaf is not the collaborative path")
+	if !bytes.Equal(leaf.Script, v.Leaves.Routine.Script) || !bytes.Equal(leaf.ControlBlock, v.Leaves.Routine.ControlBlock) {
+		return fmt.Errorf("leaf is not the routine path")
 	}
 	if leaf.LeafVersion != txscript.BaseLeafVersion {
 		return fmt.Errorf("unsupported leaf version")
 	}
-	wantHot := schnorr.SerializePubKey(v.Record.Hot)
-	wantProv := schnorr.SerializePubKey(v.TweakedProvider)
-	wantArkade := schnorr.SerializePubKey(v.TweakedArkade)
-	wantLeaf := v.Leaves.Collaborative.Hash
-	var hotSig, provSig, arkadeSig *psbt.TaprootScriptSpendSig
+	wantPhone := schnorr.SerializePubKey(v.Record.PhoneRoutineBIP340)
+	wantVault := schnorr.SerializePubKey(v.TweakedVaultCosigner)
+	wantArkade := schnorr.SerializePubKey(v.TweakedArkadeCosigner)
+	wantLeaf := v.Leaves.Routine.Hash
+	var phoneSig, vaultSig, arkadeSig *psbt.TaprootScriptSpendSig
 	seen := make(map[string]struct{})
 	for _, s := range in.TaprootScriptSpendSig {
 		if s == nil {
@@ -325,16 +327,16 @@ func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
 			return fmt.Errorf("wrong leaf hash")
 		}
 		switch {
-		case bytes.Equal(s.XOnlyPubKey, wantHot):
-			if hotSig != nil {
-				return fmt.Errorf("duplicate hot signature")
+		case bytes.Equal(s.XOnlyPubKey, wantPhone):
+			if phoneSig != nil {
+				return fmt.Errorf("duplicate phone routine signature")
 			}
-			hotSig = s
-		case bytes.Equal(s.XOnlyPubKey, wantProv):
-			if provSig != nil {
-				return fmt.Errorf("duplicate provider signature")
+			phoneSig = s
+		case bytes.Equal(s.XOnlyPubKey, wantVault):
+			if vaultSig != nil {
+				return fmt.Errorf("duplicate vault cosigner signature")
 			}
-			provSig = s
+			vaultSig = s
 		case bytes.Equal(s.XOnlyPubKey, wantArkade):
 			if arkadeSig != nil {
 				return fmt.Errorf("duplicate arkade emulator signature")
@@ -344,16 +346,16 @@ func verifyCollaborativePartials(ptx *psbt.Packet, v *Built) error {
 			return fmt.Errorf("unexpected taproot key")
 		}
 	}
-	if hotSig == nil || provSig == nil || arkadeSig == nil || len(in.TaprootScriptSpendSig) != 3 {
-		return fmt.Errorf("expected hot, tweaked-provider, and tweaked-arkade signatures")
+	if phoneSig == nil || vaultSig == nil || arkadeSig == nil || len(in.TaprootScriptSpendSig) != 3 {
+		return fmt.Errorf("expected phone routine, tweaked vault cosigner, and tweaked arkade cosigner signatures")
 	}
-	if err := verifySchnorrTapSig(ptx, hotSig, wantHot, v.Leaves.Collaborative.Script); err != nil {
-		return fmt.Errorf("hot signature: %w", err)
+	if err := verifySchnorrTapSig(ptx, phoneSig, wantPhone, v.Leaves.Routine.Script); err != nil {
+		return fmt.Errorf("phone routine signature: %w", err)
 	}
-	if err := verifySchnorrTapSig(ptx, provSig, wantProv, v.Leaves.Collaborative.Script); err != nil {
-		return fmt.Errorf("provider signature: %w", err)
+	if err := verifySchnorrTapSig(ptx, vaultSig, wantVault, v.Leaves.Routine.Script); err != nil {
+		return fmt.Errorf("vault cosigner signature: %w", err)
 	}
-	if err := verifySchnorrTapSig(ptx, arkadeSig, wantArkade, v.Leaves.Collaborative.Script); err != nil {
+	if err := verifySchnorrTapSig(ptx, arkadeSig, wantArkade, v.Leaves.Routine.Script); err != nil {
 		return fmt.Errorf("arkade emulator signature: %w", err)
 	}
 	return nil
@@ -409,13 +411,27 @@ func writeFinalWitness(ptx *psbt.Packet, leaf *Leaf) error {
 	return nil
 }
 
-// ExecuteFinalizedCollaborative runs the standard-script engine against the
-// finalized collaborative input and the verified prevout. Callers must
+// ExecuteFinalizedRoutine runs the standard-script engine against the
+// finalized routine input and the verified prevout. Callers must
 // finalize a clone first.
-func ExecuteFinalizedCollaborative(ptx *psbt.Packet, v *Built) error {
+func ExecuteFinalizedRoutine(ptx *psbt.Packet, v *Built) error {
 	if ptx == nil || v == nil {
 		return fmt.Errorf("execute inputs")
 	}
+	return executeFinalizedInput(ptx)
+}
+
+// ExecuteFinalizedAdmin runs the standard-script engine after exact
+// ExternalOwnerWallet+RecoveryKey finalization. It is useful to file-only
+// handoff tools as a final witness-order and control-block check.
+func ExecuteFinalizedAdmin(ptx *psbt.Packet, v *Built) error {
+	if ptx == nil || v == nil || v.Leaves.Admin == nil {
+		return fmt.Errorf("execute admin inputs")
+	}
+	return executeFinalizedInput(ptx)
+}
+
+func executeFinalizedInput(ptx *psbt.Packet) error {
 	tx, err := ExtractFinalizedTx(ptx)
 	if err != nil {
 		return err
@@ -435,22 +451,85 @@ func ExecuteFinalizedCollaborative(ptx *psbt.Packet, v *Built) error {
 	return eng.Execute()
 }
 
-// FinalizeOwner builds the Bitcoin witness from the hot+offline owner sigs.
-func FinalizeOwner(ptx *psbt.Packet, vault *Built) error {
-	return finalizeLeaf(ptx, vault.Leaves.Owner)
+// FinalizeAdmin builds the Bitcoin witness from the ExternalOwnerWallet and
+// RecoveryKey admin signatures.
+func FinalizeAdmin(ptx *psbt.Packet, vault *Built) error {
+	if vault == nil || vault.Leaves.Admin == nil || vault.Record.ExternalOwnerWallet == nil || vault.Record.RecoveryKey == nil {
+		return fmt.Errorf("admin finalize inputs")
+	}
+	prevTx, err := RequireVerifiedPrevout(ptx)
+	if err != nil {
+		return fmt.Errorf("admin prevout: %w", err)
+	}
+	op := ptx.UnsignedTx.TxIn[0].PreviousOutPoint
+	if _, err := checkedPrevout(vault, prevTx, op); err != nil {
+		return fmt.Errorf("admin prevout: %w", err)
+	}
+	if err := verifyExactLeafPartials(
+		ptx, vault.Leaves.Admin,
+		vault.Record.ExternalOwnerWallet, vault.Record.RecoveryKey,
+	); err != nil {
+		return err
+	}
+	return writeFinalWitness(ptx, vault.Leaves.Admin)
 }
 
-func finalizeLeaf(ptx *psbt.Packet, leaf *Leaf) error {
+func verifyExactLeafPartials(ptx *psbt.Packet, leaf *Leaf, expected ...*btcec.PublicKey) error {
 	if ptx == nil || ptx.UnsignedTx == nil || leaf == nil {
 		return fmt.Errorf("missing leaf")
 	}
-	if len(ptx.Inputs) != 1 {
+	if len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
 		return fmt.Errorf("exactly one input required")
 	}
-	if len(ptx.Inputs[0].FinalScriptWitness) != 0 || len(ptx.Inputs[0].FinalScriptSig) != 0 {
+	in := &ptx.Inputs[0]
+	if len(in.FinalScriptWitness) != 0 || len(in.FinalScriptSig) != 0 {
 		return fmt.Errorf("preexisting final script")
 	}
-	return writeFinalWitness(ptx, leaf)
+	if in.WitnessUtxo == nil {
+		return fmt.Errorf("witness utxo required")
+	}
+	if len(in.TaprootLeafScript) != 1 || in.TaprootLeafScript[0] == nil {
+		return fmt.Errorf("exactly one taproot leaf required")
+	}
+	gotLeaf := in.TaprootLeafScript[0]
+	if gotLeaf.LeafVersion != txscript.BaseLeafVersion ||
+		!bytes.Equal(gotLeaf.Script, leaf.Script) ||
+		!bytes.Equal(gotLeaf.ControlBlock, leaf.ControlBlock) {
+		return fmt.Errorf("unexpected admin leaf")
+	}
+	if len(in.TaprootScriptSpendSig) != len(expected) {
+		return fmt.Errorf("expected exactly %d admin signatures", len(expected))
+	}
+	want := make(map[string][]byte, len(expected))
+	for _, pub := range expected {
+		if pub == nil {
+			return fmt.Errorf("admin signer key required")
+		}
+		xonly := schnorr.SerializePubKey(pub)
+		want[string(xonly)] = xonly
+	}
+	seen := make(map[string]struct{}, len(expected))
+	for _, sig := range in.TaprootScriptSpendSig {
+		if sig == nil || sig.SigHash != txscript.SigHashDefault || !bytes.Equal(sig.LeafHash, leaf.Hash) {
+			return fmt.Errorf("invalid admin signature metadata")
+		}
+		key := string(sig.XOnlyPubKey)
+		wantKey, ok := want[key]
+		if !ok {
+			return fmt.Errorf("unexpected admin signer")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("duplicate admin signer")
+		}
+		seen[key] = struct{}{}
+		if err := verifySchnorrTapSig(ptx, sig, wantKey, leaf.Script); err != nil {
+			return fmt.Errorf("admin signature: %w", err)
+		}
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("missing admin signer")
+	}
+	return nil
 }
 
 // ExtractFinalizedTx copies the unsigned transaction and attaches the
@@ -471,10 +550,12 @@ func ExtractFinalizedTx(ptx *psbt.Packet) (*wire.MsgTx, error) {
 	return tx, nil
 }
 
-// OwnerSpend builds a hot+offline spend with no emulator packet.
-func OwnerSpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, destAmt, fee int64, sequence uint32) (*psbt.Packet, error) {
-	if v == nil || v.Leaves.Owner == nil {
-		return nil, fmt.Errorf("owner leaf required")
+// AdminSpend builds an ExternalOwnerWallet+RecoveryKey full sweep or policy
+// migration with no emulator packet. The optional recursive change is an
+// explicit admin decision and is never exposed through routine HTTP routes.
+func AdminSpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, destAmt, fee int64, sequence uint32) (*psbt.Packet, error) {
+	if v == nil || v.Leaves.Admin == nil {
+		return nil, fmt.Errorf("admin leaf required")
 	}
 	if len(dest) == 0 {
 		return nil, fmt.Errorf("destination script required")
@@ -511,14 +592,17 @@ func OwnerSpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, des
 	ptx.Inputs[0].WitnessUtxo = &wire.TxOut{Value: prev.Value, PkScript: prev.PkScript}
 	ptx.Inputs[0].SighashType = txscript.SigHashDefault
 	ptx.Inputs[0].TaprootLeafScript = []*psbt.TaprootTapLeafScript{{
-		ControlBlock: v.Leaves.Owner.ControlBlock,
-		Script:       v.Leaves.Owner.Script,
+		ControlBlock: v.Leaves.Admin.ControlBlock,
+		Script:       v.Leaves.Admin.Script,
 		LeafVersion:  txscript.BaseLeafVersion,
 	}}
+	if err := txutils.SetArkPsbtField(ptx, 0, arkade.PrevoutTxField, *prevTx); err != nil {
+		return nil, err
+	}
 	return ptx, nil
 }
 
-// RecoverySpend builds a CSV+offline spend.
+// RecoverySpend builds a CSV+RecoveryKey spend.
 func RecoverySpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, destAmt, fee int64) (*psbt.Packet, error) {
 	if v == nil || v.Leaves.Recovery == nil {
 		return nil, fmt.Errorf("recovery leaf required")

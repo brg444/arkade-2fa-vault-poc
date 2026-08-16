@@ -184,9 +184,9 @@ func TestPublishRejectsCorruptedAndInvalidStoredPSBT(t *testing.T) {
 			case "hot":
 				missing = schnorr.SerializePubKey(env.hotPriv.PubKey())
 			case "private provider":
-				missing = schnorr.SerializePubKey(env.service.Operational.TweakedProvider)
+				missing = schnorr.SerializePubKey(env.service.Operational.TweakedVaultCosigner)
 			case "public arkade":
-				missing = schnorr.SerializePubKey(env.service.Operational.TweakedArkade)
+				missing = schnorr.SerializePubKey(env.service.Operational.TweakedArkadeCosigner)
 			}
 			kept := packet.Inputs[0].TaprootScriptSpendSig[:0]
 			for _, sig := range packet.Inputs[0].TaprootScriptSpendSig {

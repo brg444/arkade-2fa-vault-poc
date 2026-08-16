@@ -171,7 +171,7 @@ func TestPublicEmulatorSubmitUsesOnlyBoundedExactEndpoint(t *testing.T) {
 	if !ok || remote.client == nil {
 		t.Fatalf("dial returned %T, want narrow public signer", signer)
 	}
-	got, err := remote.client.SubmitOnchainTx(context.Background(), submitted)
+	got, err := remote.client.signPinnedOnchain(context.Background(), submitted)
 	if err != nil || got != signed {
 		t.Fatalf("submit result=%q err=%v", got, err)
 	}
@@ -184,10 +184,10 @@ func TestPublicEmulatorSubmitRejectsUnboundedOrMalformedResponses(t *testing.T) 
 			return jsonResponse(http.StatusOK, `{"signedTx":"`+strings.Repeat("a", publicEmulatorPSBTLimit+1)+`"}`), nil
 		}),
 	}
-	if _, err := client.SubmitOnchainTx(context.Background(), strings.Repeat("a", publicEmulatorPSBTLimit+1)); err == nil {
+	if _, err := client.signPinnedOnchain(context.Background(), strings.Repeat("a", publicEmulatorPSBTLimit+1)); err == nil {
 		t.Fatal("oversized submitted PSBT accepted")
 	}
-	if _, err := client.SubmitOnchainTx(context.Background(), "cHNidA=="); err == nil {
+	if _, err := client.signPinnedOnchain(context.Background(), "cHNidA=="); err == nil {
 		t.Fatal("oversized signed PSBT response accepted")
 	}
 
@@ -196,7 +196,7 @@ func TestPublicEmulatorSubmitRejectsUnboundedOrMalformedResponses(t *testing.T) 
 		res.Header.Set("Content-Type", "text/plain")
 		return res, nil
 	})
-	if _, err := client.SubmitOnchainTx(context.Background(), "cHNidA=="); err == nil {
+	if _, err := client.signPinnedOnchain(context.Background(), "cHNidA=="); err == nil {
 		t.Fatal("non-JSON signing response accepted")
 	}
 }

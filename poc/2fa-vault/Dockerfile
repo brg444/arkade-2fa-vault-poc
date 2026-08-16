@@ -17,6 +17,7 @@ RUN mkdir -p /app/data
 COPY --from=builder /out/vault-provider /usr/local/bin/vault-provider
 COPY poc/2fa-vault/web /app/web
 EXPOSE 8787
-# Deployment image: cmd/provider. Offline is a pubkey only (VAULT_OFFLINE_PUB).
-# Browser enrollment supplies the hot key. SQLite lives on /app/data.
+# REGTEST demo image: cmd/provider. ExternalOwnerWallet and RecoveryKey are
+# public keys only. Browser enrollment supplies PhoneRoutineBIP340; SQLite
+# lives on /app/data. Mutinynet uses Dockerfile.mutinynet/cmd/authorizer.
 ENTRYPOINT ["vault-provider", "-addr", "0.0.0.0:8787", "-emulator", "emulator:7073", "-web", "/app/web", "-db", "/app/data/vault.sqlite"]
