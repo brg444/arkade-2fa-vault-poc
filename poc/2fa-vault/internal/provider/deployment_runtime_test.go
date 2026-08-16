@@ -24,6 +24,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	}
 	providerKey, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
+	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
 	hot, _ := btcec.NewPrivateKey()
 	passkey, _ := webauthn.NewP256()
@@ -37,17 +38,17 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	}
 	svc := &Service{
 		Ledger: ledger, Deployment: cfg, CredentialIntegrityKey: integrityKey,
-		Offline: offline.PubKey(), ProviderPub: providerKey.PubKey(),
-		ArkadePub: arkadeKey.PubKey(), ArkadeEmulatorOrigin: deployment.MutinynetArkadeEmulatorOrigin,
-		ArkadeEmulatorVersion: deployment.MutinynetArkadeEmulatorVersion,
-		Signer:                LocalSigner{Priv: providerKey}, ArkadeSigner: LocalSigner{Priv: arkadeKey},
+		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(),
+		ArkadeCosignerPub: arkadeKey.PubKey(), ArkadeCosignerOrigin: deployment.MutinynetArkadeCosignerOrigin,
+		ArkadeCosignerVersion: deployment.MutinynetArkadeCosignerVersion,
+		VaultSigner:           LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey},
 		EnrollmentTokenHash: bootstrap[:],
 	}
 	if err := svc.RegisterWithBootstrap(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("mutinynet-credential")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("mutinynet-credential")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}, "a sufficiently long enrollment bootstrap token"); err != nil {
 		t.Fatal(err)
 	}
@@ -58,9 +59,10 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	if status.Network != deployment.NetworkMutinynet || status.ClientOrigin != cfg.ClientOrigin || status.RPID != cfg.RPID || !strings.HasPrefix(status.OperationalAddr, "tb1p") {
 		t.Fatalf("mutinynet status: %+v", status)
 	}
-	if status.BackupPub != hex.EncodeToString(offline.PubKey().SerializeCompressed()) ||
-		status.ProviderBasePub != hex.EncodeToString(providerKey.PubKey().SerializeCompressed()) ||
-		status.ArkadeEmulatorBasePub != hex.EncodeToString(arkadeKey.PubKey().SerializeCompressed()) ||
+	if status.ExternalOwnerWalletPub != hex.EncodeToString(externalOwner.PubKey().SerializeCompressed()) ||
+		status.RecoveryKeyPub != hex.EncodeToString(offline.PubKey().SerializeCompressed()) ||
+		status.VaultCosignerBasePub != hex.EncodeToString(providerKey.PubKey().SerializeCompressed()) ||
+		status.ArkadeCosignerBasePub != hex.EncodeToString(arkadeKey.PubKey().SerializeCompressed()) ||
 		status.OperationalCSVBlocks != cfg.OperationalCSVBlocks ||
 		status.SavingsCSVBlocks != cfg.SavingsCSVBlocks ||
 		status.TemplateVersion != fixture.TemplateVersion ||
@@ -87,13 +89,13 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	t.Cleanup(func() { _ = reopened.Close() })
 	restart := &Service{
 		Ledger: reopened, Deployment: cfg, CredentialIntegrityKey: integrityKey,
-		Offline: offline.PubKey(), ProviderPub: providerKey.PubKey(), ArkadePub: arkadeKey.PubKey(),
-		ArkadeEmulatorOrigin: deployment.MutinynetArkadeEmulatorOrigin,
+		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		ArkadeCosignerOrigin: deployment.MutinynetArkadeCosignerOrigin,
 		// The outbound transport separately accepted this exact release version.
 		// A reviewed server version change must not strand an unchanged or
 		// actively-deprecated enrolled key.
-		ArkadeEmulatorVersion: "v-reviewed-next",
-		Signer:                LocalSigner{Priv: providerKey}, ArkadeSigner: LocalSigner{Priv: arkadeKey},
+		ArkadeCosignerVersion: "v-reviewed-next",
+		VaultSigner:           LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey},
 	}
 	if err := restart.LoadVaults(); err != nil {
 		t.Fatalf("same deployment restart: %v", err)
@@ -102,16 +104,16 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restartedStatus.ArkadeEmulatorVersion != deployment.MutinynetArkadeEmulatorVersion {
-		t.Fatalf("restart rewrote enrolled Arkade version to runtime %q", restartedStatus.ArkadeEmulatorVersion)
+	if restartedStatus.ArkadeCosignerVersion != deployment.MutinynetArkadeCosignerVersion {
+		t.Fatalf("restart rewrote enrolled Arkade version to runtime %q", restartedStatus.ArkadeCosignerVersion)
 	}
 	changed := cfg
 	changed.SavingsCSVBlocks++
 	wrong := &Service{
 		Ledger: reopened, Deployment: changed, CredentialIntegrityKey: integrityKey,
-		Offline: offline.PubKey(), ProviderPub: providerKey.PubKey(), ArkadePub: arkadeKey.PubKey(),
-		ArkadeEmulatorOrigin:  deployment.MutinynetArkadeEmulatorOrigin,
-		ArkadeEmulatorVersion: deployment.MutinynetArkadeEmulatorVersion,
+		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		ArkadeCosignerOrigin:  deployment.MutinynetArkadeCosignerOrigin,
+		ArkadeCosignerVersion: deployment.MutinynetArkadeCosignerVersion,
 	}
 	if err := wrong.LoadVaults(); err == nil || !strings.Contains(err.Error(), "Savings CSV") && !strings.Contains(err.Error(), "savings CSV") {
 		t.Fatalf("changed recovery delay accepted: %v", err)

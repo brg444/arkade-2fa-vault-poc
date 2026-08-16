@@ -56,7 +56,7 @@ func enforceStaticPolicy(cl *Classified, policy vault.AuthorizationPolicy) error
 }
 
 func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
-	if op == nil || op.Leaves.Collaborative == nil {
+	if op == nil || op.Leaves.Routine == nil {
 		return nil, fmt.Errorf("not enrolled")
 	}
 	if _, err := vault.RequireVerifiedPrevout(ptx); err != nil {
@@ -72,7 +72,7 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 		return nil, fmt.Errorf("exactly one input required")
 	}
 	if ptx.UnsignedTx.TxIn[0].Sequence != wire.MaxTxInSequenceNum {
-		return nil, fmt.Errorf("collaborative sequence must be final")
+		return nil, fmt.Errorf("routine sequence must be final")
 	}
 	if ptx.Inputs[0].SighashType != txscript.SigHashDefault {
 		return nil, fmt.Errorf("sighash must be SIGHASH_DEFAULT")
@@ -90,10 +90,10 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 		return nil, fmt.Errorf("exactly one taproot leaf required")
 	}
 	leaf := ptx.Inputs[0].TaprootLeafScript[0]
-	if !bytes.Equal(leaf.Script, op.Leaves.Collaborative.Script) {
-		return nil, fmt.Errorf("leaf is not the collaborative path")
+	if !bytes.Equal(leaf.Script, op.Leaves.Routine.Script) {
+		return nil, fmt.Errorf("leaf is not the routine path")
 	}
-	if !bytes.Equal(leaf.ControlBlock, op.Leaves.Collaborative.ControlBlock) {
+	if !bytes.Equal(leaf.ControlBlock, op.Leaves.Routine.ControlBlock) {
 		return nil, fmt.Errorf("control block mismatch")
 	}
 	if leaf.LeafVersion != txscript.BaseLeafVersion {
@@ -150,7 +150,7 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 				return nil, fmt.Errorf("multiple recipient outputs")
 			}
 			if !txscript.IsWitnessProgram(out.PkScript) {
-				return nil, fmt.Errorf("collaborative recipient must be a native segwit output")
+				return nil, fmt.Errorf("routine recipient must be a native segwit output")
 			}
 			if txscript.IsUnspendable(out.PkScript) || isOpReturn(out.PkScript) {
 				return nil, fmt.Errorf("unexpected op_return or unspendable output")
@@ -172,6 +172,9 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 	}
 	if packet == nil {
 		return nil, fmt.Errorf("missing emulator packet output")
+	}
+	if change == nil {
+		return nil, fmt.Errorf("routine spend requires recursive vault change")
 	}
 
 	in := ptx.Inputs[0].WitnessUtxo.Value
@@ -223,8 +226,8 @@ func addSats(a, b int64) (int64, error) {
 }
 
 func estimatedWitnessBytes(op *vault.Built) int {
-	script := op.Leaves.Collaborative.Script
-	control := op.Leaves.Collaborative.ControlBlock
+	script := op.Leaves.Routine.Script
+	control := op.Leaves.Routine.ControlBlock
 	// marker+flag, then one input witness: CompactSize(5 items), three
 	// 64-byte BIP342 signatures, script, control block.
 	return 2 + varintSize(5) +

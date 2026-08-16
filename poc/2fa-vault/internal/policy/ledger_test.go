@@ -75,6 +75,7 @@ func validCredential(tag byte) Credential {
 	dx, dy := curve.ScalarBaseMult([]byte{0x03})
 	directP256 := elliptic.MarshalCompressed(curve, dx, dy)
 	hotPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag}, 32))
+	ownerPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 2}, 32))
 	offPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 3}, 32))
 	provPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 5}, 32))
 	tweakPriv, _ := btcec.PrivKeyFromBytes(bytes.Repeat([]byte{tag + 7}, 32))
@@ -83,34 +84,35 @@ func validCredential(tag byte) Credential {
 	opCSV := fixture.OperationalCSV()
 	svCSV := fixture.SavingsCSV()
 	c := Credential{
-		ID:                  []byte{tag, tag + 1, tag + 2},
-		WebAuthnP256:        p256,
-		DirectP256:          directP256,
-		Hot:                 hotPriv.PubKey().SerializeCompressed(),
-		RPID:                "localhost",
-		Origin:              "http://localhost:7072",
-		Offline:             offPriv.PubKey().SerializeCompressed(),
-		ProviderBase:        provPriv.PubKey().SerializeCompressed(),
-		TweakedProvider:     tweakPriv.PubKey().SerializeCompressed(),
-		ArkadeBase:          arkadePriv.PubKey().SerializeCompressed(),
-		TweakedArkade:       arkadeTweakPriv.PubKey().SerializeCompressed(),
-		TemplateVersion:     fixture.TemplateVersion,
-		PolicyVersion:       fixture.PolicyVersion,
-		Network:             fixture.Network,
-		VaultID:             fixture.VaultID,
-		OperationalCSVType:  int64(opCSV.Type),
-		OperationalCSVValue: opCSV.Value,
-		SavingsCSVType:      int64(svCSV.Type),
-		SavingsCSVValue:     svCSV.Value,
-		OperationalAddress:  fmt.Sprintf("bcrt1qop-%d", tag),
-		OperationalScript:   []byte{0x51, 0x20, tag},
-		SavingsAddress:      fmt.Sprintf("bcrt1qsv-%d", tag),
-		SavingsScript:       []byte{0x51, 0x20, tag + 1},
-		RecipientDustSats:   fixture.DustSats,
-		TxRecipientCapSats:  fixture.TxRecipientCapSats,
-		PeriodAllowanceSats: fixture.PeriodAllowanceSats,
-		AbsoluteFeeCapSats:  fixture.AbsoluteFeeCeiling,
-		FeerateCapSatPerV:   fixture.FeerateCeilingSatPerV,
+		ID:                    []byte{tag, tag + 1, tag + 2},
+		WebAuthnP256:          p256,
+		PhoneDirectP256:       directP256,
+		PhoneRoutineBIP340:    hotPriv.PubKey().SerializeCompressed(),
+		ExternalOwnerWallet:   ownerPriv.PubKey().SerializeCompressed(),
+		RPID:                  "localhost",
+		Origin:                "http://localhost:7072",
+		RecoveryKey:           offPriv.PubKey().SerializeCompressed(),
+		VaultCosignerBase:     provPriv.PubKey().SerializeCompressed(),
+		TweakedVaultCosigner:  tweakPriv.PubKey().SerializeCompressed(),
+		ArkadeCosignerBase:    arkadePriv.PubKey().SerializeCompressed(),
+		TweakedArkadeCosigner: arkadeTweakPriv.PubKey().SerializeCompressed(),
+		TemplateVersion:       fixture.TemplateVersion,
+		PolicyVersion:         fixture.PolicyVersion,
+		Network:               fixture.Network,
+		VaultID:               fixture.VaultID,
+		OperationalCSVType:    int64(opCSV.Type),
+		OperationalCSVValue:   opCSV.Value,
+		SavingsCSVType:        int64(svCSV.Type),
+		SavingsCSVValue:       svCSV.Value,
+		OperationalAddress:    fmt.Sprintf("bcrt1qop-%d", tag),
+		OperationalScript:     []byte{0x51, 0x20, tag},
+		SavingsAddress:        fmt.Sprintf("bcrt1qsv-%d", tag),
+		SavingsScript:         []byte{0x51, 0x20, tag + 1},
+		RecipientDustSats:     fixture.DustSats,
+		TxRecipientCapSats:    fixture.TxRecipientCapSats,
+		PeriodAllowanceSats:   fixture.PeriodAllowanceSats,
+		AbsoluteFeeCapSats:    fixture.AbsoluteFeeCeiling,
+		FeerateCapSatPerV:     fixture.FeerateCeilingSatPerV,
 	}
 	if err := SealCredential(&c, bytes.Repeat([]byte{0x42}, 32)); err != nil {
 		panic(err)
@@ -122,13 +124,14 @@ func cloneCredential(c Credential) Credential {
 	clone := c
 	clone.ID = append([]byte(nil), c.ID...)
 	clone.WebAuthnP256 = append([]byte(nil), c.WebAuthnP256...)
-	clone.DirectP256 = append([]byte(nil), c.DirectP256...)
-	clone.Hot = append([]byte(nil), c.Hot...)
-	clone.Offline = append([]byte(nil), c.Offline...)
-	clone.ProviderBase = append([]byte(nil), c.ProviderBase...)
-	clone.TweakedProvider = append([]byte(nil), c.TweakedProvider...)
-	clone.ArkadeBase = append([]byte(nil), c.ArkadeBase...)
-	clone.TweakedArkade = append([]byte(nil), c.TweakedArkade...)
+	clone.PhoneDirectP256 = append([]byte(nil), c.PhoneDirectP256...)
+	clone.PhoneRoutineBIP340 = append([]byte(nil), c.PhoneRoutineBIP340...)
+	clone.ExternalOwnerWallet = append([]byte(nil), c.ExternalOwnerWallet...)
+	clone.RecoveryKey = append([]byte(nil), c.RecoveryKey...)
+	clone.VaultCosignerBase = append([]byte(nil), c.VaultCosignerBase...)
+	clone.TweakedVaultCosigner = append([]byte(nil), c.TweakedVaultCosigner...)
+	clone.ArkadeCosignerBase = append([]byte(nil), c.ArkadeCosignerBase...)
+	clone.TweakedArkadeCosigner = append([]byte(nil), c.TweakedArkadeCosigner...)
 	clone.OperationalScript = append([]byte(nil), c.OperationalScript...)
 	clone.SavingsScript = append([]byte(nil), c.SavingsScript...)
 	clone.IntegrityMAC = append([]byte(nil), c.IntegrityMAC...)
@@ -168,17 +171,18 @@ func TestCredentialIntegrityAuthenticatesEveryCanonicalFieldAndRestart(t *testin
 	}{
 		{"credential id", func(c *Credential) { c.ID[0] ^= 1 }},
 		{"webauthn key", func(c *Credential) { c.WebAuthnP256[1] ^= 1 }},
-		{"direct key", func(c *Credential) { c.DirectP256[1] ^= 1 }},
-		{"hot key", func(c *Credential) { c.Hot[1] ^= 1 }},
+		{"direct key", func(c *Credential) { c.PhoneDirectP256[1] ^= 1 }},
+		{"phone routine BIP340 key", func(c *Credential) { c.PhoneRoutineBIP340[1] ^= 1 }},
+		{"external owner wallet key", func(c *Credential) { c.ExternalOwnerWallet[1] ^= 1 }},
 		{"rp id", func(c *Credential) { c.RPID += "." }},
 		{"origin", func(c *Credential) { c.Origin += "/changed" }},
-		{"offline key", func(c *Credential) { c.Offline[1] ^= 1 }},
-		{"provider base", func(c *Credential) { c.ProviderBase[1] ^= 1 }},
-		{"tweaked provider", func(c *Credential) { c.TweakedProvider[1] ^= 1 }},
-		{"arkade emulator base", func(c *Credential) { c.ArkadeBase[1] ^= 1 }},
-		{"tweaked arkade emulator", func(c *Credential) { c.TweakedArkade[1] ^= 1 }},
-		{"arkade emulator origin", func(c *Credential) { c.ArkadeEmulatorOrigin += "/changed" }},
-		{"arkade emulator version", func(c *Credential) { c.ArkadeEmulatorVersion += "-changed" }},
+		{"recovery key", func(c *Credential) { c.RecoveryKey[1] ^= 1 }},
+		{"vault cosigner base", func(c *Credential) { c.VaultCosignerBase[1] ^= 1 }},
+		{"tweaked vault cosigner", func(c *Credential) { c.TweakedVaultCosigner[1] ^= 1 }},
+		{"arkade cosigner base", func(c *Credential) { c.ArkadeCosignerBase[1] ^= 1 }},
+		{"tweaked arkade cosigner", func(c *Credential) { c.TweakedArkadeCosigner[1] ^= 1 }},
+		{"arkade cosigner origin", func(c *Credential) { c.ArkadeCosignerOrigin += "/changed" }},
+		{"arkade cosigner version", func(c *Credential) { c.ArkadeCosignerVersion += "-changed" }},
 		{"template", func(c *Credential) { c.TemplateVersion += "-changed" }},
 		{"policy", func(c *Credential) { c.PolicyVersion += "-changed" }},
 		{"network", func(c *Credential) { c.Network += "-changed" }},
@@ -281,10 +285,12 @@ func assertCredentialEqual(t *testing.T, led *Ledger, want Credential) {
 	if got == nil {
 		t.Fatal("credential missing")
 	}
-	if !bytes.Equal(got.ID, want.ID) || !bytes.Equal(got.WebAuthnP256, want.WebAuthnP256) || !bytes.Equal(got.DirectP256, want.DirectP256) || !bytes.Equal(got.Hot, want.Hot) ||
+	if !bytes.Equal(got.ID, want.ID) || !bytes.Equal(got.WebAuthnP256, want.WebAuthnP256) || !bytes.Equal(got.PhoneDirectP256, want.PhoneDirectP256) || !bytes.Equal(got.PhoneRoutineBIP340, want.PhoneRoutineBIP340) || !bytes.Equal(got.ExternalOwnerWallet, want.ExternalOwnerWallet) ||
 		got.RPID != want.RPID || got.Origin != want.Origin ||
-		!bytes.Equal(got.Offline, want.Offline) || !bytes.Equal(got.ProviderBase, want.ProviderBase) ||
-		!bytes.Equal(got.TweakedProvider, want.TweakedProvider) ||
+		!bytes.Equal(got.RecoveryKey, want.RecoveryKey) || !bytes.Equal(got.VaultCosignerBase, want.VaultCosignerBase) ||
+		!bytes.Equal(got.TweakedVaultCosigner, want.TweakedVaultCosigner) ||
+		!bytes.Equal(got.ArkadeCosignerBase, want.ArkadeCosignerBase) || !bytes.Equal(got.TweakedArkadeCosigner, want.TweakedArkadeCosigner) ||
+		got.ArkadeCosignerOrigin != want.ArkadeCosignerOrigin || got.ArkadeCosignerVersion != want.ArkadeCosignerVersion ||
 		got.TemplateVersion != want.TemplateVersion || got.PolicyVersion != want.PolicyVersion ||
 		got.Network != want.Network || got.VaultID != want.VaultID ||
 		got.OperationalCSVType != want.OperationalCSVType || got.OperationalCSVValue != want.OperationalCSVValue ||
@@ -869,16 +875,16 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 			t.Fatalf("private stage received %q, want exact request", stored)
 		}
 		var state, storedRequest string
-		var providerPSBT, signedPSBT sql.NullString
+		var vaultPSBT, signedPSBT sql.NullString
 		if err := led.db.QueryRow(
-			`SELECT state, request_psbt, provider_psbt, signed_psbt FROM issuance
+			`SELECT state, request_psbt, vault_psbt, signed_psbt FROM issuance
 			 WHERE vault_id = ? AND arkade_sighash = ?`,
 			"vault-a", d,
-		).Scan(&state, &storedRequest, &providerPSBT, &signedPSBT); err != nil {
+		).Scan(&state, &storedRequest, &vaultPSBT, &signedPSBT); err != nil {
 			t.Fatal(err)
 		}
-		if state != stateReserved || storedRequest != request || providerPSBT.Valid || signedPSBT.Valid {
-			t.Fatalf("private-key use preceded durable exact reservation: state=%q request=%q provider=%v signed=%v", state, storedRequest, providerPSBT, signedPSBT)
+		if state != stateReserved || storedRequest != request || vaultPSBT.Valid || signedPSBT.Valid {
+			t.Fatalf("private-key use preceded durable exact reservation: state=%q request=%q provider=%v signed=%v", state, storedRequest, vaultPSBT, signedPSBT)
 		}
 		return providerStage, nil
 	}
@@ -890,13 +896,13 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 		var state, storedRequest, storedProvider string
 		var signedPSBT sql.NullString
 		if err := led.db.QueryRow(
-			`SELECT state, request_psbt, provider_psbt, signed_psbt FROM issuance
+			`SELECT state, request_psbt, vault_psbt, signed_psbt FROM issuance
 			 WHERE vault_id = ? AND arkade_sighash = ?`,
 			"vault-a", d,
 		).Scan(&state, &storedRequest, &storedProvider, &signedPSBT); err != nil {
 			t.Fatal(err)
 		}
-		if state != stateProviderSigned || storedRequest != request || storedProvider != providerStage || signedPSBT.Valid {
+		if state != stateVaultSigned || storedRequest != request || storedProvider != providerStage || signedPSBT.Valid {
 			t.Fatalf("public dispatch preceded durable provider stage: state=%q request=%q provider=%q signed=%v", state, storedRequest, storedProvider, signedPSBT)
 		}
 		return "", errors.New("ambiguous public timeout")
@@ -970,16 +976,21 @@ func TestEnrollRejectsInvalidCredentialRecords(t *testing.T) {
 		{name: "invalid P-256 prefix", credential: Credential{ID: valid.ID, WebAuthnP256: bytes.Repeat([]byte{0x04}, 33), RPID: valid.RPID, Origin: valid.Origin}},
 		{name: "reused webauthn key as direct-auth", credential: func() Credential {
 			c := valid
-			c.DirectP256 = append([]byte(nil), valid.WebAuthnP256...)
+			c.PhoneDirectP256 = append([]byte(nil), valid.WebAuthnP256...)
 			return c
 		}()},
 		{name: "missing direct-auth p256", credential: func() Credential {
 			c := valid
-			c.DirectP256 = nil
+			c.PhoneDirectP256 = nil
 			return c
 		}()},
-		{name: "short hot key", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, Hot: valid.Hot[:32], RPID: valid.RPID, Origin: valid.Origin}},
-		{name: "invalid hot key prefix", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, Hot: bytes.Repeat([]byte{0x04}, 33), RPID: valid.RPID, Origin: valid.Origin}},
+		{name: "short phone routine key", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, PhoneRoutineBIP340: valid.PhoneRoutineBIP340[:32], RPID: valid.RPID, Origin: valid.Origin}},
+		{name: "invalid phone routine key prefix", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, PhoneRoutineBIP340: bytes.Repeat([]byte{0x04}, 33), RPID: valid.RPID, Origin: valid.Origin}},
+		{name: "missing external owner wallet", credential: func() Credential {
+			c := valid
+			c.ExternalOwnerWallet = nil
+			return c
+		}()},
 		{name: "empty RP ID", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, RPID: "", Origin: valid.Origin}},
 		{name: "empty origin", credential: Credential{ID: valid.ID, WebAuthnP256: valid.WebAuthnP256, RPID: valid.RPID, Origin: ""}},
 	}

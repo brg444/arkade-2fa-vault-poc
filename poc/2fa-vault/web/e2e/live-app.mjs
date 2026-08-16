@@ -112,7 +112,7 @@ async function runLiveFlow() {
 
   byID("btn-enroll").click();
   await wait(() => {
-    if (localStorage.getItem("vault-hot-v1") && !byID("btn-enroll").disabled) return true;
+    if (localStorage.getItem("arkade-vault-enrollment-v3") && !byID("btn-enroll").disabled) return true;
     if (!byID("btn-enroll").disabled && byID("out").textContent !== "") {
       throw new Error(`passkey enrollment failed: ${byID("out").textContent}`);
     }

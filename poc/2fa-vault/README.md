@@ -8,12 +8,12 @@ The numbered response to all 41 independent Prem findings is in
 This package implements an ordinary L1 Taproot vault, not an Ark VTXO. It has
 two deliberately separate profiles:
 
-- **Regtest demonstration:** `cmd/provider` plus two independent private
-  Emulator instances (private Provider and Arkade cosigner), browser
-  automation, funding, mining, and restart checks. The backup key is the
-  public generator-G fixture and provides no custody.
+- **Regtest demonstration:** `cmd/provider` plus independent VaultCosigner and
+  ArkadeCosigner Emulator instances, browser automation, funding, mining, and
+  restart checks. ExternalOwnerWallet and RecoveryKey are public deterministic
+  fixtures and provide no custody.
 - **Mutinynet software authorizer:** `cmd/authorizer` owns the file-backed
-  provider private key and authoritative SQLite ledger in one process. A
+  VaultCosigner private key and authoritative SQLite ledger in one process. A
   stateless Caddy gateway serves the POC client and forwards only explicitly
   allowlisted policy operations. The authorizer has one narrow outbound HTTPS
   client to the release-pinned public Arkade Emulator cosigner. It exposes no
@@ -25,19 +25,20 @@ process isolation, not an enclave, HSM, or production custody boundary.
 
 ## Cryptographic model
 
-The Operational tree has three paths:
+The v3 Operational tree has three paths:
 
-1. exact 3-of-3 hot secp256k1 + tweaked private Provider secp256k1 +
-   tweaked public Arkade Emulator secp256k1;
-2. hot secp256k1 + independent backup secp256k1; and
-3. CSV delay + independent backup secp256k1.
+1. Routine: exact 3-of-3 `PhoneRoutineBIP340` +
+   `tweak(VaultCosigner, ArkadeScriptHash)` +
+   `tweak(ArkadeCosigner, ArkadeScriptHash)`;
+2. Admin/full sweep/policy migration: exact 2-of-2
+   `ExternalOwnerWallet + RecoveryKey`; and
+3. Emergency recovery: CSV delay + `RecoveryKey`.
 
-Both collaborative tweaks are derived from their independent base keys with
-the same `ArkadeScriptHash`. Savings has only the owner and longer-CSV backup
-paths; both signer roles' base and tweaked keys are absent from every Savings
-leaf.
+Both routine tweaks use the same authorization-script hash. Savings has only
+`ExternalOwnerWallet + RecoveryKey` and longer-CSV `RecoveryKey` paths; all
+three routine signers' identities are absent from every Savings leaf.
 
-The collaborative Arkade authorization script is:
+The routine Arkade authorization script ends with:
 
 ```text
 OP_0 OP_SIGHASH <0x11||directP256> OP_CHECKSIGFROMSTACK
@@ -61,14 +62,17 @@ It no longer publishes the WebAuthn assertion, but preflight/bind traffic and
 the public Arkade signing call still reveal transaction metadata. Do not treat
 either HTTP path as private.
 
-The browser creates a random secp256k1 hot key and encrypts it with a key
-derived from the PRF result. The PRF bytes, DirectP256 scalar, and decrypted
-hot scalar must never reach the authorizer.
+The browser creates the random secp256k1 `PhoneRoutineBIP340` software key and
+encrypts it with a key derived from the PRF result. This is browser-memory
+software custody, not authenticator hardware or attestation. The PRF bytes,
+PhoneDirectP256 scalar, and decrypted PhoneRoutine scalar must never reach the
+authorizer.
 
 All secp256k1 roles are checked by Taproot x-only identity, not compressed-key
-parity. Hot, backup, private Provider base/tweak, and public Arkade Emulator
-base/tweak identities must remain pairwise independent. Mutinynet rejects both
-parities of the public generator-G fixture.
+parity. PhoneRoutineBIP340, ExternalOwnerWallet, RecoveryKey, VaultCosigner
+base/tweak, and ArkadeCosigner base/tweak identities must remain pairwise
+independent. Mutinynet also rejects both parities of the public scalar-1 and
+scalar-2 regtest fixtures.
 
 ## What the authorizer verifies
 
@@ -78,10 +82,11 @@ either cosigner result is accepted it independently verifies:
 
 - exactly one supported Operational input and its full previous transaction;
 - matching outpoint, WitnessUtxo, value, and enrolled Operational script;
-- the exact collaborative tapscript, control block, and SIGHASH_DEFAULT;
-- one reviewed native-SegWit recipient and optional exact Operational change;
+- the exact Routine tapscript, control block, and SIGHASH_DEFAULT;
+- one reviewed native-SegWit recipient and mandatory non-dust recursive
+  Operational change to the identical script;
 - the canonical Arkade packet and transaction-bound DirectP256 signature;
-- the hot BIP342 signature over the same transaction;
+- the PhoneRoutineBIP340 BIP342 signature over the same transaction;
 - an exact transaction-bound WebAuthn challenge plus origin/RP/UP/UV semantics;
 - absolute fee, fee-rate, per-transaction, and UTC-period limits; and
 - recipient plus miner fee as economic outflow.
@@ -91,20 +96,21 @@ native-SegWit recipient/change placement, recursive Operational change, and
 the exact canonical Ark extension script as the final zero-valued output. It
 also enforces recipient and fee caps and the final 3-signature witness fee rate. DirectP256
 remains the single Arkade packet witness and final `OP_SIGHASH` gate; it is not
-a fourth collaborative tapscript signature.
+a fourth routine tapscript signature.
 
 WebAuthn origin/RP/UP/UV semantics and the UTC-period allowance remain ordinary
 authorizer Go state, not on-chain constraints. Both regtest RemoteSigners and
 the external public Arkade service are intentionally policy-agnostic. A public
-Arkade signature alone cannot spend the 3-of-3 leaf, but exposing a generic
-route to the private Provider key would bypass those off-chain checks. That is
-why the Mutinynet claim depends on the in-process private signer plus the
+ArkadeCosigner and VaultCosigner alone cannot spend because the independent
+PhoneRoutineBIP340 signature is mandatory. Exposing a generic route to the
+VaultCosigner key would still bypass its policy role. That is why the
+Mutinynet claim depends on the in-process private signer plus the
 explicit inbound allowlist; merely hiding a gRPC port would not establish it.
 
 The immutable credential and descriptor row is authenticated with a
 versioned, length-prefixed HMAC record. Its key is HKDF-SHA256-derived from
-the file-only provider scalar and never stored in SQLite. Any missing MAC,
-DB-only field mutation, or provider-key mismatch fails closed before stored
+the file-only VaultCosigner scalar and never stored in SQLite. Any missing
+MAC, DB-only field mutation, or VaultCosigner-key mismatch fails closed before stored
 authentication or descriptor fields are used. This detects database drift;
 it is not host-compromise or rollback protection.
 
@@ -112,13 +118,13 @@ The SQLite issuance state machine is:
 
 ```text
 reserved(request_psbt)
-  → provider_signed(request_psbt, provider_psbt)
-  → completed(request_psbt, provider_psbt, signed_psbt)
+  → vault_signed(request_psbt, vault_psbt)
+  → completed(request_psbt, vault_psbt, signed_psbt)
 ```
 
 The exact normalized browser PSBT and allowance
-reservation are committed before the private Provider key is used. The private
-signature is durably persisted before the stored Provider-signed PSBT is sent
+reservation are committed before the VaultCosigner key is used. The private
+signature is durably persisted before the stored VaultCosigner-signed PSBT is sent
 to the public Arkade Emulator. An exact retry resumes the persisted stage,
 skipping any signer whose result is already stored; a different PSBT with the
 same witness-masked Arkade digest is rejected. Every state counts against the
@@ -144,7 +150,8 @@ inbound authorizer or gateway route.
 
 Registration is one vault per isolated authorizer instance. It is idempotent
 only for the exact enrolled tuple: credential ID, WebAuthn key, DirectP256 key,
-hot key, backup key, both cosigner base/tweaked identities, public Arkade
+PhoneRoutineBIP340 key, ExternalOwnerWallet, RecoveryKey, both cosigner
+base/tweaked identities, public Arkade
 Emulator origin/version, network, numeric policy, policy/template versions,
 CSV delays, client origin, and RP ID. Any incompatible restart fails closed
 rather than deriving a different address.
@@ -158,31 +165,31 @@ the token; interrupted pending enrollment can be retried after re-entry.
 
 This remains setup authorization without authenticator attestation or an
 independent enrollment ceremony. The operator trusts the first token-authorized
-tuple on the configured origin. The encrypted hot-key ciphertext, nonce, and
+tuple on the configured origin. The encrypted PhoneRoutine-key ciphertext, nonce, and
 credential identifier stored for recovery remain readable to same-origin
-JavaScript even though the hot scalar is encrypted.
+JavaScript even though the PhoneRoutine scalar is encrypted.
 
 The browser stages its complete encrypted local record before registration,
-pins the returned private Provider tweak, the public Arkade Emulator
+pins the returned VaultCosigner tweak, the ArkadeCosigner
 base/tweak/origin/version identity, and the separate vault network identity,
 then promotes the record only after an exact successful commit. It verifies an
-authorized response contains the submitted hot signature plus exactly the two
+authorized response contains the submitted PhoneRoutine signature plus exactly the two
 expected valid cosigner signatures, in either order, with no other mutation.
 
 Immediately before `/v1/authorize`, the page serializes the exact request body
 into page memory. If the public signer or network fails, another click in the
 same unchanged page retries those identical bytes before any new WebAuthn,
-DirectP256, or hot signing. Assertion/PSBT material is never written to browser
+PhoneDirectP256, or PhoneRoutine signing. Assertion/PSBT material is never written to browser
 storage and is cleared after verified authorization or any intent change; a
 non-sensitive challenge/txid receipt alone can survive long enough to retry
 publication.
 
-The current descriptor and issuance tables are a fail-closed v2 schema. Old
-v1 databases are not auto-migrated, and UTXOs funded to the old 2-of-2 tree do
-not become 3-of-3 outputs. Preserve the old keys/database and perform an
-explicit reviewed spend/migration with compatible old software before using a
-fresh v2 authorizer; never point the new binary at an old database expecting an
-upgrade.
+The current descriptor and issuance tables are a fail-closed v3 schema. Old
+v1/v2 databases are not auto-migrated, and funded outputs from either older
+tree are not reinterpreted as v3. Preserve the old keys/database and perform
+an explicit reviewed spend/migration with compatible old software before
+using a fresh v3 authorizer; never point the new binary at an old database
+expecting an upgrade.
 
 For a fresh Mutinynet enrollment, the release-pinned public base must be the
 endpoint's current signer. On restart, an HMAC-authenticated existing
@@ -190,6 +197,33 @@ descriptor may keep its exact stored base/tweak while that base is actively
 advertised as deprecated by the same pinned endpoint under an allowed release
 version. Neither `GetInfo` nor a signing response can substitute or enroll a
 new identity; disappearance of the stored key fails closed.
+
+## File-only admin handoff
+
+Routine HTTP endpoints accept only the Routine leaf and always require
+recursive same-descriptor change. A full sweep or policy migration instead
+uses the Admin leaf outside the browser/API:
+
+```bash
+go run ./poc/2fa-vault/cmd/adminpsbt \
+  -mode build -descriptor status.json -request admin-request.json \
+  -out unsigned-admin.psbt
+
+# Sign unsigned-admin.psbt independently with ExternalOwnerWallet and
+# RecoveryKey, preserving all PSBT fields, then:
+go run ./poc/2fa-vault/cmd/adminpsbt \
+  -mode finalize -descriptor status.json -psbt signed-admin.psbt \
+  -out final-admin.psbt -tx-out final-admin.tx
+```
+
+`status.json` is an operator-reviewed enrolled `/v1/status` response. The
+build request contains `prevTxHex`, `vout`, `destinationScript`,
+`destinationAmount`, and `fee`. The tool reconstructs the exact v3 descriptor,
+pins Mutinynet's reviewed ArkadeCosigner release identity, verifies the full
+previous transaction, and emits only files. Finalization requires exactly the
+ExternalOwnerWallet and RecoveryKey BIP340 signatures, executes the resulting
+Taproot witness locally, and never reads a private key or opens a network
+listener.
 
 ## Mutinynet deployment boundary
 
@@ -201,7 +235,7 @@ browser -> TLS/static gateway -> internal-only authorizer
                                       `-> checkpoint-pinned HTTPS Esplora
 ```
 
-- Only the authorizer mounts the provider-key secret and SQLite volume.
+- Only the authorizer mounts the VaultCosigner-key secret and SQLite volume.
 - Only the gateway publishes ports 80/443; the authorizer has no host port.
 - Gateway-to-authorizer traffic uses an internal Docker network.
 - Separate edge/egress networks are pinned as the default routes.
@@ -234,9 +268,9 @@ See [the deployment runbook](deploy/mutinynet/README.md) for commands.
 
 Open only `http://localhost:8787`; its RP ID and WebAuthn origin are
 `localhost`. The stack binds `127.0.0.1:8787`, but opening the numeric-host URL
-still fails origin/RP checks. The regtest backup key is secp256k1 generator G
-with known scalar 1. It is a test fixture, not custody; anyone can use the
-backup paths of a funded fixture vault. Pin Go `1.26.6` and Emulator
+still fails origin/RP checks. The regtest ExternalOwnerWallet and RecoveryKey
+are known scalar-2 and scalar-1 fixtures. They are not custody; anyone can use
+the admin/recovery paths of a funded fixture vault. Pin Go `1.26.6` and Emulator
 `66fd93cd` for the recorded evidence.
 
 The repository's generic regtest base Compose can publish an Emulator and put
@@ -258,8 +292,9 @@ VAULT_LIVE_ACCEPTANCE=1 make vault-regtest-e2e
 `vault-regtest-e2e` uses a unique Compose project, initializes or unlocks the
 disposable arkd v0.9.13 wallet with a public regtest-only fixture password,
 funds the Operational address, drives a real Chrome virtual authenticator,
-binds DirectP256, adds the hot signature plus independent private-Provider and
-Arkade-Emulator signatures, publishes, mines, restarts the provider, and checks
+binds PhoneDirectP256, adds the PhoneRoutineBIP340 signature plus independent
+VaultCosigner and ArkadeCosigner signatures, publishes, mines, restarts the
+provider, and checks
 the exact confirmed txid and durable outflow. It refuses to alter shared Nigiri
 data.
 
@@ -298,10 +333,10 @@ and reachable only after the private policy gate and durable stage.
 The current gateway serves the signing JavaScript from the same origin as the
 API. CSP and vendoring remove third-party runtime code, but a compromised
 gateway can still serve modified first-party JavaScript that reads PRF output,
-decrypted hot material, or a signed PSBT. The current browser independently
+decrypted PhoneRoutine material, or a signed PSBT. The current browser independently
 derives the restricted one-input Arkade sighash from its validated PSBT and
-requires the provider preflight value to match exactly. It still consumes a
-provider-supplied partial descriptor instead of deriving every tree byte from
+requires the authorizer preflight value to match exactly. It still consumes an
+authorizer-supplied partial descriptor instead of deriving every tree byte from
 a complete versioned public descriptor.
 
 Therefore the POC still assumes an honest, reproducible client. The intended
@@ -313,10 +348,15 @@ parity. See
 
 ## Other explicit limits
 
-- The real backup-key generation/storage/signing ceremony is out of scope.
-- `cmd/demo` is an optional local harness that may write fixture `hot.hex` and
-  `offline.hex` files. It is not the Compose image or an isolation proof; do
-  not deploy it.
+- Real ExternalOwnerWallet and RecoveryKey generation/storage/signing
+  ceremonies are out of scope.
+- `cmd/adminpsbt` is the file-only v3 reference handoff. It reconstructs the
+  enrolled public descriptor, builds the Admin PSBT, and finalizes only after
+  verifying exact ExternalOwnerWallet+RecoveryKey signatures; it has no HTTP
+  listener and never reads private material.
+- `cmd/demo` is an optional local harness that may write fixture
+  `phone-routine.hex`, `external-owner.hex`, and `recovery-key.hex` files. It
+  is not the Compose image or an isolation proof; do not deploy it.
 - One passkey and one vault per authorizer instance are supported.
 - Policy caps remain code-pinned; only network, origin/RP ID, and CSV delays
   are runtime deployment inputs.
@@ -332,8 +372,8 @@ parity. See
   dependency. Its `GetInfo` does not attest network; the authorizer independently
   pins Mutinynet through Esplora height 1 and rejects every response mutation
   except its one expected signature.
-- No attestation, multi-user account system, operator migration, mainnet
-  support, or complete owner/recovery wallet ceremony is claimed.
+- No attestation, multi-user account system, automated operator migration,
+  mainnet support, or complete external-wallet UX is claimed.
 
 ## Tests
 
@@ -347,7 +387,8 @@ VAULT_TEST_DOCKER=1 go test ./poc/2fa-vault/ -run 'TestVaultComposeOverlay|TestM
 
 The suite includes hermetic tests for every major module and boundary:
 Taproot/key separation, WebAuthn parsing, P-256 signatures, browser PRF state,
-network-specific address validation, PSBT/prevout correspondence, hot and
+network-specific address validation, PSBT/prevout correspondence,
+PhoneRoutineBIP340 and
 both cosigner signatures, fee/integer policy, staged exact-request reservations
 and retries, bootstrap lifecycle, restart compatibility, public-cosigner
 identity/response bounds, Esplora/RPC checkpointing and redirect rejection,

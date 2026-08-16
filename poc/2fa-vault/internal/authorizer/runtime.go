@@ -1,5 +1,5 @@
 // Package authorizer assembles the Mutinynet software signing boundary.
-// This process is the sole owner of both the provider private key and the
+// This process is the sole owner of both the VaultCosigner private key and the
 // authoritative issuance ledger. It exposes Service policy operations, never
 // the policy-agnostic LocalSigner primitive.
 package authorizer
@@ -27,15 +27,16 @@ import (
 )
 
 // Config contains only deployment inputs for the protected authorizer. The
-// provider key and first-enrollment token are file-backed secrets; neither may
+// VaultCosigner key and first-enrollment token are file-backed secrets; neither may
 // be supplied through environment text or a network signer.
 type Config struct {
-	Deployment          deployment.Config
-	DatabasePath        string
-	ProviderKeyFile     string
-	OfflinePubHex       string
-	EnrollmentTokenFile string
-	EsploraURL          string
+	Deployment                deployment.Config
+	DatabasePath              string
+	VaultCosignerKeyFile      string
+	ExternalOwnerWalletPubHex string
+	RecoveryKeyPubHex         string
+	EnrollmentTokenFile       string
+	EsploraURL                string
 }
 
 // Runtime owns the Service and its SQLite connection for one process lifetime.
@@ -101,23 +102,31 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		return nil, fmt.Errorf("public arkade emulator dialer required")
 	}
 
-	providerKey, err := LoadProviderKey(cfg.ProviderKeyFile)
+	vaultCosignerKey, err := LoadVaultCosignerKey(cfg.VaultCosignerKeyFile)
 	if err != nil {
 		return nil, err
 	}
-	offline, err := parseOfflinePub(cfg.OfflinePubHex)
+	externalOwner, err := parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
 	if err != nil {
 		return nil, err
 	}
-	if sameXOnly(providerKey.PubKey(), offline) {
-		return nil, fmt.Errorf("provider and offline keys must be independent")
-	}
-	arkadeBase, err := parsePinnedArkadePub(deployment.MutinynetArkadeEmulatorPubHex)
+	recovery, err := parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
 	if err != nil {
 		return nil, err
 	}
-	if sameXOnly(providerKey.PubKey(), arkadeBase) || sameXOnly(offline, arkadeBase) {
-		return nil, fmt.Errorf("public arkade emulator key must be independent from provider and offline keys")
+	arkadeBase, err := parseCanonicalCompressedPub("ArkadeCosigner", deployment.MutinynetArkadeCosignerPubHex)
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePairwiseIndependent(
+		map[string]*btcec.PublicKey{
+			"VaultCosigner":       vaultCosignerKey.PubKey(),
+			"ExternalOwnerWallet": externalOwner,
+			"RecoveryKey":         recovery,
+			"ArkadeCosigner":      arkadeBase,
+		},
+	); err != nil {
+		return nil, err
 	}
 	ledger, err := policy.OpenLedger(cfg.DatabasePath, nil)
 	if err != nil {
@@ -129,7 +138,7 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 			_ = ledger.Close()
 		}
 	}()
-	credentialIntegrityKey, err := deriveCredentialIntegrityKey(providerKey)
+	credentialIntegrityKey, err := deriveCredentialIntegrityKey(vaultCosignerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -145,8 +154,8 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 			zero(credentialIntegrityKey)
 			return nil, fmt.Errorf("stored credential integrity: %w; restore a trusted backup or perform an explicit migration; do not delete the authoritative database", err)
 		}
-		arkadeBase, err = btcec.ParsePubKey(persisted.ArkadeBase)
-		if err != nil || !bytes.Equal(arkadeBase.SerializeCompressed(), persisted.ArkadeBase) {
+		arkadeBase, err = btcec.ParsePubKey(persisted.ArkadeCosignerBase)
+		if err != nil || !bytes.Equal(arkadeBase.SerializeCompressed(), persisted.ArkadeCosignerBase) {
 			zero(credentialIntegrityKey)
 			return nil, fmt.Errorf("stored public arkade emulator base key is invalid")
 		}
@@ -171,9 +180,9 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 
 	arkadeSigner, arkadeIdentity, err := dialArkade(
 		ctx,
-		deployment.MutinynetArkadeEmulatorOrigin,
+		deployment.MutinynetArkadeCosignerOrigin,
 		arkadeBase,
-		[]string{deployment.MutinynetArkadeEmulatorVersion},
+		[]string{deployment.MutinynetArkadeCosignerVersion},
 		allowActiveDeprecated,
 	)
 	if err != nil {
@@ -185,13 +194,14 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		Ledger:                 ledger,
 		Deployment:             cfg.Deployment,
 		CredentialIntegrityKey: credentialIntegrityKey,
-		Offline:                offline,
-		ProviderPub:            providerKey.PubKey(),
-		ArkadePub:              arkadeIdentity.BasePub,
-		ArkadeEmulatorOrigin:   arkadeIdentity.Origin,
-		ArkadeEmulatorVersion:  arkadeIdentity.Version,
-		Signer:                 provider.LocalSigner{Priv: providerKey},
-		ArkadeSigner:           arkadeSigner,
+		ExternalOwnerWallet:    externalOwner,
+		RecoveryKey:            recovery,
+		VaultCosignerPub:       vaultCosignerKey.PubKey(),
+		ArkadeCosignerPub:      arkadeIdentity.BasePub,
+		ArkadeCosignerOrigin:   arkadeIdentity.Origin,
+		ArkadeCosignerVersion:  arkadeIdentity.Version,
+		VaultSigner:            provider.LocalSigner{Priv: vaultCosignerKey},
+		ArkadeCosignerSigner:   arkadeSigner,
 		EnrollmentTokenHash:    enrollmentTokenHash,
 	}
 	defer func() {
@@ -220,34 +230,34 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 	return &Runtime{handler: provider.AuthorizerHandler(svc), service: svc, ledger: ledger}, nil
 }
 
-func parsePinnedArkadePub(encoded string) (*btcec.PublicKey, error) {
+func parseCanonicalCompressedPub(role, encoded string) (*btcec.PublicKey, error) {
 	if len(encoded) != 66 || encoded != strings.ToLower(encoded) {
-		return nil, fmt.Errorf("public arkade emulator pubkey must be canonical 33-byte compressed lowercase hex")
+		return nil, fmt.Errorf("%s pubkey must be canonical 33-byte compressed lowercase hex", role)
 	}
 	raw, err := hex.DecodeString(encoded)
 	if err != nil || len(raw) != 33 || (raw[0] != 0x02 && raw[0] != 0x03) {
-		return nil, fmt.Errorf("public arkade emulator pubkey must be canonical 33-byte compressed lowercase hex")
+		return nil, fmt.Errorf("%s pubkey must be canonical 33-byte compressed lowercase hex", role)
 	}
 	pub, err := btcec.ParsePubKey(raw)
 	if err != nil || !bytes.Equal(pub.SerializeCompressed(), raw) {
-		return nil, fmt.Errorf("public arkade emulator pubkey is invalid")
+		return nil, fmt.Errorf("%s pubkey is invalid", role)
 	}
 	return pub, nil
 }
 
 const (
-	credentialIntegrityHKDFSalt = "arkade-2fa-vault/provider-scalar-hkdf-salt/v1"
-	credentialIntegrityHKDFInfo = "arkade-2fa-vault/credential-integrity-key/v1"
+	credentialIntegrityHKDFSalt = "arkade-2fa-vault/vault-cosigner-scalar-hkdf-salt/v3"
+	credentialIntegrityHKDFInfo = "arkade-2fa-vault/credential-integrity-key/v3"
 )
 
 // deriveCredentialIntegrityKey implements the one-block RFC 5869
 // HKDF-SHA256 extract+expand needed for the 32-byte record MAC key. The
-// provider scalar is input keying material, never the HMAC key directly.
-func deriveCredentialIntegrityKey(providerKey *btcec.PrivateKey) ([]byte, error) {
-	if providerKey == nil {
-		return nil, fmt.Errorf("provider key required for credential integrity")
+// VaultCosigner scalar is input keying material, never the HMAC key directly.
+func deriveCredentialIntegrityKey(vaultCosignerKey *btcec.PrivateKey) ([]byte, error) {
+	if vaultCosignerKey == nil {
+		return nil, fmt.Errorf("VaultCosigner key required for credential integrity")
 	}
-	ikm := providerKey.Serialize()
+	ikm := vaultCosignerKey.Serialize()
 	defer zero(ikm)
 	extract := hmac.New(sha256.New, []byte(credentialIntegrityHKDFSalt))
 	_, _ = extract.Write(ikm)
@@ -259,11 +269,11 @@ func deriveCredentialIntegrityKey(providerKey *btcec.PrivateKey) ([]byte, error)
 	return expand.Sum(nil), nil
 }
 
-// LoadProviderKey reads exactly one strict secp256k1 scalar from a bounded
+// LoadVaultCosignerKey reads exactly one strict secp256k1 scalar from a bounded
 // hex file. btcec.PrivKeyFromBytes is called only after rejecting zero and
 // every value greater than or equal to the curve order.
-func LoadProviderKey(path string) (*btcec.PrivateKey, error) {
-	encoded, err := readBoundedSecret(path, "provider key", 64, 64)
+func LoadVaultCosignerKey(path string) (*btcec.PrivateKey, error) {
+	encoded, err := readBoundedSecret(path, "VaultCosigner key", 64, 64)
 	if err != nil {
 		return nil, err
 	}
@@ -271,49 +281,62 @@ func LoadProviderKey(path string) (*btcec.PrivateKey, error) {
 	raw := make([]byte, 32)
 	if _, err := hex.Decode(raw, encoded); err != nil {
 		zero(raw)
-		return nil, fmt.Errorf("provider key must be exactly 32-byte hex")
+		return nil, fmt.Errorf("VaultCosigner key must be exactly 32-byte hex")
 	}
 	defer zero(raw)
 	scalar := new(big.Int).SetBytes(raw)
 	if scalar.Sign() <= 0 || scalar.Cmp(btcec.S256().N) >= 0 {
-		return nil, fmt.Errorf("provider key scalar must be in [1, secp256k1.N-1]")
+		return nil, fmt.Errorf("VaultCosigner key scalar must be in [1, secp256k1.N-1]")
 	}
 	priv, _ := btcec.PrivKeyFromBytes(raw)
-	fixturePub, err := fixtureOfflinePub()
-	if err != nil {
-		return nil, err
-	}
-	if sameXOnly(priv.PubKey(), fixturePub) {
-		return nil, fmt.Errorf("public generator-G fixture provider key is forbidden")
+	if role, known := knownPublicFixtureRole(priv.PubKey()); known {
+		return nil, fmt.Errorf("public %s fixture VaultCosigner key is forbidden", role)
 	}
 	return priv, nil
 }
 
-func parseOfflinePub(encoded string) (*btcec.PublicKey, error) {
-	raw, err := hex.DecodeString(encoded)
-	if err != nil || len(raw) != 33 || (raw[0] != 0x02 && raw[0] != 0x03) {
-		return nil, fmt.Errorf("offline pubkey must be 33-byte compressed hex")
-	}
-	pub, err := btcec.ParsePubKey(raw)
-	if err != nil {
-		return nil, fmt.Errorf("offline pubkey: %w", err)
-	}
-	fixturePub, err := fixtureOfflinePub()
+func parseDeploymentPub(role, encoded string) (*btcec.PublicKey, error) {
+	pub, err := parseCanonicalCompressedPub(role, encoded)
 	if err != nil {
 		return nil, err
 	}
-	if sameXOnly(pub, fixturePub) {
-		return nil, fmt.Errorf("public generator-G offline fixture is forbidden")
+	if fixtureRole, known := knownPublicFixtureRole(pub); known {
+		return nil, fmt.Errorf("public %s fixture is forbidden for %s", fixtureRole, role)
 	}
 	return pub, nil
 }
 
-func fixtureOfflinePub() (*btcec.PublicKey, error) {
-	raw, err := hex.DecodeString(fixture.OfflinePubHex)
-	if err != nil {
-		return nil, fmt.Errorf("invalid compiled fixture")
+func knownPublicFixtureRole(pub *btcec.PublicKey) (string, bool) {
+	for role, encoded := range map[string]string{
+		"RecoveryKey":         fixture.RecoveryKeyPubHex,
+		"ExternalOwnerWallet": fixture.ExternalOwnerWalletPubHex,
+	} {
+		fixturePub, err := parseCanonicalCompressedPub(role+" fixture", encoded)
+		if err != nil {
+			continue
+		}
+		if sameXOnly(pub, fixturePub) {
+			return role, true
+		}
 	}
-	return btcec.ParsePubKey(raw)
+	return "", false
+}
+
+func requirePairwiseIndependent(keys map[string]*btcec.PublicKey) error {
+	for leftName, left := range keys {
+		if left == nil {
+			return fmt.Errorf("%s key is required", leftName)
+		}
+		for rightName, right := range keys {
+			if leftName >= rightName {
+				continue
+			}
+			if sameXOnly(left, right) {
+				return fmt.Errorf("%s and %s keys must be x-only independent", leftName, rightName)
+			}
+		}
+	}
+	return nil
 }
 
 func sameXOnly(a, b *btcec.PublicKey) bool {

@@ -64,7 +64,7 @@ func TestReviewerBindPublishesOnlyExecutableDirectP256Signature(t *testing.T) {
 		t.Fatalf("direct witness length = %d, want 64", len(packet[0].Witness[0]))
 	}
 	if !bytes.Contains(packet[0].Script, webauthn.CompressedP256(e.directPriv)) {
-		t.Fatal("authorization script does not commit the DirectP256 public key")
+		t.Fatal("authorization script does not commit the PhoneDirectP256 public key")
 	}
 	if bytes.Contains(packet[0].Script, webauthn.CompressedP256(e.passkeyPriv)) {
 		t.Fatal("authorization script commits the WebAuthn credential public key")

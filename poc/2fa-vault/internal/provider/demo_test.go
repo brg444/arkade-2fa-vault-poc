@@ -75,7 +75,7 @@ func TestDemoRoutesAbsentWhenDisabled(t *testing.T) {
 }
 
 func TestDemoOwnerRoutesAbsentWhenEnabled(t *testing.T) {
-	svc := &Service{Signer: demoRemoteSigner()}
+	svc := &Service{VaultSigner: demoRemoteSigner()}
 	d, err := NewDemo(svc, &fakeChain{})
 	if err != nil {
 		t.Fatal(err)
@@ -101,33 +101,33 @@ func TestNewDemoRejectsLocalSignerOrNil(t *testing.T) {
 	if _, err := NewDemo(nil, chain); err == nil {
 		t.Fatal("nil service accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: demoRemoteSigner()}, nil); err == nil {
+	if _, err := NewDemo(&Service{VaultSigner: demoRemoteSigner()}, nil); err == nil {
 		t.Fatal("nil chain accepted")
 	}
 	if _, err := NewDemo(&Service{}, chain); err == nil {
 		t.Fatal("nil signer accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: LocalSigner{}}, chain); err == nil {
+	if _, err := NewDemo(&Service{VaultSigner: LocalSigner{}}, chain); err == nil {
 		t.Fatal("LocalSigner accepted")
 	}
 	var typedNil *RemoteSigner
-	if _, err := NewDemo(&Service{Signer: typedNil}, chain); err == nil {
+	if _, err := NewDemo(&Service{VaultSigner: typedNil}, chain); err == nil {
 		t.Fatal("typed-nil RemoteSigner accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: &RemoteSigner{}}, chain); err == nil {
+	if _, err := NewDemo(&Service{VaultSigner: &RemoteSigner{}}, chain); err == nil {
 		t.Fatal("RemoteSigner without a transport client accepted")
 	}
 	var typedNilClient *demoTransport
-	if _, err := NewDemo(&Service{Signer: &RemoteSigner{Client: typedNilClient}}, chain); err == nil {
+	if _, err := NewDemo(&Service{VaultSigner: &RemoteSigner{Client: typedNilClient}}, chain); err == nil {
 		t.Fatal("RemoteSigner with a typed-nil transport client accepted")
 	}
-	if _, err := NewDemo(&Service{Signer: demoRemoteSigner()}, chain); err != nil {
+	if _, err := NewDemo(&Service{VaultSigner: demoRemoteSigner()}, chain); err != nil {
 		t.Fatalf("non-nil RemoteSigner rejected: %v", err)
 	}
 }
 
 func TestDemoFundFailsClosedWithoutEnrollment(t *testing.T) {
-	svc := &Service{Signer: demoRemoteSigner()}
+	svc := &Service{VaultSigner: demoRemoteSigner()}
 	d, err := NewDemo(svc, &fakeChain{})
 	if err != nil {
 		t.Fatal(err)

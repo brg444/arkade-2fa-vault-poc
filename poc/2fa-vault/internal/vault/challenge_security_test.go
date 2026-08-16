@@ -14,7 +14,7 @@ func TestArkadeChallengeMasksOnlyPacketWitness(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	spend, err := BuildCollaborativeSpend(f.collaborativeParams())
+	spend, err := BuildRoutineSpend(f.routineParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestArkadeChallengeMasksOnlyPacketWitness(t *testing.T) {
 
 func TestArkadeChallengeCommitsToEveryTransactionMutation(t *testing.T) {
 	f := newSecurityVaultFixture(t)
-	baseline, err := BuildCollaborativeSpend(f.collaborativeParams())
+	baseline, err := BuildRoutineSpend(f.routineParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,9 +71,9 @@ func TestArkadeChallengeCommitsToEveryTransactionMutation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			params := f.collaborativeParams()
+			params := f.routineParams()
 			tc.mutate(&params)
-			mutated, err := BuildCollaborativeSpend(params)
+			mutated, err := BuildRoutineSpend(params)
 			if err != nil {
 				t.Fatalf("build mutated spend: %v", err)
 			}
@@ -88,7 +88,7 @@ func TestCollaborativeBuilderCommitsCanonicalPrevoutAndPacket(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	spend, err := BuildCollaborativeSpend(f.collaborativeParams())
+	spend, err := BuildRoutineSpend(f.routineParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,9 +118,9 @@ func TestCollaborativeBuilderRejectsPrevTxThatDoesNotAuthenticateOutpoint(t *tes
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	params := f.collaborativeParams()
+	params := f.routineParams()
 	params.PrevOutPoint.Hash = chainhash.Hash{1}
-	if _, err := BuildCollaborativeSpend(params); err == nil {
+	if _, err := BuildRoutineSpend(params); err == nil {
 		t.Fatal("builder accepted PrevTx whose txid does not match PrevOutPoint.Hash")
 	}
 }

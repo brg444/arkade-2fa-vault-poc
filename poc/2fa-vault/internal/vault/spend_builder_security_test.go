@@ -17,11 +17,11 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-func TestOwnerSpendUsesOwnerLeafAndReturnsCanonicalChange(t *testing.T) {
+func TestAdminSpendUsesOwnerLeafAndReturnsCanonicalChange(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	packet, err := OwnerSpend(
+	packet, err := AdminSpend(
 		f.operational, f.prevTx, f.prevOutPoint, f.recipientPK,
 		securityRecipientSats, securityFeeSats, 0,
 	)
@@ -39,7 +39,7 @@ func TestOwnerSpendUsesOwnerLeafAndReturnsCanonicalChange(t *testing.T) {
 	if change.Value != wantChange {
 		t.Fatalf("change = %d, want %d", change.Value, wantChange)
 	}
-	assertSecurityBuilderLeaf(t, packet, f.operational.Leaves.Owner)
+	assertSecurityBuilderLeaf(t, packet, f.operational.Leaves.Admin)
 	assertSecurityNoEmulatorPacket(t, packet)
 }
 
@@ -48,7 +48,7 @@ func TestOwnerFullSweepCanTargetCanonicalVaultWithoutPhantomChange(t *testing.T)
 
 	f := newSecurityVaultFixture(t)
 	destinationAmount := securityPrevoutValue - securityFeeSats
-	packet, err := OwnerSpend(
+	packet, err := AdminSpend(
 		f.operational, f.prevTx, f.prevOutPoint, f.operational.PkScript,
 		destinationAmount, securityFeeSats, 0,
 	)
@@ -60,7 +60,7 @@ func TestOwnerFullSweepCanTargetCanonicalVaultWithoutPhantomChange(t *testing.T)
 	}
 }
 
-func TestOwnerSpendRejectsUnsafeBoundaries(t *testing.T) {
+func TestAdminSpendRejectsUnsafeBoundaries(t *testing.T) {
 	f := newSecurityVaultFixture(t)
 
 	tests := []struct {
@@ -68,22 +68,22 @@ func TestOwnerSpendRejectsUnsafeBoundaries(t *testing.T) {
 		call func() (*psbt.Packet, error)
 	}{
 		{name: "outputs exceed input", call: func() (*psbt.Packet, error) {
-			return OwnerSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, securityPrevoutValue, 1, 0)
+			return AdminSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, securityPrevoutValue, 1, 0)
 		}},
 		{name: "negative fee", call: func() (*psbt.Packet, error) {
-			return OwnerSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, securityRecipientSats, -1, 0)
+			return AdminSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, securityRecipientSats, -1, 0)
 		}},
 		{name: "dust destination", call: func() (*psbt.Packet, error) {
-			return OwnerSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, fixture.DustSats-1, securityFeeSats, 0)
+			return AdminSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, fixture.DustSats-1, securityFeeSats, 0)
 		}},
 		{name: "dust change", call: func() (*psbt.Packet, error) {
 			amount := securityPrevoutValue - securityFeeSats - (fixture.DustSats - 1)
-			return OwnerSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, amount, securityFeeSats, 0)
+			return AdminSpend(f.operational, f.prevTx, f.prevOutPoint, f.recipientPK, amount, securityFeeSats, 0)
 		}},
 		{name: "outpoint txid mismatch", call: func() (*psbt.Packet, error) {
 			op := f.prevOutPoint
 			op.Hash = chainhash.Hash{1}
-			return OwnerSpend(f.operational, f.prevTx, op, f.recipientPK, securityRecipientSats, securityFeeSats, 0)
+			return AdminSpend(f.operational, f.prevTx, op, f.recipientPK, securityRecipientSats, securityFeeSats, 0)
 		}},
 		{name: "outpoint index", call: func() (*psbt.Packet, error) {
 			op := f.prevOutPoint
@@ -168,25 +168,25 @@ func TestRecoverySpendRejectsUnsafeBoundaries(t *testing.T) {
 func TestVaultSpendBuildersRejectInt64OverflowAndNonBitcoinValues(t *testing.T) {
 	f := newSecurityVaultFixture(t)
 
-	t.Run("collaborative recipient is not native segwit", func(t *testing.T) {
-		params := f.collaborativeParams()
+	t.Run("routine recipient is not native segwit", func(t *testing.T) {
+		params := f.routineParams()
 		params.RecipientScript = []byte{txscript.OP_TRUE}
-		if _, err := BuildCollaborativeSpend(params); err == nil {
-			t.Fatal("collaborative builder accepted a non-segwit recipient")
+		if _, err := BuildRoutineSpend(params); err == nil {
+			t.Fatal("routine builder accepted a non-segwit recipient")
 		}
 	})
 
-	t.Run("collaborative amount plus fee overflow", func(t *testing.T) {
-		params := f.collaborativeParams()
+	t.Run("routine amount plus fee overflow", func(t *testing.T) {
+		params := f.routineParams()
 		params.RecipientAmount = math.MaxInt64
 		params.Fee = math.MaxInt64
-		if _, err := BuildCollaborativeSpend(params); err == nil {
-			t.Fatal("collaborative builder accepted amounts whose subtraction wraps int64")
+		if _, err := BuildRoutineSpend(params); err == nil {
+			t.Fatal("routine builder accepted amounts whose subtraction wraps int64")
 		}
 	})
 
 	t.Run("owner amount plus fee overflow", func(t *testing.T) {
-		if _, err := OwnerSpend(
+		if _, err := AdminSpend(
 			f.operational, f.prevTx, f.prevOutPoint, f.recipientPK,
 			math.MaxInt64, math.MaxInt64, 0,
 		); err == nil {
@@ -199,18 +199,18 @@ func TestVaultSpendBuildersRejectInt64OverflowAndNonBitcoinValues(t *testing.T) 
 		call func(prev *wire.MsgTx, op wire.OutPoint) error
 	}{
 		{
-			name: "collaborative prevout exceeds MAX_MONEY",
+			name: "routine prevout exceeds MAX_MONEY",
 			call: func(prev *wire.MsgTx, op wire.OutPoint) error {
-				params := f.collaborativeParams()
+				params := f.routineParams()
 				params.PrevTx, params.PrevOutPoint = prev, op
-				_, err := BuildCollaborativeSpend(params)
+				_, err := BuildRoutineSpend(params)
 				return err
 			},
 		},
 		{
 			name: "owner prevout exceeds MAX_MONEY",
 			call: func(prev *wire.MsgTx, op wire.OutPoint) error {
-				_, err := OwnerSpend(
+				_, err := AdminSpend(
 					f.operational, prev, op, f.recipientPK,
 					securityRecipientSats, securityFeeSats, 0,
 				)
@@ -264,10 +264,10 @@ func assertSecurityNoEmulatorPacket(t *testing.T, packet *psbt.Packet) {
 func callOwnerWithoutPanic(v *Built, prev *wire.MsgTx, op wire.OutPoint, dest []byte, amount, fee int64) (packet *psbt.Packet, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("OwnerSpend panicked on untrusted outpoint: %v", recovered)
+			err = fmt.Errorf("AdminSpend panicked on untrusted outpoint: %v", recovered)
 		}
 	}()
-	return OwnerSpend(v, prev, op, dest, amount, fee, 0)
+	return AdminSpend(v, prev, op, dest, amount, fee, 0)
 }
 
 func callRecoveryWithoutPanic(v *Built, prev *wire.MsgTx, op wire.OutPoint, dest []byte, amount, fee int64) (packet *psbt.Packet, err error) {

@@ -6,13 +6,13 @@ import {
   MAX_MONEY_SATS,
   assertArkadeChallenge,
   assertDirectP256,
-  assertHotPub,
+  assertPhoneRoutineBIP340Pub,
   b64ToBytes,
   bytesToB64,
   bytesToHex,
   encodeEmulatorPacket,
   encodeExtensionScript,
-  hotSignPSBT,
+  phoneRoutineSignPSBT,
   hexToBytes,
   parseExactSats,
   parseExactVout,
@@ -89,6 +89,7 @@ function buildSpend({
   lockTime = 0,
   sequence = 0xffffffff,
   prevAmount = 90000n,
+  includeChange = true,
 } = {}) {
   const prev = fundedPrev(prevAmount);
   const change = prev.getOutput(0).amount - recipientAmount - fee;
@@ -103,7 +104,7 @@ function buildSpend({
     unknown: [[{ type: 222, key: new TextEncoder().encode("prevouttx") }, prev.toBytes()]],
   });
   tx.addOutput({ script: recipientScript, amount: recipientAmount });
-  if (change > 0n) tx.addOutput({ script: vaultScript, amount: change });
+  if (includeChange && change > 0n) tx.addOutput({ script: vaultScript, amount: change });
   tx.addOutput({ script: packetScript(witness), amount: 0n });
   return { prev, tx, b64: bytesToB64(tx.toPSBT()) };
 }
@@ -120,7 +121,7 @@ function intent(built, overrides = {}) {
   };
 }
 
-test("draft validation accepts the reviewed collaborative spend", () => {
+test("draft validation accepts the reviewed routine spend with recursive change", () => {
   const built = buildSpend();
   const parsed = validateDraftPSBT({ draftB64: built.b64, ...intent(built) });
   expect(parsed.recipientAmount).toBe("20000");
@@ -132,13 +133,29 @@ test("draft validation accepts the reviewed collaborative spend", () => {
   expect(parsed.arkadeChallenge).toBe("58a500edd00d9a7c371c280ab2c59b938ad9d15f9905f77831f1feee8fd10b94");
 });
 
-test("draft validation rejects a non-segwit collaborative recipient", () => {
+test("draft validation rejects a non-segwit routine recipient", () => {
   const legacy = hexTo("76a914aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa88ac");
   const built = buildSpend({ recipientScript: legacy });
   expect(() => validateDraftPSBT({
     draftB64: built.b64,
     ...intent(built, { recipientScript: bytesToHex(legacy) }),
   })).toThrow(/native segwit/);
+});
+
+test("routine validation rejects no-change full drain and replacement-descriptor change", () => {
+  const fullDrain = buildSpend({ recipientAmount: 89500n, includeChange: false });
+  expect(() => validateDraftPSBT({
+    draftB64: fullDrain.b64,
+    ...intent(fullDrain, { recipientAmount: 89500 }),
+  })).toThrow(/recursive change/);
+
+  const replacement = buildSpend();
+  const changed = parsePSBT(replacement.b64);
+  changed.outputs[1].script = p2tr(hex32(9));
+  expect(() => validateDraftPSBT({
+    draftB64: bytesToB64(changed.toPSBT()),
+    ...intent(replacement),
+  })).toThrow(/multiple recipient|recursive change/);
 });
 
 test("local Arkade challenge is witness-masked and preflight must match exactly", () => {
@@ -258,22 +275,22 @@ test("inspect rejects non-zero locktime", () => {
   })).toThrow(/locktime must be zero/);
 });
 
-test("inspect rejects non-final collaborative sequence", () => {
+test("inspect rejects non-final routine sequence", () => {
   const draft = buildSpend();
   const bound = buildSpend({ sequence: 0xfffffffe, witness: [directSig] });
   expect(() => validateDraftPSBT({ draftB64: buildSpend({ sequence: 0xfffffffe }).b64, ...intent(draft) }))
-    .toThrow(/collaborative sequence must be final/);
+    .toThrow(/routine sequence must be final/);
   expect(() => validateBoundPSBT({
     draftB64: draft.b64,
     boundB64: bound.b64,
     directSig: bytesToHex(directSig),
     ...intent(draft),
-  })).toThrow(/collaborative sequence must be final/);
+  })).toThrow(/routine sequence must be final/);
 });
 
-test("hot pub mismatch is refused", () => {
-  expect(() => assertHotPub("aa", "bb", "aa")).toThrow(/persisted/);
-  expect(() => assertHotPub("aa", "aa", "cc")).toThrow(/status/);
+test("phoneRoutineSecret pub mismatch is refused", () => {
+  expect(() => assertPhoneRoutineBIP340Pub("aa", "bb", "aa")).toThrow(/persisted/);
+  expect(() => assertPhoneRoutineBIP340Pub("aa", "aa", "cc")).toThrow(/status/);
 });
 
 test("direct P-256 must match derived, local record, and status", () => {
@@ -290,17 +307,17 @@ test("PSBT snapshot preserves unknown prevout field", () => {
   expect(after.inputs[0].unknown).toEqual(before.inputs[0].unknown);
 });
 
-test("hot signing restores the exact unknown PrevoutTxField dropped by scure updateInput", () => {
+test("phoneRoutineSecret signing restores the exact unknown PrevoutTxField dropped by scure updateInput", () => {
   const built = buildSpend();
   const tx = parsePSBT(built.b64);
-  const hot = hex32(2);
-  const hotXOnly = schnorr.getPublicKey(hot);
+  const phoneRoutineSecret = hex32(2);
+  const hotXOnly = schnorr.getPublicKey(phoneRoutineSecret);
   const control = tx.inputs[0].tapLeafScript[0][0];
   const script = Uint8Array.from([0x20, ...hotXOnly, 0xac, 0xc0]);
   tx.inputs[0].tapLeafScript = [[control, script]];
   const unsigned = bytesToB64(tx.toPSBT());
   const before = snapshotPSBT(parsePSBT(unsigned));
-  const signed = parsePSBT(hotSignPSBT(unsigned, hot));
+  const signed = parsePSBT(phoneRoutineSignPSBT(unsigned, phoneRoutineSecret));
   const after = snapshotPSBT(signed);
   expect(after.inputs[0].unknown).toEqual(before.inputs[0].unknown);
   expect(signed.getInput(0).tapScriptSig.length).toBe(1);
@@ -333,23 +350,23 @@ function preimageWitnessV1Msg(tx) {
 function authorizedPair() {
   const built = buildSpend();
   const tx = parsePSBT(built.b64);
-  const hot = hex32(2);
+  const phoneRoutineSecret = hex32(2);
   const prov = hex32(3);
   const arkade = hex32(4);
-  const hotPub = schnorr.getPublicKey(hot);
-  const provPub = schnorr.getPublicKey(prov);
+  const phoneRoutineBip340Pub = schnorr.getPublicKey(phoneRoutineSecret);
+  const vaultCosignerPub = schnorr.getPublicKey(prov);
   const arkadePub = schnorr.getPublicKey(arkade);
   const leafHash = tapLeafHash(tx);
   const msg = preimageWitnessV1Msg(tx);
-  const hotSig = schnorr.sign(msg, hot);
+  const phoneRoutineSig = schnorr.sign(msg, phoneRoutineSecret);
   const provSig = schnorr.sign(msg, prov);
   const arkadeSig = schnorr.sign(msg, arkade);
   tx.updateInput(0, {
-    tapScriptSig: [[{ pubKey: hotPub, leafHash }, hotSig]],
+    tapScriptSig: [[{ pubKey: phoneRoutineBip340Pub, leafHash }, phoneRoutineSig]],
   });
   const submitted = bytesToB64(tx.toPSBT());
   tx.updateInput(0, {
-    tapScriptSig: [[{ pubKey: provPub, leafHash }, provSig]],
+    tapScriptSig: [[{ pubKey: vaultCosignerPub, leafHash }, provSig]],
   }, true);
   tx.updateInput(0, {
     tapScriptSig: [[{ pubKey: arkadePub, leafHash }, arkadeSig]],
@@ -358,14 +375,14 @@ function authorizedPair() {
   return {
     submitted,
     authorized,
-    hotPriv: hot,
-    provPriv: prov,
+    phoneRoutinePriv: phoneRoutineSecret,
+    vaultCosignerPriv: prov,
     arkadePriv: arkade,
-    hotPubHex: bytesToHex(secp256k1.getPublicKey(hot, true)),
-    provPub: bytesToHex(provPub),
+    phoneRoutineBip340PubHex: bytesToHex(secp256k1.getPublicKey(phoneRoutineSecret, true)),
+    vaultCosignerPub: bytesToHex(vaultCosignerPub),
     arkadePub: bytesToHex(arkadePub),
     leafHash,
-    hotPub,
+    phoneRoutineBip340Pub,
   };
 }
 
@@ -381,24 +398,24 @@ function authorizeWith(submitted, signerPriv, leafHash = null, signature = null)
 
 function authorizeWithBoth(
   submitted,
-  providerPriv,
+  vaultCosignerPriv,
   arkadePriv,
-  providerLeafHash = null,
-  providerSignature = null,
+  vaultCosignerLeafHash = null,
+  vaultCosignerSignature = null,
   arkadeLeafHash = null,
   arkadeSignature = null,
 ) {
-  const providerSigned = authorizeWith(submitted, providerPriv, providerLeafHash, providerSignature);
-  return authorizeWith(providerSigned, arkadePriv, arkadeLeafHash, arkadeSignature);
+  const vaultSigned = authorizeWith(submitted, vaultCosignerPriv, vaultCosignerLeafHash, vaultCosignerSignature);
+  return authorizeWith(vaultSigned, arkadePriv, arkadeLeafHash, arkadeSignature);
 }
 
 function validatePair(pair, authorizedB64 = pair.authorized, overrides = {}) {
   return validateAuthorizedPSBT({
     submittedB64: pair.submitted,
     authorizedB64,
-    hotPubHex: pair.hotPubHex,
-    tweakedProviderXOnly: pair.provPub,
-    tweakedArkadeXOnly: pair.arkadePub,
+    phoneRoutineBip340PubHex: pair.phoneRoutineBip340PubHex,
+    tweakedVaultCosignerXOnly: pair.vaultCosignerPub,
+    tweakedArkadeCosignerXOnly: pair.arkadePub,
     ...overrides,
   });
 }
@@ -408,12 +425,12 @@ test("authorized validation accepts exactly two pinned signer additions in eithe
   const verified = validateAuthorizedPSBT({
     submittedB64: pair.submitted,
     authorizedB64: pair.authorized,
-    hotPubHex: pair.hotPubHex,
-    tweakedProviderXOnly: pair.provPub,
-    tweakedArkadeXOnly: pair.arkadePub,
+    phoneRoutineBip340PubHex: pair.phoneRoutineBip340PubHex,
+    tweakedVaultCosignerXOnly: pair.vaultCosignerPub,
+    tweakedArkadeCosignerXOnly: pair.arkadePub,
   });
-  expect(verified.providerPub).toBe(pair.provPub);
-  expect(verified.arkadePub).toBe(pair.arkadePub);
+  expect(verified.vaultCosignerPub).toBe(pair.vaultCosignerPub);
+  expect(verified.arkadeCosignerPub).toBe(pair.arkadePub);
   expect(verified.transactionId).toMatch(/^[0-9a-f]{64}$/);
   const expectedTxid = bytesToHex(Uint8Array.from(sha256(sha256(parsePSBT(pair.authorized).toBytes(true, false)))).reverse());
   expect(verified.transactionId).toBe(expectedTxid);
@@ -423,28 +440,28 @@ test("authorized validation accepts exactly two pinned signer additions in eithe
   expect(validatePair(pair, bytesToB64(reversed.toPSBT())).transactionId).toBe(expectedTxid);
 });
 
-test("authorized validation rejects a response missing either collaborative signer", () => {
+test("authorized validation rejects a response missing either routine cosigner", () => {
   const pair = authorizedPair();
   expect(() => validateAuthorizedPSBT({
     submittedB64: pair.submitted,
-    authorizedB64: authorizeWith(pair.submitted, pair.provPriv),
-    hotPubHex: pair.hotPubHex,
-    tweakedProviderXOnly: pair.provPub,
-    tweakedArkadeXOnly: pair.arkadePub,
-  })).toThrow(/hot, private provider, and public Arkade/);
+    authorizedB64: authorizeWith(pair.submitted, pair.vaultCosignerPriv),
+    phoneRoutineBip340PubHex: pair.phoneRoutineBip340PubHex,
+    tweakedVaultCosignerXOnly: pair.vaultCosignerPub,
+    tweakedArkadeCosignerXOnly: pair.arkadePub,
+  })).toThrow(/PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner/);
   expect(() => validatePair(pair, authorizeWith(pair.submitted, pair.arkadePriv)))
-    .toThrow(/hot, private provider, and public Arkade/);
+    .toThrow(/PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner/);
 });
 
-test("authorized validation rejects forged provider and Arkade emulator signatures", () => {
+test("authorized validation rejects forged VaultCosigner and ArkadeCosigner signatures", () => {
   const pair = authorizedPair();
   const forged = new Uint8Array(64).fill(1);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, null, forged,
-  ))).toThrow(/private provider signature invalid/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, null, forged,
+  ))).toThrow(/VaultCosigner signature invalid/);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, null, null, null, forged,
-  ))).toThrow(/public Arkade emulator signature invalid/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, null, null, null, forged,
+  ))).toThrow(/ArkadeCosigner signature invalid/);
 });
 
 test("authorized validation rejects substituted and duplicate signer roles", () => {
@@ -456,59 +473,59 @@ test("authorized validation rejects substituted and duplicate signer roles", () 
   const duplicate = parsePSBT(pair.authorized);
   const duplicateEntries = duplicate.inputs[0].tapScriptSig;
   const arkadeEntry = duplicateEntries.find(([meta]) => bytesToHex(meta.pubKey) === pair.arkadePub);
-  arkadeEntry[0].pubKey = schnorr.getPublicKey(pair.provPriv);
+  arkadeEntry[0].pubKey = schnorr.getPublicKey(pair.vaultCosignerPriv);
   arkadeEntry[0].leafHash = new Uint8Array(32).fill(0xff);
   expect(() => validatePair(pair, bytesToB64(duplicate.toPSBT())))
     .toThrow(/duplicate or substituted/);
 
-  expect(() => validatePair(pair, pair.authorized, { tweakedArkadeXOnly: pair.provPub }))
+  expect(() => validatePair(pair, pair.authorized, { tweakedArkadeCosignerXOnly: pair.vaultCosignerPub }))
     .toThrow(/keys must be independent/);
 });
 
-test("authorized validation rejects 65-byte hot, provider, and Arkade signatures", () => {
+test("authorized validation rejects 65-byte PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner signatures", () => {
   const pair = authorizedPair();
-  const hot65 = parsePSBT(pair.submitted);
-  const hotEntry = hot65.inputs[0].tapScriptSig[0];
-  hot65.inputs[0].tapScriptSig = [[hotEntry[0], Uint8Array.from([...hotEntry[1], 1])]];
-  const submitted65 = bytesToB64(hot65.toPSBT());
+  const phoneRoutine65 = parsePSBT(pair.submitted);
+  const phoneRoutineEntry = phoneRoutine65.inputs[0].tapScriptSig[0];
+  phoneRoutine65.inputs[0].tapScriptSig = [[phoneRoutineEntry[0], Uint8Array.from([...phoneRoutineEntry[1], 1])]];
+  const submitted65 = bytesToB64(phoneRoutine65.toPSBT());
   expect(() => validateAuthorizedPSBT({
     submittedB64: submitted65,
-    authorizedB64: authorizeWithBoth(submitted65, pair.provPriv, pair.arkadePriv),
-    hotPubHex: pair.hotPubHex,
-    tweakedProviderXOnly: pair.provPub,
-    tweakedArkadeXOnly: pair.arkadePub,
-  })).toThrow(/hot signature must be 64 bytes/);
+    authorizedB64: authorizeWithBoth(submitted65, pair.vaultCosignerPriv, pair.arkadePriv),
+    phoneRoutineBip340PubHex: pair.phoneRoutineBip340PubHex,
+    tweakedVaultCosignerXOnly: pair.vaultCosignerPub,
+    tweakedArkadeCosignerXOnly: pair.arkadePub,
+  })).toThrow(/PhoneRoutineBIP340 signature must be 64 bytes/);
 
-  const providerTx = parsePSBT(pair.submitted);
-  const sig65 = Uint8Array.from([...schnorr.sign(preimageWitnessV1Msg(providerTx), pair.provPriv), 1]);
+  const vaultCosignerTx = parsePSBT(pair.submitted);
+  const sig65 = Uint8Array.from([...schnorr.sign(preimageWitnessV1Msg(vaultCosignerTx), pair.vaultCosignerPriv), 1]);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, null, sig65,
-  ))).toThrow(/private provider signature must be 64 bytes/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, null, sig65,
+  ))).toThrow(/VaultCosigner signature must be 64 bytes/);
 
-  const arkadeSig65 = Uint8Array.from([...schnorr.sign(preimageWitnessV1Msg(providerTx), pair.arkadePriv), 1]);
+  const arkadeSig65 = Uint8Array.from([...schnorr.sign(preimageWitnessV1Msg(vaultCosignerTx), pair.arkadePriv), 1]);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, null, null, null, arkadeSig65,
-  ))).toThrow(/public Arkade emulator signature must be 64 bytes/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, null, null, null, arkadeSig65,
+  ))).toThrow(/ArkadeCosigner signature must be 64 bytes/);
 });
 
 test("authorized validation rejects either signer on the wrong leaf", () => {
   const pair = authorizedPair();
   const wrongLeaf = new Uint8Array(32).fill(7);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, wrongLeaf,
-  ))).toThrow(/private provider signature leaf/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, wrongLeaf,
+  ))).toThrow(/VaultCosigner signature leaf/);
   expect(() => validatePair(pair, authorizeWithBoth(
-    pair.submitted, pair.provPriv, pair.arkadePriv, null, null, wrongLeaf,
-  ))).toThrow(/public Arkade emulator signature leaf/);
+    pair.submitted, pair.vaultCosignerPriv, pair.arkadePriv, null, null, wrongLeaf,
+  ))).toThrow(/ArkadeCosigner signature leaf/);
 });
 
-test("authorized validation rejects mutation of the existing hot tuple", () => {
+test("authorized validation rejects mutation of the existing PhoneRoutineBIP340 tuple", () => {
   const pair = authorizedPair();
   const tx = parsePSBT(pair.authorized);
   const [meta, sig] = tx.inputs[0].tapScriptSig[0];
   tx.inputs[0].tapScriptSig[0] = [meta, Uint8Array.from(sig.map((b, i) => i === 0 ? b ^ 1 : b))];
   expect(() => validatePair(pair, bytesToB64(tx.toPSBT())))
-    .toThrow(/mutated the hot signature|collaborative signature delta/);
+    .toThrow(/mutated the PhoneRoutineBIP340 signature|routine signature delta/);
 });
 
 test("authorized validation rejects unrelated input signature metadata", () => {

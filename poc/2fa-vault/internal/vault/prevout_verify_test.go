@@ -14,7 +14,7 @@ func TestRequireVerifiedPrevoutFailClosed(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	spend, err := BuildCollaborativeSpend(f.collaborativeParams())
+	spend, err := BuildRoutineSpend(f.routineParams())
 	if err != nil {
 		t.Fatal(err)
 	}

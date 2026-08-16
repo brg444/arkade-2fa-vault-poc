@@ -22,7 +22,7 @@ func TestBrowserArkadeChallengeParityVector(t *testing.T) {
 	if len(packet.Inputs) != 1 || len(packet.Inputs[0].TaprootLeafScript) != 1 {
 		t.Fatal("parity PSBT does not contain one tap leaf")
 	}
-	built := &Built{Leaves: Leaves{Collaborative: &Leaf{
+	built := &Built{Leaves: Leaves{Routine: &Leaf{
 		Script: packet.Inputs[0].TaprootLeafScript[0].Script,
 	}}}
 	digest, err := Challenge(packet, built)

@@ -61,12 +61,12 @@ func TestLocalSignerRejectsCapturedAssertionOnADifferentTransaction(t *testing.T
 	}
 	hotSig, err := vault.SignLeaf(
 		spendB.UnsignedTx, spendB.Inputs[0].WitnessUtxo,
-		e.service.Operational.Leaves.Collaborative.Script, e.hotPriv,
+		e.service.Operational.Leaves.Routine.Script, e.hotPriv,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vault.AddPartialSig(spendB, e.hotPriv.PubKey(), e.service.Operational.Leaves.Collaborative.Hash, hotSig)
+	vault.AddPartialSig(spendB, e.hotPriv.PubKey(), e.service.Operational.Leaves.Routine.Hash, hotSig)
 
 	if signed, err := (LocalSigner{Priv: e.providerPriv}).Sign(context.Background(), spendB); err == nil {
 		t.Fatalf("LocalSigner released a provider signature for authorization material captured from another transaction: provider_signatures=%d", len(signed.Inputs[0].TaprootScriptSpendSig))

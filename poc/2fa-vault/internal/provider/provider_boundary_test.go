@@ -34,21 +34,23 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// boundaryEnv keeps every key explicit. In particular, offlinePriv never enters
-// Service: only its public key is part of the provider's vault descriptor.
+// boundaryEnv keeps every key explicit. In particular, externalOwnerPriv and
+// recoveryPriv never enter Service: only their public keys are part of the
+// vault descriptor.
 type boundaryEnv struct {
-	service        *Service
-	ledger         *policy.Ledger
-	dbPath         string
-	hotPriv        *btcec.PrivateKey
-	offlinePriv    *btcec.PrivateKey
-	providerPriv   *btcec.PrivateKey
-	arkadePriv     *btcec.PrivateKey
-	credentialID   []byte
-	passkeyPriv    *ecdsa.PrivateKey
-	directPriv     *ecdsa.PrivateKey
-	countingSigner *boundaryCountingSigner
-	arkadeSigner   *boundaryCountingSigner
+	service           *Service
+	ledger            *policy.Ledger
+	dbPath            string
+	hotPriv           *btcec.PrivateKey
+	externalOwnerPriv *btcec.PrivateKey
+	recoveryPriv      *btcec.PrivateKey
+	providerPriv      *btcec.PrivateKey
+	arkadePriv        *btcec.PrivateKey
+	credentialID      []byte
+	passkeyPriv       *ecdsa.PrivateKey
+	directPriv        *ecdsa.PrivateKey
+	countingSigner    *boundaryCountingSigner
+	arkadeSigner      *boundaryCountingSigner
 }
 
 type boundaryCountingSigner struct {
@@ -133,6 +135,10 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	externalOwner, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	type candidate struct {
 		id      []byte
@@ -162,12 +168,13 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 			passkey: passkey,
 			direct:  direct,
 			svc: &Service{
-				Ledger:      ledgers[i],
-				Offline:     offline.PubKey(),
-				ProviderPub: providerKey.PubKey(),
-				ArkadePub:   arkadeKey.PubKey(),
-				Signer:      LocalSigner{Priv: providerKey},
-				ArkadeSigner: LocalSigner{
+				Ledger:              ledgers[i],
+				ExternalOwnerWallet: externalOwner.PubKey(),
+				RecoveryKey:         offline.PubKey(),
+				VaultCosignerPub:    providerKey.PubKey(),
+				ArkadeCosignerPub:   arkadeKey.PubKey(),
+				VaultSigner:         LocalSigner{Priv: providerKey},
+				ArkadeCosignerSigner: LocalSigner{
 					Priv: arkadeKey,
 				},
 			},
@@ -183,10 +190,10 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 			<-start
 			c := &candidates[i]
 			c.err = c.svc.Register(RegisterRequest{
-				CredentialID: hex.EncodeToString(c.id),
-				WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(c.passkey)),
-				DirectP256:   hex.EncodeToString(webauthn.CompressedP256(c.direct)),
-				HotPub:       hex.EncodeToString(c.hot.PubKey().SerializeCompressed()),
+				CredentialID:          hex.EncodeToString(c.id),
+				WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(c.passkey)),
+				PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(c.direct)),
+				PhoneRoutineBIP340Pub: hex.EncodeToString(c.hot.PubKey().SerializeCompressed()),
 			})
 		}(i)
 	}
@@ -205,7 +212,7 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 		t.Fatalf("concurrent registration successes: got %d, want 1 (errors: %v, %v)", successes, candidates[0].err, candidates[1].err)
 	}
 	loser := 1 - winner
-	if candidates[loser].svc.Hot != nil || candidates[loser].svc.Operational != nil || candidates[loser].svc.Savings != nil {
+	if candidates[loser].svc.PhoneRoutineBIP340 != nil || candidates[loser].svc.Operational != nil || candidates[loser].svc.Savings != nil {
 		t.Fatal("losing registration leaked speculative hot key or vault trees into service memory")
 	}
 
@@ -219,11 +226,11 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 	want := candidates[winner]
 	if !bytes.Equal(persisted.ID, want.id) ||
 		!bytes.Equal(persisted.WebAuthnP256, webauthn.CompressedP256(want.passkey)) ||
-		!bytes.Equal(persisted.DirectP256, webauthn.CompressedP256(want.direct)) ||
-		!bytes.Equal(persisted.Hot, want.hot.PubKey().SerializeCompressed()) {
+		!bytes.Equal(persisted.PhoneDirectP256, webauthn.CompressedP256(want.direct)) ||
+		!bytes.Equal(persisted.PhoneRoutineBIP340, want.hot.PubKey().SerializeCompressed()) {
 		t.Fatal("persisted credential fields do not all belong to the registration winner")
 	}
-	if want.svc.Operational == nil || want.svc.Savings == nil || want.svc.Hot == nil {
+	if want.svc.Operational == nil || want.svc.Savings == nil || want.svc.PhoneRoutineBIP340 == nil {
 		t.Fatal("winning service did not publish its enrolled vault trees")
 	}
 
@@ -235,19 +242,20 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 	}
 	t.Cleanup(func() { _ = restartLedger.Close() })
 	restarted := &Service{
-		Ledger:      restartLedger,
-		Offline:     offline.PubKey(),
-		ProviderPub: providerKey.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: providerKey},
-		ArkadeSigner: LocalSigner{
+		Ledger:              restartLedger,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    providerKey.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: providerKey},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
 	if err := restarted.LoadVaults(); err != nil {
 		t.Fatalf("load persisted vaults: %v", err)
 	}
-	if restarted.Hot == nil || !bytes.Equal(restarted.Hot.SerializeCompressed(), persisted.Hot) {
+	if restarted.PhoneRoutineBIP340 == nil || !bytes.Equal(restarted.PhoneRoutineBIP340.SerializeCompressed(), persisted.PhoneRoutineBIP340) {
 		t.Fatal("restart did not restore the persisted browser hot public key")
 	}
 	if restarted.Operational.Address != want.svc.Operational.Address ||
@@ -282,6 +290,10 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	externalOwner, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	passkey, err := webauthn.NewP256()
 	if err != nil {
 		t.Fatal(err)
@@ -291,12 +303,13 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := &Service{
-		Ledger:      ledger,
-		Offline:     offline.PubKey(),
-		ProviderPub: providerKey.PubKey(),
-		ArkadePub:   arkadeKey.PubKey(),
-		Signer:      LocalSigner{Priv: providerKey},
-		ArkadeSigner: LocalSigner{
+		Ledger:              ledger,
+		ExternalOwnerWallet: externalOwner.PubKey(),
+		RecoveryKey:         offline.PubKey(),
+		VaultCosignerPub:    providerKey.PubKey(),
+		ArkadeCosignerPub:   arkadeKey.PubKey(),
+		VaultSigner:         LocalSigner{Priv: providerKey},
+		ArkadeCosignerSigner: LocalSigner{
 			Priv: arkadeKey,
 		},
 	}
@@ -341,10 +354,10 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 	}
 	runtime.Gosched()
 	err = svc.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("endpoint-race-credential")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("endpoint-race-credential")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	})
 	close(stop)
 	wg.Wait()
@@ -360,7 +373,11 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	offlinePriv, err := btcec.NewPrivateKey()
+	externalOwnerPriv, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryPriv, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,37 +416,39 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 		delegate: LocalSigner{Priv: arkadePriv},
 	}
 	service := &Service{
-		Ledger:       ledger,
-		Offline:      offlinePriv.PubKey(),
-		ProviderPub:  providerPriv.PubKey(),
-		ArkadePub:    arkadePriv.PubKey(),
-		Signer:       counting,
-		ArkadeSigner: arkadeCounting,
-		SignTimeout:  250 * time.Millisecond,
+		Ledger:               ledger,
+		ExternalOwnerWallet:  externalOwnerPriv.PubKey(),
+		RecoveryKey:          recoveryPriv.PubKey(),
+		VaultCosignerPub:     providerPriv.PubKey(),
+		ArkadeCosignerPub:    arkadePriv.PubKey(),
+		VaultSigner:          counting,
+		ArkadeCosignerSigner: arkadeCounting,
+		SignTimeout:          250 * time.Millisecond,
 	}
 	credentialID := []byte("auditable-poc-credential")
 	if err := service.Register(RegisterRequest{
-		CredentialID: hex.EncodeToString(credentialID),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkeyPriv)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(directPriv)),
-		HotPub:       hex.EncodeToString(hotPriv.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString(credentialID),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkeyPriv)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(directPriv)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hotPriv.PubKey().SerializeCompressed()),
 	}); err != nil {
 		t.Fatalf("register fixture credential: %v", err)
 	}
 
 	return &boundaryEnv{
-		service:        service,
-		ledger:         ledger,
-		dbPath:         dbPath,
-		hotPriv:        hotPriv,
-		offlinePriv:    offlinePriv,
-		providerPriv:   providerPriv,
-		arkadePriv:     arkadePriv,
-		credentialID:   credentialID,
-		passkeyPriv:    passkeyPriv,
-		directPriv:     directPriv,
-		countingSigner: counting,
-		arkadeSigner:   arkadeCounting,
+		service:           service,
+		ledger:            ledger,
+		dbPath:            dbPath,
+		hotPriv:           hotPriv,
+		externalOwnerPriv: externalOwnerPriv,
+		recoveryPriv:      recoveryPriv,
+		providerPriv:      providerPriv,
+		arkadePriv:        arkadePriv,
+		credentialID:      credentialID,
+		passkeyPriv:       passkeyPriv,
+		directPriv:        directPriv,
+		countingSigner:    counting,
+		arkadeSigner:      arkadeCounting,
 	}
 }
 
@@ -454,7 +473,7 @@ func (e *boundaryEnv) canonicalDraft(t *testing.T, inputValue, recipient, fee in
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, err := vault.BuildCollaborativeSpend(vault.SpendParams{
+	built, err := vault.BuildRoutineSpend(vault.SpendParams{
 		Vault:           e.service.Operational,
 		PrevTx:          prevTx,
 		PrevOutPoint:    outpoint,
@@ -565,7 +584,7 @@ func (e *boundaryEnv) requestFor(
 
 	prev := ptx.Inputs[0].WitnessUtxo
 	hotSig, err := vault.SignLeaf(
-		ptx.UnsignedTx, prev, e.service.Operational.Leaves.Collaborative.Script, e.hotPriv,
+		ptx.UnsignedTx, prev, e.service.Operational.Leaves.Routine.Script, e.hotPriv,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -573,7 +592,7 @@ func (e *boundaryEnv) requestFor(
 	vault.AddPartialSig(
 		ptx,
 		e.hotPriv.PubKey(),
-		e.service.Operational.Leaves.Collaborative.Hash,
+		e.service.Operational.Leaves.Routine.Hash,
 		hotSig,
 	)
 	encoded, err := ptx.B64Encode()
@@ -610,14 +629,14 @@ func TestProviderBoundaryHappyPathAndExactRetry(t *testing.T) {
 
 	// A retry may carry a fresh off-chain WebAuthn assertion, but must name the
 	// exact originally reserved PSBT. The Arkade sighash masks the packet
-	// witness, so a fresh DirectP256 signature could otherwise share a digest
+	// witness, so a fresh PhoneDirectP256 signature could otherwise share a digest
 	// while naming different transaction bytes and txid.
 	retryRequest, retryDigest := e.requestFor(t, draft, e.passkeyPriv)
 	if !bytes.Equal(firstDigest, retryDigest) {
 		t.Fatalf("masked digest changed across assertion retry: %x != %x", firstDigest, retryDigest)
 	}
 	if _, _, err := e.service.Authorize(context.Background(), retryRequest); err == nil || !strings.Contains(err.Error(), "different exact request") {
-		t.Fatalf("same challenge with fresh DirectP256/hot bytes was not rejected: %v", err)
+		t.Fatalf("same challenge with fresh PhoneDirectP256/hot bytes was not rejected: %v", err)
 	}
 	if got := e.countingSigner.callCount(); got != 1 {
 		t.Fatalf("changed same-digest request reached private signer: %d calls", got)
@@ -997,7 +1016,7 @@ func TestProviderBoundaryClassifyCanonicalShape(t *testing.T) {
 		{
 			name: "wrong collaborative leaf",
 			mutate: func(p *psbt.Packet) {
-				p.Inputs[0].TaprootLeafScript[0].Script = append([]byte(nil), e.service.Operational.Leaves.Owner.Script...)
+				p.Inputs[0].TaprootLeafScript[0].Script = append([]byte(nil), e.service.Operational.Leaves.Admin.Script...)
 			},
 		},
 		{
@@ -1130,9 +1149,9 @@ func TestProviderBoundaryRejectsValuesOutsideBitcoinMoneyRange(t *testing.T) {
 func TestEstimatedVBytesMatchesSerializedFinalWitness(t *testing.T) {
 	e := newBoundaryEnv(t)
 	base := e.canonicalDraft(t, 90_000, 20_000, 500)
-	leaf := e.service.Operational.Leaves.Collaborative
-	if got := estimatedWitnessBytes(e.service.Operational); got != int(vault.CollaborativeWitnessBytes) {
-		t.Fatalf("collaborative witness size = %d, Arkade policy commits to %d", got, vault.CollaborativeWitnessBytes)
+	leaf := e.service.Operational.Leaves.Routine
+	if got := estimatedWitnessBytes(e.service.Operational); got != int(vault.RoutineWitnessBytes) {
+		t.Fatalf("collaborative witness size = %d, Arkade policy commits to %d", got, vault.RoutineWitnessBytes)
 	}
 
 	// Vary stripped-size residue modulo four. A missing witness-stack-count byte
@@ -1238,7 +1257,7 @@ func TestProviderBoundaryFeeCeilingsRejectRateAndAbsoluteLimits(t *testing.T) {
 	}
 
 	// The native-Segwit recipient constraint deliberately rules out inflating
-	// stripped size with an arbitrary spendable script. Bind a real DirectP256
+	// stripped size with an arbitrary spendable script. Bind a real PhoneDirectP256
 	// signature and prove that the absolute cap is still checked before any
 	// signer call; this candidate may also exceed the feerate cap.
 	absOnly := boundaryClonePSBT(t, base)
@@ -1250,14 +1269,14 @@ func TestProviderBoundaryFeeCeilingsRejectRateAndAbsoluteLimits(t *testing.T) {
 	}
 	directSig, err := webauthn.SignDigestLowS(e.directPriv, challenge)
 	if err != nil {
-		t.Fatalf("sign DirectP256 challenge: %v", err)
+		t.Fatalf("sign PhoneDirectP256 challenge: %v", err)
 	}
 	if err := vault.SetPacketWitness(absOnly.UnsignedTx, wire.TxWitness{directSig}); err != nil {
-		t.Fatalf("set DirectP256 packet witness: %v", err)
+		t.Fatalf("set PhoneDirectP256 packet witness: %v", err)
 	}
 	pkt, err := arkade.FindEmulatorPacket(absOnly.UnsignedTx)
 	if err != nil || len(pkt) != 1 || len(pkt[0].Witness) != 1 || len(pkt[0].Witness[0]) != 64 {
-		t.Fatalf("absolute-fee fixture packet is not one DirectP256 signature: %#v err=%v", pkt, err)
+		t.Fatalf("absolute-fee fixture packet is not one PhoneDirectP256 signature: %#v err=%v", pkt, err)
 	}
 	absCl, err := classify(absOnly, e.service.Operational)
 	if err != nil {
@@ -1422,7 +1441,7 @@ func TestRemoteSignerRejectsUnsignedTransactionSubstitution(t *testing.T) {
 	}
 	signer := &RemoteSigner{
 		Client:        transport,
-		ExpectedXOnly: schnorr.SerializePubKey(e.service.Operational.TweakedProvider),
+		ExpectedXOnly: schnorr.SerializePubKey(e.service.Operational.TweakedVaultCosigner),
 	}
 	if signed, err := signer.Sign(context.Background(), original); err == nil {
 		t.Fatalf("remote signer accepted substituted unsigned transaction: %v", signed.UnsignedTx.TxHash())
@@ -1453,7 +1472,7 @@ func boundaryProviderSig(t *testing.T, ptx *psbt.Packet, expected []byte) *psbt.
 
 func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 	e := newBoundaryEnv(t)
-	expected := schnorr.SerializePubKey(e.service.Operational.TweakedProvider)
+	expected := schnorr.SerializePubKey(e.service.Operational.TweakedVaultCosigner)
 
 	t.Run("exactly one valid expected signature", func(t *testing.T) {
 		original := e.clientFinalPacket(t)
@@ -1770,7 +1789,7 @@ func TestRemoteSignerMalformedResponseIsAnErrorNotAPanic(t *testing.T) {
 	if _, err := extractVerifiedSignerSig(
 		original,
 		malformed,
-		schnorr.SerializePubKey(e.service.Operational.TweakedProvider),
+		schnorr.SerializePubKey(e.service.Operational.TweakedVaultCosigner),
 	); err == nil {
 		t.Fatal("malformed emulator response was accepted")
 	}

@@ -18,6 +18,7 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
+	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
 	providerKey, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
@@ -27,14 +28,14 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 	const token = "correct horse battery staple enrollment token"
 	digest := sha256.Sum256([]byte(token))
 	svc := &Service{
-		Ledger: ledger, Offline: offline.PubKey(), ProviderPub: providerKey.PubKey(), ArkadePub: arkadeKey.PubKey(),
-		Signer: LocalSigner{Priv: providerKey}, ArkadeSigner: LocalSigner{Priv: arkadeKey}, EnrollmentTokenHash: digest[:],
+		Ledger: ledger, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		VaultSigner: LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey}, EnrollmentTokenHash: digest[:],
 	}
 	req := RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("credential-a")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("credential-a")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}
 	for _, attempt := range []string{"", "wrong and must never be reflected"} {
 		err := svc.RegisterWithBootstrap(req, attempt)
@@ -63,7 +64,7 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 
 	otherHot, _ := btcec.NewPrivateKey()
 	forged := req
-	forged.HotPub = hex.EncodeToString(otherHot.PubKey().SerializeCompressed())
+	forged.PhoneRoutineBIP340Pub = hex.EncodeToString(otherHot.PubKey().SerializeCompressed())
 	if err := svc.RegisterWithBootstrap(forged, token); err == nil || !strings.Contains(err.Error(), "enrollment locked") {
 		t.Fatalf("consumed bootstrap token replaced enrollment: %v", err)
 	}

@@ -1,6 +1,6 @@
 export function auditLiveRequests(requests, challenge) {
   const expected = new Map([
-    ["/v1/register", ["credentialId", "directP256", "hotPub", "webauthnP256"]],
+    ["/v1/register", ["credentialId", "phoneDirectP256", "phoneRoutineBip340Pub", "webauthnP256"]],
     ["/v1/demo/fund", ["amount"]],
     ["/v1/draft", ["fee", "prevTxHex", "recipientAmount", "recipientScript", "vout"]],
     ["/v1/preflight", ["psbt"]],
@@ -30,7 +30,7 @@ export function auditLiveRequests(requests, challenge) {
     throw new Error("publish was not bound to the reviewed Arkade challenge");
   }
   const forbidden = new Set([
-    "prf", "scalar", "privatekey", "privatekeyhex", "hotprivate",
+    "prf", "scalar", "privatekey", "privatekeyhex", "phoneroutineprivate", "externalownerprivate",
     "kek", "ciphertext", "nonce", "rawtx", "rawtransaction",
   ]);
   const walk = (value) => {

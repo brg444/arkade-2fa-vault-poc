@@ -27,34 +27,35 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// Service is the trusted provider authorization boundary.
+// Service is the trusted VaultCosigner authorization boundary.
 type Service struct {
 	Ledger     *policy.Ledger
 	Deployment deployment.Config
 	// CredentialIntegrityKey authenticates the immutable descriptor stored in
-	// the authoritative ledger. Production obtains this key from the provider
+	// the authoritative ledger. Production obtains this key from the VaultCosigner
 	// scalar through a domain-separated KDF; regtest uses a public deterministic
 	// test key so existing demo deployments retain corruption detection.
 	CredentialIntegrityKey []byte
 	// EnrollmentTokenHash gates the first and only enrollment. Once a
 	// credential exists, the token is never consulted again; only the exact
 	// persisted tuple remains idempotent.
-	EnrollmentTokenHash   []byte
-	Hot                   *btcec.PublicKey
-	Offline               *btcec.PublicKey
-	ProviderPub           *btcec.PublicKey
-	DeprecatedProvider    []*btcec.PublicKey
-	ArkadePub             *btcec.PublicKey
-	DeprecatedArkade      []*btcec.PublicKey
-	ArkadeEmulatorOrigin  string
-	ArkadeEmulatorVersion string
-	Operational           *vault.Built
-	Savings               *vault.Built
-	// Signer is the private Provider-key stage. ArkadeSigner is the independent
-	// public Emulator stage and must never hold the private Provider key.
-	Signer       Signer
-	ArkadeSigner Signer
-	SignTimeout  time.Duration
+	EnrollmentTokenHash       []byte
+	PhoneRoutineBIP340        *btcec.PublicKey
+	ExternalOwnerWallet       *btcec.PublicKey
+	RecoveryKey               *btcec.PublicKey
+	VaultCosignerPub          *btcec.PublicKey
+	DeprecatedVaultCosigners  []*btcec.PublicKey
+	ArkadeCosignerPub         *btcec.PublicKey
+	DeprecatedArkadeCosigners []*btcec.PublicKey
+	ArkadeCosignerOrigin      string
+	ArkadeCosignerVersion     string
+	Operational               *vault.Built
+	Savings                   *vault.Built
+	// VaultSigner is the private VaultCosigner-key stage. ArkadeCosignerSigner
+	// is the independent public stage and must never hold the VaultCosigner key.
+	VaultSigner          Signer
+	ArkadeCosignerSigner Signer
+	SignTimeout          time.Duration
 	// MaxConcurrentVerifications bounds the CPU-heavy WebAuthn, P-256 and
 	// Schnorr verification stage. Zero uses the conservative default.
 	MaxConcurrentVerifications int
@@ -74,23 +75,25 @@ var ErrVerificationBusy = errors.New("crypto verification capacity exhausted")
 // enrolledSnapshot is one immutable published enrollment. Register and
 // LoadVaults store a single pointer; readers load that pointer only.
 type enrolledSnapshot struct {
-	Hot          *btcec.PublicKey
-	Offline      *btcec.PublicKey
-	ProviderBase *btcec.PublicKey
-	ArkadeBase   *btcec.PublicKey
-	Operational  *vault.Built
-	Savings      *vault.Built
+	PhoneRoutineBIP340  *btcec.PublicKey
+	ExternalOwnerWallet *btcec.PublicKey
+	RecoveryKey         *btcec.PublicKey
+	VaultCosignerBase   *btcec.PublicKey
+	ArkadeCosignerBase  *btcec.PublicKey
+	Operational         *vault.Built
+	Savings             *vault.Built
 }
 
 // RegisterRequest is the enrollment payload. All byte fields are hex.
 // A second call is accepted only when it matches the already-enrolled
-// credential ID, WebAuthn P-256, DirectP256, and hot pub, and this
-// process's offline/provider/policy still rebuild the stored descriptor.
+// credential ID, WebAuthn P-256, PhoneDirectP256, and PhoneRoutineBIP340,
+// and this process's pinned deployment keys/policy still rebuild the stored
+// descriptor.
 type RegisterRequest struct {
-	CredentialID string `json:"credentialId"`
-	WebAuthnP256 string `json:"webauthnP256"`
-	DirectP256   string `json:"directP256"`
-	HotPub       string `json:"hotPub"`
+	CredentialID          string `json:"credentialId"`
+	WebAuthnP256          string `json:"webauthnP256"`
+	PhoneDirectP256       string `json:"phoneDirectP256"`
+	PhoneRoutineBIP340Pub string `json:"phoneRoutineBip340Pub"`
 }
 
 func (s *Service) Register(req RegisterRequest) error {
@@ -106,7 +109,7 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		return fmt.Errorf("deployment: %w", err)
 	}
 
-	id, webauthnP256, directP256, hot, err := parseRegisterRequest(req, s.Hot)
+	id, webauthnP256, phoneDirectP256, phoneRoutine, err := parseRegisterRequest(req, s.PhoneRoutineBIP340)
 	if err != nil {
 		return err
 	}
@@ -116,7 +119,7 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		return err
 	}
 	if existing != nil {
-		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, directP256, hot); err != nil {
+		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, phoneDirectP256, phoneRoutine); err != nil {
 			return err
 		}
 		s.clearEnrollmentTokenHash()
@@ -132,14 +135,15 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		}
 	}
 
-	op, sv, err := s.makeTrees(hot, directP256)
+	op, sv, err := s.makeTrees(phoneRoutine, phoneDirectP256)
 	if err != nil {
 		return err
 	}
 	descriptor := descriptorFromTrees(
-		s.runtimeConfig(), id, webauthnP256, directP256,
-		hot, s.Offline, s.ProviderPub, s.ArkadePub,
-		s.ArkadeEmulatorOrigin, s.ArkadeEmulatorVersion, op, sv,
+		s.runtimeConfig(), id, webauthnP256, phoneDirectP256,
+		phoneRoutine, s.ExternalOwnerWallet, s.RecoveryKey,
+		s.VaultCosignerPub, s.ArkadeCosignerPub,
+		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
 	)
 	if err := s.sealCredential(&descriptor); err != nil {
 		return err
@@ -152,14 +156,14 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		if existing == nil {
 			return err
 		}
-		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, directP256, hot); err != nil {
+		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, phoneDirectP256, phoneRoutine); err != nil {
 			return err
 		}
 		s.clearEnrollmentTokenHash()
 		return nil
 	}
 	s.bindRemoteExpected(op)
-	s.publishEnrollment(hot, op, sv)
+	s.publishEnrollment(phoneRoutine, op, sv)
 	s.clearEnrollmentTokenHash()
 	return nil
 }
@@ -174,15 +178,15 @@ func (s *Service) clearEnrollmentTokenHash() {
 // acceptPersistedEnrollment succeeds only for the exact user tuple when
 // runtime config matches the stored descriptor and trees rebuilt from that
 // record equal the persisted addresses/scripts/tweaked provider. It never
-// publishes trees derived from this process's speculative Offline/Provider.
-func (s *Service) acceptPersistedEnrollment(existing *policy.Credential, id, webauthnP256, directP256 []byte, hot *btcec.PublicKey) error {
-	if !sameEnrollmentTuple(existing, id, webauthnP256, directP256, hot) {
+// publishes trees derived from this process's speculative RecoveryKey/Provider.
+func (s *Service) acceptPersistedEnrollment(existing *policy.Credential, id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey) error {
+	if !sameEnrollmentTuple(existing, id, webauthnP256, phoneDirectP256, phoneRoutine) {
 		return fmt.Errorf("enrollment locked")
 	}
 	return s.publishStoredEnrollment(existing, false)
 }
 
-func parseRegisterRequest(req RegisterRequest, fallbackHot *btcec.PublicKey) (id, webauthnP256, directP256 []byte, hot *btcec.PublicKey, err error) {
+func parseRegisterRequest(req RegisterRequest, fallbackPhoneRoutine *btcec.PublicKey) (id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey, err error) {
 	id, err = decodeHex(req.CredentialID)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("credentialId: %w", err)
@@ -194,29 +198,29 @@ func parseRegisterRequest(req RegisterRequest, fallbackHot *btcec.PublicKey) (id
 	if _, err = webauthn.ParseCompressedP256(webauthnP256); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("webauthnP256: %w", err)
 	}
-	directP256, err = decodeHex(req.DirectP256)
+	phoneDirectP256, err = decodeHex(req.PhoneDirectP256)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("directP256: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("phoneDirectP256: %w", err)
 	}
-	if _, err = webauthn.ParseCompressedP256(directP256); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("directP256: %w", err)
+	if _, err = webauthn.ParseCompressedP256(phoneDirectP256); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("phoneDirectP256: %w", err)
 	}
-	if bytes.Equal(webauthnP256, directP256) {
+	if bytes.Equal(webauthnP256, phoneDirectP256) {
 		return nil, nil, nil, nil, fmt.Errorf("direct-auth p256 must be distinct from the webauthn credential p256")
 	}
-	hot, err = parseHotPub(req.HotPub, fallbackHot)
+	phoneRoutine, err = parsePhoneRoutineBIP340Pub(req.PhoneRoutineBIP340Pub, fallbackPhoneRoutine)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	return id, webauthnP256, directP256, hot, nil
+	return id, webauthnP256, phoneDirectP256, phoneRoutine, nil
 }
 
-func sameEnrollmentTuple(c *policy.Credential, id, webauthnP256, directP256 []byte, hot *btcec.PublicKey) bool {
-	return c != nil && hot != nil &&
+func sameEnrollmentTuple(c *policy.Credential, id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey) bool {
+	return c != nil && phoneRoutine != nil &&
 		bytes.Equal(c.ID, id) &&
 		bytes.Equal(c.WebAuthnP256, webauthnP256) &&
-		bytes.Equal(c.DirectP256, directP256) &&
-		bytes.Equal(c.Hot, hot.SerializeCompressed())
+		bytes.Equal(c.PhoneDirectP256, phoneDirectP256) &&
+		bytes.Equal(c.PhoneRoutineBIP340, phoneRoutine.SerializeCompressed())
 }
 
 // LoadVaults rebuilds trees from the persisted enrollment descriptor.
@@ -239,109 +243,122 @@ func (s *Service) LoadVaults() error {
 }
 
 func (s *Service) publishStoredEnrollment(cred *policy.Credential, startup bool) error {
-	hot, offline, providerBase, arkadeBase, op, sv, err := s.rebuildFromCredential(cred)
+	phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase, op, sv, err := s.rebuildFromCredential(cred)
 	if err != nil {
 		return err
 	}
-	runtimeProvider := s.ProviderPub
+	runtimeVaultCosigner := s.VaultCosignerPub
 	// Startup may replace a deprecated/current RemoteSigner identity with the
 	// persisted vault identity after compatibility is checked. An idempotent
 	// /register never rewrites fields read by concurrent requests.
 	if startup {
-		s.Offline = offline
-		s.ProviderPub = providerBase
-		s.ArkadePub = arkadeBase
+		s.ExternalOwnerWallet = externalOwner
+		s.RecoveryKey = recovery
+		s.VaultCosignerPub = vaultBase
+		s.ArkadeCosignerPub = arkadeBase
 	}
 	s.bindRemoteExpected(op)
-	s.publishEnrollment(hot, op, sv)
-	if runtimeProvider != nil && !sameCompressed(runtimeProvider, cred.ProviderBase) {
-		log.Printf("rebuilt vault from enrolled provider base %x; current runtime signer %x must remain deprecated",
-			cred.ProviderBase, runtimeProvider.SerializeCompressed())
+	s.publishEnrollment(phoneRoutine, op, sv)
+	if runtimeVaultCosigner != nil && !sameCompressed(runtimeVaultCosigner, cred.VaultCosignerBase) {
+		log.Printf("rebuilt vault from enrolled VaultCosigner base %x; current runtime signer %x must remain deprecated",
+			cred.VaultCosignerBase, runtimeVaultCosigner.SerializeCompressed())
 	}
 	return nil
 }
 
-func (s *Service) rebuildFromCredential(cred *policy.Credential) (hot, offline, providerBase, arkadeBase *btcec.PublicKey, op, sv *vault.Built, err error) {
+func (s *Service) rebuildFromCredential(cred *policy.Credential) (
+	phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase *btcec.PublicKey,
+	op, sv *vault.Built, err error,
+) {
 	if err = s.requireCompatible(cred); err != nil {
-		return nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, err
 	}
-	hot, err = btcec.ParsePubKey(cred.Hot)
+	phoneRoutine, err = btcec.ParsePubKey(cred.PhoneRoutineBIP340)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("stored hot: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored PhoneRoutineBIP340: %w", err)
 	}
-	offline, err = btcec.ParsePubKey(cred.Offline)
+	externalOwner, err = btcec.ParsePubKey(cred.ExternalOwnerWallet)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("stored offline: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored ExternalOwnerWallet: %w", err)
 	}
-	providerBase, err = btcec.ParsePubKey(cred.ProviderBase)
+	recovery, err = btcec.ParsePubKey(cred.RecoveryKey)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("stored provider: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored RecoveryKey: %w", err)
 	}
-	arkadeBase, err = btcec.ParsePubKey(cred.ArkadeBase)
+	vaultBase, err = btcec.ParsePubKey(cred.VaultCosignerBase)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("stored arkade emulator: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored VaultCosigner: %w", err)
+	}
+	arkadeBase, err = btcec.ParsePubKey(cred.ArkadeCosignerBase)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored ArkadeCosigner: %w", err)
 	}
 	opCSV := arklib.RelativeLocktime{Type: arklib.RelativeLocktimeType(cred.OperationalCSVType), Value: cred.OperationalCSVValue}
 	svCSV := arklib.RelativeLocktime{Type: arklib.RelativeLocktimeType(cred.SavingsCSVType), Value: cred.SavingsCSVValue}
 	op, err = vault.NewFromRecord(vault.Record{
 		Kind:                vault.Operational,
-		Hot:                 hot,
-		Offline:             offline,
-		ProviderBase:        providerBase,
-		ArkadeBase:          arkadeBase,
-		DirectP256:          cred.DirectP256,
+		PhoneRoutineBIP340:  phoneRoutine,
+		PhoneDirectP256:     cred.PhoneDirectP256,
+		ExternalOwnerWallet: externalOwner,
+		RecoveryKey:         recovery,
+		VaultCosignerBase:   vaultBase,
+		ArkadeCosignerBase:  arkadeBase,
 		CSV:                 opCSV,
 		AuthorizationPolicy: authorizationPolicyFromCredential(cred),
 		Network:             cred.Network,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	sv, err = vault.NewFromRecord(vault.Record{
-		Kind:    vault.Savings,
-		Hot:     hot,
-		Offline: offline,
-		CSV:     svCSV,
-		Network: cred.Network,
+		Kind:                vault.Savings,
+		ExternalOwnerWallet: externalOwner,
+		RecoveryKey:         recovery,
+		CSV:                 svCSV,
+		Network:             cred.Network,
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, err
 	}
-	if err = sv.AssertNoProvider(providerBase, op.TweakedProvider, arkadeBase, op.TweakedArkade); err != nil {
-		return nil, nil, nil, nil, nil, nil, err
+	if err = sv.AssertNoRoutineCosigners(vaultBase, op.TweakedVaultCosigner, arkadeBase, op.TweakedArkadeCosigner); err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, err
 	}
 	if op.Address != cred.OperationalAddress || !bytes.Equal(op.PkScript, cred.OperationalScript) {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt operational vault does not match stored descriptor")
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt operational vault does not match stored descriptor")
 	}
 	if sv.Address != cred.SavingsAddress || !bytes.Equal(sv.PkScript, cred.SavingsScript) {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt savings vault does not match stored descriptor")
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt savings vault does not match stored descriptor")
 	}
-	if op.TweakedProvider == nil || !bytes.Equal(op.TweakedProvider.SerializeCompressed(), cred.TweakedProvider) {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt tweaked provider does not match stored descriptor")
+	if op.TweakedVaultCosigner == nil || !bytes.Equal(op.TweakedVaultCosigner.SerializeCompressed(), cred.TweakedVaultCosigner) {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt tweaked VaultCosigner does not match stored descriptor")
 	}
-	if op.TweakedArkade == nil || !bytes.Equal(op.TweakedArkade.SerializeCompressed(), cred.TweakedArkade) {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt tweaked arkade emulator does not match stored descriptor")
+	if op.TweakedArkadeCosigner == nil || !bytes.Equal(op.TweakedArkadeCosigner.SerializeCompressed(), cred.TweakedArkadeCosigner) {
+		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("rebuilt tweaked ArkadeCosigner does not match stored descriptor")
 	}
-	return hot, offline, providerBase, arkadeBase, op, sv, nil
+	return phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase, op, sv, nil
 }
 
-func (s *Service) makeTrees(hot *btcec.PublicKey, directP256 []byte) (*vault.Built, *vault.Built, error) {
-	if hot == nil || s.Offline == nil || s.ProviderPub == nil || s.ArkadePub == nil {
+func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte) (*vault.Built, *vault.Built, error) {
+	if phoneRoutine == nil || s.ExternalOwnerWallet == nil || s.RecoveryKey == nil || s.VaultCosignerPub == nil || s.ArkadeCosignerPub == nil {
 		return nil, nil, fmt.Errorf("vault keys not configured")
 	}
 	cfg := s.runtimeConfig()
 	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.OperationalCSVBlocks}
 	svCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.SavingsCSVBlocks}
 	op, err := vault.NewOperationalWithPolicy(vault.OperationalKeys{
-		Hot: hot, Offline: s.Offline, ProviderBase: s.ProviderPub,
-		ArkadeBase: s.ArkadePub, DirectP256: directP256,
+		PhoneRoutineBIP340:  phoneRoutine,
+		PhoneDirectP256:     phoneDirectP256,
+		ExternalOwnerWallet: s.ExternalOwnerWallet,
+		RecoveryKey:         s.RecoveryKey,
+		VaultCosignerBase:   s.VaultCosignerPub,
+		ArkadeCosignerBase:  s.ArkadeCosignerPub,
 	}, cfg.Network, opCSV, configuredAuthorizationPolicy())
 	if err != nil {
 		return nil, nil, err
 	}
 	sv, err := vault.NewSavingsWithPolicy(
-		hot, s.Offline, cfg.Network, svCSV,
-		s.ProviderPub, op.TweakedProvider, s.ArkadePub, op.TweakedArkade,
+		s.ExternalOwnerWallet, s.RecoveryKey, cfg.Network, svCSV,
+		s.VaultCosignerPub, op.TweakedVaultCosigner, s.ArkadeCosignerPub, op.TweakedArkadeCosigner,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -350,8 +367,8 @@ func (s *Service) makeTrees(hot *btcec.PublicKey, directP256 []byte) (*vault.Bui
 }
 
 func descriptorFromTrees(
-	cfg deployment.Config, id, webauthnP256, directP256 []byte,
-	hot, offline, providerBase, arkadeBase *btcec.PublicKey,
+	cfg deployment.Config, id, webauthnP256, phoneDirectP256 []byte,
+	phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase *btcec.PublicKey,
 	arkadeOrigin, arkadeVersion string, op, sv *vault.Built,
 ) policy.Credential {
 	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.OperationalCSVBlocks}
@@ -359,17 +376,18 @@ func descriptorFromTrees(
 	return policy.Credential{
 		ID:                    id,
 		WebAuthnP256:          append([]byte(nil), webauthnP256...),
-		DirectP256:            append([]byte(nil), directP256...),
-		Hot:                   hot.SerializeCompressed(),
+		PhoneDirectP256:       append([]byte(nil), phoneDirectP256...),
+		PhoneRoutineBIP340:    phoneRoutine.SerializeCompressed(),
+		ExternalOwnerWallet:   externalOwner.SerializeCompressed(),
 		RPID:                  cfg.RPID,
 		Origin:                cfg.ClientOrigin,
-		Offline:               offline.SerializeCompressed(),
-		ProviderBase:          providerBase.SerializeCompressed(),
-		TweakedProvider:       op.TweakedProvider.SerializeCompressed(),
-		ArkadeBase:            arkadeBase.SerializeCompressed(),
-		TweakedArkade:         op.TweakedArkade.SerializeCompressed(),
-		ArkadeEmulatorOrigin:  arkadeOrigin,
-		ArkadeEmulatorVersion: arkadeVersion,
+		RecoveryKey:           recovery.SerializeCompressed(),
+		VaultCosignerBase:     vaultBase.SerializeCompressed(),
+		TweakedVaultCosigner:  op.TweakedVaultCosigner.SerializeCompressed(),
+		ArkadeCosignerBase:    arkadeBase.SerializeCompressed(),
+		TweakedArkadeCosigner: op.TweakedArkadeCosigner.SerializeCompressed(),
+		ArkadeCosignerOrigin:  arkadeOrigin,
+		ArkadeCosignerVersion: arkadeVersion,
 		TemplateVersion:       fixture.TemplateVersion,
 		PolicyVersion:         fixture.PolicyVersion,
 		Network:               cfg.Network,
@@ -443,24 +461,27 @@ func (s *Service) requireCompatible(cred *policy.Credential) error {
 		cred.FeerateCapSatPerV != fixture.FeerateCeilingSatPerV {
 		return fmt.Errorf("stored economic policy incompatible with runtime")
 	}
-	if cred.ArkadeEmulatorOrigin != s.ArkadeEmulatorOrigin {
-		return fmt.Errorf("stored arkade emulator origin %q incompatible with runtime %q", cred.ArkadeEmulatorOrigin, s.ArkadeEmulatorOrigin)
+	if cred.ArkadeCosignerOrigin != s.ArkadeCosignerOrigin {
+		return fmt.Errorf("stored ArkadeCosigner origin %q incompatible with runtime %q", cred.ArkadeCosignerOrigin, s.ArkadeCosignerOrigin)
 	}
-	if cfg.Network != deployment.NetworkRegtest && (cred.ArkadeEmulatorVersion == "" || s.ArkadeEmulatorVersion == "") {
-		return fmt.Errorf("stored and runtime arkade emulator versions are required")
+	if cfg.Network != deployment.NetworkRegtest && (cred.ArkadeCosignerVersion == "" || s.ArkadeCosignerVersion == "") {
+		return fmt.Errorf("stored and runtime ArkadeCosigner versions are required")
 	}
 	// The persisted value records the exact reviewed version at enrollment.
 	// Runtime separately accepts only its release allowlist. They need not be
 	// equal after a reviewed key/version rotation: an existing descriptor stays
 	// live only when its exact MAC-authenticated key is still advertised as an
 	// active deprecated signer.
-	if s.Offline != nil && !sameCompressed(s.Offline, cred.Offline) {
-		return fmt.Errorf("runtime offline pubkey does not match enrolled vault")
+	if s.ExternalOwnerWallet != nil && !sameCompressed(s.ExternalOwnerWallet, cred.ExternalOwnerWallet) {
+		return fmt.Errorf("runtime ExternalOwnerWallet does not match enrolled vault")
 	}
-	if err := requireSignerCompatible("provider", s.ProviderPub, s.DeprecatedProvider, cred.ProviderBase); err != nil {
+	if s.RecoveryKey != nil && !sameCompressed(s.RecoveryKey, cred.RecoveryKey) {
+		return fmt.Errorf("runtime RecoveryKey does not match enrolled vault")
+	}
+	if err := requireSignerCompatible("VaultCosigner", s.VaultCosignerPub, s.DeprecatedVaultCosigners, cred.VaultCosignerBase); err != nil {
 		return err
 	}
-	if err := requireSignerCompatible("arkade emulator", s.ArkadePub, s.DeprecatedArkade, cred.ArkadeBase); err != nil {
+	if err := requireSignerCompatible("ArkadeCosigner", s.ArkadeCosignerPub, s.DeprecatedArkadeCosigners, cred.ArkadeCosignerBase); err != nil {
 		return err
 	}
 	return nil
@@ -489,76 +510,77 @@ func (s *Service) bindRemoteExpected(op *vault.Built) {
 	if op == nil {
 		return
 	}
-	if binder, ok := s.Signer.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedProvider != nil {
-		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedProvider))
+	if binder, ok := s.VaultSigner.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedVaultCosigner != nil {
+		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedVaultCosigner))
 	}
-	if binder, ok := s.ArkadeSigner.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedArkade != nil {
-		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedArkade))
+	if binder, ok := s.ArkadeCosignerSigner.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedArkadeCosigner != nil {
+		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedArkadeCosigner))
 	}
 }
 
-func parseHotPub(hexPub string, fallback *btcec.PublicKey) (*btcec.PublicKey, error) {
+func parsePhoneRoutineBIP340Pub(hexPub string, fallback *btcec.PublicKey) (*btcec.PublicKey, error) {
 	if hexPub == "" {
 		if fallback == nil {
-			return nil, fmt.Errorf("hotPub required")
+			return nil, fmt.Errorf("phoneRoutineBip340Pub required")
 		}
 		return fallback, nil
 	}
 	raw, err := decodeHex(hexPub)
 	if err != nil {
-		return nil, fmt.Errorf("hotPub: %w", err)
+		return nil, fmt.Errorf("phoneRoutineBip340Pub: %w", err)
 	}
 	pub, err := btcec.ParsePubKey(raw)
 	if err != nil {
-		return nil, fmt.Errorf("hotPub: %w", err)
+		return nil, fmt.Errorf("phoneRoutineBip340Pub: %w", err)
 	}
 	return pub, nil
 }
 
 // Status is the UI snapshot.
 type Status struct {
-	Enrolled                     bool   `json:"enrolled"`
-	Network                      string `json:"network"`
-	ClientOrigin                 string `json:"clientOrigin"`
-	RPID                         string `json:"rpId"`
-	VaultID                      string `json:"vaultId"`
-	TemplateVersion              string `json:"templateVersion"`
-	PolicyVersion                string `json:"policyVersion"`
-	OperationalCSVBlocks         uint32 `json:"operationalCsvBlocks"`
-	SavingsCSVBlocks             uint32 `json:"savingsCsvBlocks"`
-	BackupPub                    string `json:"backupPub,omitempty"`
-	ProviderBasePub              string `json:"providerBasePub,omitempty"`
-	ArkadeEmulatorBasePub        string `json:"arkadeEmulatorBasePub,omitempty"`
-	ArkadeEmulatorOrigin         string `json:"arkadeEmulatorOrigin,omitempty"`
-	ArkadeEmulatorVersion        string `json:"arkadeEmulatorVersion,omitempty"`
-	OperationalAddr              string `json:"operationalAddress"`
-	OperationalScript            string `json:"operationalScript,omitempty"`
-	SavingsAddr                  string `json:"savingsAddress"`
-	SavingsExcludesProvider      bool   `json:"savingsExcludesProvider"`
-	SavingsExcludesCollaborators bool   `json:"savingsExcludesCollaborators"`
-	PeriodAllowance              int64  `json:"periodAllowance"`
-	PeriodSpent                  int64  `json:"periodSpent"`
-	PeriodRemaining              int64  `json:"periodRemaining"`
-	TxCap                        int64  `json:"txCap"`
-	AbsoluteFeeCap               int64  `json:"absoluteFeeCap"`
-	FeerateCapSatPerV            int64  `json:"feerateCapSatVb"`
-	HotPub                       string `json:"hotPub,omitempty"`
-	DirectP256                   string `json:"directP256,omitempty"`
-	TweakedProviderXOnly         string `json:"tweakedProviderXOnly,omitempty"`
-	TweakedArkadeXOnly           string `json:"tweakedArkadeXOnly,omitempty"`
+	Enrolled                        bool   `json:"enrolled"`
+	Network                         string `json:"network"`
+	ClientOrigin                    string `json:"clientOrigin"`
+	RPID                            string `json:"rpId"`
+	VaultID                         string `json:"vaultId"`
+	TemplateVersion                 string `json:"templateVersion"`
+	PolicyVersion                   string `json:"policyVersion"`
+	OperationalCSVBlocks            uint32 `json:"operationalCsvBlocks"`
+	SavingsCSVBlocks                uint32 `json:"savingsCsvBlocks"`
+	ExternalOwnerWalletPub          string `json:"externalOwnerWalletPub,omitempty"`
+	RecoveryKeyPub                  string `json:"recoveryKeyPub,omitempty"`
+	VaultCosignerBasePub            string `json:"vaultCosignerBasePub,omitempty"`
+	ArkadeCosignerBasePub           string `json:"arkadeCosignerBasePub,omitempty"`
+	ArkadeCosignerOrigin            string `json:"arkadeCosignerOrigin,omitempty"`
+	ArkadeCosignerVersion           string `json:"arkadeCosignerVersion,omitempty"`
+	OperationalAddr                 string `json:"operationalAddress"`
+	OperationalScript               string `json:"operationalScript,omitempty"`
+	SavingsAddr                     string `json:"savingsAddress"`
+	SavingsExcludesRoutineCosigners bool   `json:"savingsExcludesRoutineCosigners"`
+	PeriodAllowance                 int64  `json:"periodAllowance"`
+	PeriodSpent                     int64  `json:"periodSpent"`
+	PeriodRemaining                 int64  `json:"periodRemaining"`
+	TxCap                           int64  `json:"txCap"`
+	AbsoluteFeeCap                  int64  `json:"absoluteFeeCap"`
+	FeerateCapSatPerV               int64  `json:"feerateCapSatVb"`
+	PhoneRoutineBIP340Pub           string `json:"phoneRoutineBip340Pub,omitempty"`
+	PhoneDirectP256                 string `json:"phoneDirectP256,omitempty"`
+	TweakedVaultCosignerXOnly       string `json:"tweakedVaultCosignerXOnly,omitempty"`
+	TweakedArkadeCosignerXOnly      string `json:"tweakedArkadeCosignerXOnly,omitempty"`
 }
 
-func (s *Service) publishEnrollment(hot *btcec.PublicKey, op, sv *vault.Built) {
-	snap := &enrolledSnapshot{Hot: hot, Operational: op, Savings: sv}
+func (s *Service) publishEnrollment(phoneRoutine *btcec.PublicKey, op, sv *vault.Built) {
+	snap := &enrolledSnapshot{PhoneRoutineBIP340: phoneRoutine, Operational: op, Savings: sv}
 	if op != nil {
-		snap.Offline = op.Record.Offline
-		snap.ProviderBase = op.Record.ProviderBase
-		snap.ArkadeBase = op.Record.ArkadeBase
+		snap.ExternalOwnerWallet = op.Record.ExternalOwnerWallet
+		snap.RecoveryKey = op.Record.RecoveryKey
+		snap.VaultCosignerBase = op.Record.VaultCosignerBase
+		snap.ArkadeCosignerBase = op.Record.ArkadeCosignerBase
 	}
 	s.published.Store(snap)
 	// Keep exported legacy/test fields stable after their first publication.
-	if s.Hot == nil {
-		s.Hot = hot
+	if s.PhoneRoutineBIP340 == nil {
+		s.PhoneRoutineBIP340 = phoneRoutine
 	}
 	if s.Operational == nil {
 		s.Operational = op
@@ -611,63 +633,66 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	}
 	snap := s.enrolled()
 	if cred == nil {
-		if s.Offline != nil {
-			st.BackupPub = hex.EncodeToString(s.Offline.SerializeCompressed())
+		if s.ExternalOwnerWallet != nil {
+			st.ExternalOwnerWalletPub = hex.EncodeToString(s.ExternalOwnerWallet.SerializeCompressed())
 		}
-		if s.ProviderPub != nil {
-			st.ProviderBasePub = hex.EncodeToString(s.ProviderPub.SerializeCompressed())
+		if s.RecoveryKey != nil {
+			st.RecoveryKeyPub = hex.EncodeToString(s.RecoveryKey.SerializeCompressed())
 		}
-		if s.ArkadePub != nil {
-			st.ArkadeEmulatorBasePub = hex.EncodeToString(s.ArkadePub.SerializeCompressed())
+		if s.VaultCosignerPub != nil {
+			st.VaultCosignerBasePub = hex.EncodeToString(s.VaultCosignerPub.SerializeCompressed())
+		}
+		if s.ArkadeCosignerPub != nil {
+			st.ArkadeCosignerBasePub = hex.EncodeToString(s.ArkadeCosignerPub.SerializeCompressed())
 		}
 	}
 	if cred != nil {
 		// Report the persisted descriptor inputs, not merely mutable runtime
 		// fields. LoadVaults/Register already require these to match runtime.
-		st.BackupPub = hex.EncodeToString(cred.Offline)
-		st.ProviderBasePub = hex.EncodeToString(cred.ProviderBase)
-		st.ArkadeEmulatorBasePub = hex.EncodeToString(cred.ArkadeBase)
-		st.ArkadeEmulatorOrigin = cred.ArkadeEmulatorOrigin
-		st.ArkadeEmulatorVersion = cred.ArkadeEmulatorVersion
+		st.ExternalOwnerWalletPub = hex.EncodeToString(cred.ExternalOwnerWallet)
+		st.RecoveryKeyPub = hex.EncodeToString(cred.RecoveryKey)
+		st.VaultCosignerBasePub = hex.EncodeToString(cred.VaultCosignerBase)
+		st.ArkadeCosignerBasePub = hex.EncodeToString(cred.ArkadeCosignerBase)
+		st.ArkadeCosignerOrigin = cred.ArkadeCosignerOrigin
+		st.ArkadeCosignerVersion = cred.ArkadeCosignerVersion
 	}
 	if snap.Operational != nil {
 		st.OperationalAddr = snap.Operational.Address
 		st.OperationalScript = hex.EncodeToString(snap.Operational.PkScript)
-		if snap.Operational.TweakedProvider != nil {
-			st.TweakedProviderXOnly = hex.EncodeToString(schnorr.SerializePubKey(snap.Operational.TweakedProvider))
+		if snap.Operational.TweakedVaultCosigner != nil {
+			st.TweakedVaultCosignerXOnly = hex.EncodeToString(schnorr.SerializePubKey(snap.Operational.TweakedVaultCosigner))
 		}
-		if snap.Operational.TweakedArkade != nil {
-			st.TweakedArkadeXOnly = hex.EncodeToString(schnorr.SerializePubKey(snap.Operational.TweakedArkade))
+		if snap.Operational.TweakedArkadeCosigner != nil {
+			st.TweakedArkadeCosignerXOnly = hex.EncodeToString(schnorr.SerializePubKey(snap.Operational.TweakedArkadeCosigner))
 		}
 	}
 	if snap.Savings != nil {
 		st.SavingsAddr = snap.Savings.Address
 		var forbidden []*btcec.PublicKey
-		if snap.ProviderBase != nil {
-			forbidden = append(forbidden, snap.ProviderBase)
+		if snap.VaultCosignerBase != nil {
+			forbidden = append(forbidden, snap.VaultCosignerBase)
 		}
-		if snap.Operational != nil && snap.Operational.TweakedProvider != nil {
-			forbidden = append(forbidden, snap.Operational.TweakedProvider)
+		if snap.Operational != nil && snap.Operational.TweakedVaultCosigner != nil {
+			forbidden = append(forbidden, snap.Operational.TweakedVaultCosigner)
 		}
-		if snap.ArkadeBase != nil {
-			forbidden = append(forbidden, snap.ArkadeBase)
+		if snap.ArkadeCosignerBase != nil {
+			forbidden = append(forbidden, snap.ArkadeCosignerBase)
 		}
-		if snap.Operational != nil && snap.Operational.TweakedArkade != nil {
-			forbidden = append(forbidden, snap.Operational.TweakedArkade)
+		if snap.Operational != nil && snap.Operational.TweakedArkadeCosigner != nil {
+			forbidden = append(forbidden, snap.Operational.TweakedArkadeCosigner)
 		}
-		st.SavingsExcludesProvider = snap.Savings.AssertNoProvider(forbidden...) == nil
-		st.SavingsExcludesCollaborators = st.SavingsExcludesProvider
+		st.SavingsExcludesRoutineCosigners = snap.Savings.AssertNoRoutineCosigners(forbidden...) == nil
 	}
-	if snap.Hot != nil {
-		st.HotPub = hex.EncodeToString(snap.Hot.SerializeCompressed())
+	if snap.PhoneRoutineBIP340 != nil {
+		st.PhoneRoutineBIP340Pub = hex.EncodeToString(snap.PhoneRoutineBIP340.SerializeCompressed())
 	}
-	if cred != nil && len(cred.DirectP256) > 0 {
-		st.DirectP256 = hex.EncodeToString(cred.DirectP256)
+	if cred != nil && len(cred.PhoneDirectP256) > 0 {
+		st.PhoneDirectP256 = hex.EncodeToString(cred.PhoneDirectP256)
 	}
 	return st, nil
 }
 
-// DraftRequest builds an empty-witness collaborative PSBT the browser can bind.
+// DraftRequest builds an empty-witness routine PSBT the browser can bind.
 type DraftRequest struct {
 	PrevTxHex       string `json:"prevTxHex"`
 	Vout            uint32 `json:"vout"`
@@ -704,7 +729,7 @@ func (s *Service) DraftContext(ctx context.Context, req DraftRequest) (string, e
 	if err != nil {
 		return "", err
 	}
-	built, err := vault.BuildCollaborativeSpend(vault.SpendParams{
+	built, err := vault.BuildRoutineSpend(vault.SpendParams{
 		Vault:           op,
 		PrevTx:          prev,
 		PrevOutPoint:    wire.OutPoint{Hash: prev.TxHash(), Index: req.Vout},
@@ -786,7 +811,7 @@ func (s *Service) BindContext(ctx context.Context, req BindRequest) (string, err
 	if err != nil {
 		return "", fmt.Errorf("directSig: %w", err)
 	}
-	if err := verifyDirectAuth(cred.DirectP256, ch, directSig); err != nil {
+	if err := verifyDirectAuth(cred.PhoneDirectP256, ch, directSig); err != nil {
 		return "", err
 	}
 	if err := vault.SetPacketWitness(ptx.UnsignedTx, wire.TxWitness{directSig}); err != nil {
@@ -857,8 +882,8 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 	if err != nil {
 		return "", false, err
 	}
-	if s.Signer == nil || s.ArkadeSigner == nil || op.TweakedProvider == nil || op.TweakedArkade == nil {
-		return "", false, fmt.Errorf("both private provider and public arkade signers are required")
+	if s.VaultSigner == nil || s.ArkadeCosignerSigner == nil || op.TweakedVaultCosigner == nil || op.TweakedArkadeCosigner == nil {
+		return "", false, fmt.Errorf("both VaultCosigner and ArkadeCosigner signers are required")
 	}
 
 	timeout := s.SignTimeout
@@ -880,28 +905,28 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 			signCtx, cancel := context.WithTimeout(issueCtx, timeout)
 			defer cancel()
 			return signExactStage(
-				signCtx, storedRequest, s.Signer,
-				schnorr.SerializePubKey(op.TweakedProvider), "private provider",
+				signCtx, storedRequest, s.VaultSigner,
+				schnorr.SerializePubKey(op.TweakedVaultCosigner), "VaultCosigner",
 			)
 		},
-		func(issueCtx context.Context, storedProviderPSBT string) (string, error) {
+		func(issueCtx context.Context, storedVaultPSBT string) (string, error) {
 			if err := issueCtx.Err(); err != nil {
 				return "", err
 			}
-			providerStage, _, err := parseAndVerifyPrevout(storedProviderPSBT)
+			vaultStage, _, err := parseAndVerifyPrevout(storedVaultPSBT)
 			if err != nil {
-				return "", fmt.Errorf("stored provider stage: %w", err)
+				return "", fmt.Errorf("stored VaultCosigner stage: %w", err)
 			}
-			if err := verifyExactCollaborativeSignatures(
-				providerStage, op, op.Record.Hot, op.TweakedProvider,
+			if err := verifyExactRoutineSignatures(
+				vaultStage, op, op.Record.PhoneRoutineBIP340, op.TweakedVaultCosigner,
 			); err != nil {
-				return "", fmt.Errorf("stored provider stage: %w", err)
+				return "", fmt.Errorf("stored VaultCosigner stage: %w", err)
 			}
 			signCtx, cancel := context.WithTimeout(issueCtx, timeout)
 			defer cancel()
 			completed, err := signExactStage(
-				signCtx, storedProviderPSBT, s.ArkadeSigner,
-				schnorr.SerializePubKey(op.TweakedArkade), "public arkade emulator",
+				signCtx, storedVaultPSBT, s.ArkadeCosignerSigner,
+				schnorr.SerializePubKey(op.TweakedArkadeCosigner), "ArkadeCosigner",
 			)
 			if err != nil {
 				return "", err
@@ -910,8 +935,8 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 			if err != nil {
 				return "", err
 			}
-			if err := verifyExactCollaborativeSignatures(
-				completedPacket, op, op.Record.Hot, op.TweakedProvider, op.TweakedArkade,
+			if err := verifyExactRoutineSignatures(
+				completedPacket, op, op.Record.PhoneRoutineBIP340, op.TweakedVaultCosigner, op.TweakedArkadeCosigner,
 			); err != nil {
 				return "", err
 			}
@@ -982,10 +1007,10 @@ func (s *Service) verifyAuthorization(req AuthorizeRequest, ptx *psbt.Packet, op
 	if len(packet[0].Witness) != 1 || len(packet[0].Witness[0]) != 64 {
 		return nil, fmt.Errorf("packet witness must be the one-item 64-byte direct signature")
 	}
-	if err := verifyDirectAuth(cred.DirectP256, challenge, packet[0].Witness[0]); err != nil {
+	if err := verifyDirectAuth(cred.PhoneDirectP256, challenge, packet[0].Witness[0]); err != nil {
 		return nil, err
 	}
-	if err := verifyHotSignature(ptx, op); err != nil {
+	if err := verifyPhoneRoutineSignature(ptx, op); err != nil {
 		return nil, err
 	}
 	return challenge, nil

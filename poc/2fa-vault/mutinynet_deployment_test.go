@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestMutinynetComposeSealsProviderKeyBehindGateway(t *testing.T) {
+func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 	base := mustDeploymentFile(t, "docker-compose.mutinynet.yml")
 	enroll := mustDeploymentFile(t, "docker-compose.mutinynet.enroll.yml")
 	dockerfile := mustDeploymentFile(t, "Dockerfile.mutinynet")
@@ -31,9 +31,9 @@ func TestMutinynetComposeSealsProviderKeyBehindGateway(t *testing.T) {
 		}
 	}
 	for _, pin := range []string{
-		`MutinynetArkadeEmulatorOrigin  = "https://emulator.mutinynet.arkade.sh"`,
-		`MutinynetArkadeEmulatorPubHex  = "03f823b9b2febc81f4af967e77aed2f541cbd3397c6d8f5a72e32eb7b471af889a"`,
-		`MutinynetArkadeEmulatorVersion = "v0.0.7-rc.1"`,
+		`MutinynetArkadeCosignerOrigin  = "https://emulator.mutinynet.arkade.sh"`,
+		`MutinynetArkadeCosignerPubHex  = "03f823b9b2febc81f4af967e77aed2f541cbd3397c6d8f5a72e32eb7b471af889a"`,
+		`MutinynetArkadeCosignerVersion = "v0.0.7-rc.1"`,
 	} {
 		if !strings.Contains(deploymentConfig, pin) {
 			t.Fatalf("reviewed public Arkade cosigner release pin missing %q", pin)
@@ -43,7 +43,9 @@ func TestMutinynetComposeSealsProviderKeyBehindGateway(t *testing.T) {
 	authorizer := between(t, base, "  vault-authorizer:\n", "\n  vault-gateway:")
 	gateway := between(t, base, "  vault-gateway:\n", "\nnetworks:")
 	for _, required := range []string{
-		"-provider-key-file=/run/secrets/vault_provider_key",
+		"-vault-cosigner-key-file=/run/secrets/vault_cosigner_key",
+		"VAULT_EXTERNAL_OWNER_WALLET_PUB:",
+		"VAULT_RECOVERY_KEY_PUB:",
 		"vault-authorizer-data:/app/data",
 		"vault-boundary",
 		"vault-egress",
@@ -60,7 +62,7 @@ func TestMutinynetComposeSealsProviderKeyBehindGateway(t *testing.T) {
 	if strings.Contains(authorizer, "\n    ports:") {
 		t.Fatal("authorizer must not publish a host port")
 	}
-	for _, forbidden := range []string{"vault_provider_key", "vault-authorizer-data", "/app/data", "VAULT_ENROLLMENT_TOKEN"} {
+	for _, forbidden := range []string{"vault_cosigner_key", "vault-authorizer-data", "/app/data", "VAULT_ENROLLMENT_TOKEN", "VAULT_EXTERNAL_OWNER_WALLET_PUB", "VAULT_RECOVERY_KEY_PUB"} {
 		if strings.Contains(gateway, forbidden) {
 			t.Fatalf("stateless gateway owns protected state %q", forbidden)
 		}
@@ -165,7 +167,7 @@ func TestMutinynetImageReadsFileSecretAsNonRoot(t *testing.T) {
 	if err := os.Chmod(secretDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	secret := filepath.Join(secretDir, "provider-key")
+	secret := filepath.Join(secretDir, "vault-cosigner-key")
 	if err := os.WriteFile(secret, []byte(strings.Repeat("2", 64)+"\n"), 0o444); err != nil {
 		t.Fatal(err)
 	}
@@ -173,9 +175,9 @@ func TestMutinynetImageReadsFileSecretAsNonRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	imageID := buildDockerImage(t, docker, repoRoot, "poc/2fa-vault/Dockerfile.mutinynet")
-	mount := "type=bind,src=" + secret + ",dst=/run/secrets/vault_provider_key,readonly"
+	mount := "type=bind,src=" + secret + ",dst=/run/secrets/vault_cosigner_key,readonly"
 	run := exec.Command(docker, "run", "--rm", "--entrypoint", "/bin/sh", "--mount", mount, imageID,
-		"-ec", "id -u | grep -qx 10001\ntest -r /run/secrets/vault_provider_key\nwc -c /run/secrets/vault_provider_key | grep -q '^65 '")
+		"-ec", "id -u | grep -qx 10001\ntest -r /run/secrets/vault_cosigner_key\nwc -c /run/secrets/vault_cosigner_key | grep -q '^65 '")
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("non-root file-secret smoke: %v\n%s", err, output)
 	}

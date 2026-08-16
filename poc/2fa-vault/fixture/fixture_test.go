@@ -18,7 +18,7 @@ func TestFixtureDoesNotExportOfflinePrivateScalar(t *testing.T) {
 	if strings.Contains(text, "0000000000000000000000000000000000000000000000000000000000000001") {
 		t.Fatal("fixture must not embed secp256k1 scalar 1")
 	}
-	if OfflinePubHex != "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" {
-		t.Fatalf("OfflinePubHex = %s, want the opaque generator fixture", OfflinePubHex)
+	if RecoveryKeyPubHex != "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" {
+		t.Fatalf("RecoveryKeyPubHex = %s, want the opaque generator fixture", RecoveryKeyPubHex)
 	}
 }

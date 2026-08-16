@@ -24,13 +24,13 @@ const (
 	// report getblockchaininfo.chain="signet".
 	MutinynetCheckpoint1 = "000002855893a0a9b24eaffc5efc770558a326fee4fc10c9da22fc19cd2954f9"
 
-	// MutinynetArkadeEmulator* pin the public third signer into the release.
+	// MutinynetArkadeCosigner* pin the public routine cosigner into the release.
 	// Changing any value requires an explicit reviewed binary release; the
 	// Mutinynet Compose interface deliberately provides no environment
 	// override for this custody role.
-	MutinynetArkadeEmulatorOrigin  = "https://emulator.mutinynet.arkade.sh"
-	MutinynetArkadeEmulatorPubHex  = "03f823b9b2febc81f4af967e77aed2f541cbd3397c6d8f5a72e32eb7b471af889a"
-	MutinynetArkadeEmulatorVersion = "v0.0.7-rc.1"
+	MutinynetArkadeCosignerOrigin  = "https://emulator.mutinynet.arkade.sh"
+	MutinynetArkadeCosignerPubHex  = "03f823b9b2febc81f4af967e77aed2f541cbd3397c6d8f5a72e32eb7b471af889a"
+	MutinynetArkadeCosignerVersion = "v0.0.7-rc.1"
 )
 
 // Config is persisted into the vault descriptor at enrollment. Changing any

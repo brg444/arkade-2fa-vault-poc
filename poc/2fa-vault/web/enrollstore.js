@@ -1,5 +1,7 @@
-export const STORE = "vault-hot-v1";
-export const STORE_PENDING = "vault-hot-v1-pending";
+// V3 deliberately uses new keys. V1/V2 records described different Taproot
+// trees and must never be reinterpreted as the ExternalOwnerWallet v3 policy.
+export const STORE = "arkade-vault-enrollment-v3";
+export const STORE_PENDING = "arkade-vault-enrollment-v3-pending";
 
 export function loadMain(storage) {
   const rec = readJSON(storage, STORE);
@@ -38,24 +40,30 @@ export function promotePending(storage) {
 export function sameEnrollmentTuple(a, b) {
   return hexEq(a?.credId, b?.credId) &&
     hexEq(a?.webauthnP256, b?.webauthnP256) &&
-    hexEq(a?.directP256, b?.directP256) &&
-    hexEq(a?.hotPub, b?.hotPub) &&
+    hexEq(a?.phoneDirectP256, b?.phoneDirectP256) &&
+    hexEq(a?.phoneRoutineBip340Pub, b?.phoneRoutineBip340Pub) &&
     hexEq(a?.nonce, b?.nonce) &&
     hexEq(a?.ciphertext, b?.ciphertext) &&
     optionalHexEq(a?.operationalScript, b?.operationalScript) &&
     String(a?.operationalAddress || "") === String(b?.operationalAddress || "") &&
-    optionalHexEq(a?.tweakedProviderXOnly, b?.tweakedProviderXOnly) &&
-    optionalHexEq(a?.arkadeEmulatorBasePub, b?.arkadeEmulatorBasePub) &&
-    optionalHexEq(a?.tweakedArkadeXOnly, b?.tweakedArkadeXOnly) &&
-    String(a?.arkadeEmulatorOrigin || "") === String(b?.arkadeEmulatorOrigin || "") &&
-    String(a?.arkadeEmulatorVersion || "") === String(b?.arkadeEmulatorVersion || "") &&
-    String(a?.network || "") === String(b?.network || "");
+    optionalHexEq(a?.externalOwnerWalletPub, b?.externalOwnerWalletPub) &&
+    optionalHexEq(a?.recoveryKeyPub, b?.recoveryKeyPub) &&
+    optionalHexEq(a?.vaultCosignerBasePub, b?.vaultCosignerBasePub) &&
+    optionalHexEq(a?.tweakedVaultCosignerXOnly, b?.tweakedVaultCosignerXOnly) &&
+    optionalHexEq(a?.arkadeCosignerBasePub, b?.arkadeCosignerBasePub) &&
+    optionalHexEq(a?.tweakedArkadeCosignerXOnly, b?.tweakedArkadeCosignerXOnly) &&
+    String(a?.arkadeCosignerOrigin || "") === String(b?.arkadeCosignerOrigin || "") &&
+    String(a?.arkadeCosignerVersion || "") === String(b?.arkadeCosignerVersion || "") &&
+    String(a?.network || "") === String(b?.network || "") &&
+    String(a?.templateVersion || "") === String(b?.templateVersion || "") &&
+    String(a?.policyVersion || "") === String(b?.policyVersion || "");
 }
 
 // recoverEnrollment performs local crash reconciliation only. It deliberately
 // never POSTs /register. A pending-only record must be recovered by the
 // explicit enrollment button, which performs a fresh UV WebAuthn/PRF ceremony
-// and proves that the encrypted hot/direct keys still match before retrying.
+// and proves that the encrypted PhoneRoutineBIP340/PhoneDirectP256 keys still
+// match before retrying.
 export async function recoverEnrollment({ storage }) {
   const pending = loadPending(storage);
   const main = loadMain(storage);
@@ -72,62 +80,62 @@ export async function recoverEnrollment({ storage }) {
 
 function requireCompleteRecord(rec) {
   requireRegistrationRecord(rec);
-  requireXOnly(rec.tweakedProviderXOnly, "persisted tweaked provider");
-  requireArkadeEmulatorIdentity(rec, "persisted Arkade emulator", true);
+  requireDescriptorIdentity(rec, "persisted descriptor", true);
+  requireHex(rec.operationalScript, "operational script", 1, 10_000);
+  requireIdentityString(rec.operationalAddress, "operational address", 256, true);
 }
 
 function requireRegistrationRecord(rec) {
   if (!rec || typeof rec !== "object") throw new Error("incomplete enrollment record");
   requireHex(rec.credId, "credential id", 1, 1024);
   requireCompressed(rec.webauthnP256, "WebAuthn P-256");
-  requireCompressed(rec.directP256, "Direct P-256");
-  requireCompressed(rec.hotPub, "hot pub");
+  requireCompressed(rec.phoneDirectP256, "PhoneDirectP256");
+  requireCompressed(rec.phoneRoutineBip340Pub, "PhoneRoutineBIP340 pub");
   requireHex(rec.nonce, "AES-GCM nonce", 12, 12);
-  requireHex(rec.ciphertext, "wrapped hot key", 48, 48);
+  requireHex(rec.ciphertext, "wrapped PhoneRoutineBIP340 key", 48, 48);
   if (rec.operationalScript) requireHex(rec.operationalScript, "operational script", 1, 10_000);
-  if (rec.tweakedProviderXOnly) requireXOnly(rec.tweakedProviderXOnly, "persisted tweaked provider");
-  requireArkadeEmulatorIdentity(rec, "pending Arkade emulator", false);
+  requireDescriptorIdentity(rec, "pending descriptor", false);
 }
 
-export function assertTweakedProvider(persisted, status) {
-  const live = requireXOnly(status, "status tweaked provider");
-  if (persisted && requireXOnly(persisted, "persisted tweaked provider") !== live) {
-    throw new Error("persisted tweaked provider does not match vault status");
+export function assertTweakedVaultCosigner(persisted, status) {
+  const live = requireXOnly(status, "status tweaked VaultCosigner");
+  if (persisted && requireXOnly(persisted, "persisted tweaked VaultCosigner") !== live) {
+    throw new Error("persisted tweaked VaultCosigner does not match vault status");
   }
   return live;
 }
 
-export function assertArkadeEmulatorIdentity(persisted, status) {
-  const live = requireArkadeEmulatorIdentity({
+export function assertArkadeCosignerIdentity(persisted, status) {
+  const live = requireArkadeIdentity({
     ...status,
-    arkadeEmulatorOrigin: status?.arkadeEmulatorOrigin ?? "",
-    arkadeEmulatorVersion: status?.arkadeEmulatorVersion ?? "",
-  }, "status Arkade emulator", true);
+    arkadeCosignerOrigin: status?.arkadeCosignerOrigin ?? "",
+    arkadeCosignerVersion: status?.arkadeCosignerVersion ?? "",
+  }, "status ArkadeCosigner", true);
   if (!persisted) return live;
-  const stored = requireArkadeEmulatorIdentity(persisted, "persisted Arkade emulator", true);
+  const stored = requireArkadeIdentity(persisted, "persisted ArkadeCosigner", true);
   for (const field of [
-    "arkadeEmulatorBasePub",
-    "tweakedArkadeXOnly",
-    "arkadeEmulatorOrigin",
-    "arkadeEmulatorVersion",
+    "arkadeCosignerBasePub",
+    "tweakedArkadeCosignerXOnly",
+    "arkadeCosignerOrigin",
+    "arkadeCosignerVersion",
     "network",
   ]) {
     if (stored[field] !== live[field]) {
-      throw new Error(`persisted Arkade emulator ${identityLabel(field)} does not match vault status`);
+      throw new Error(`persisted ArkadeCosigner ${identityLabel(field)} does not match vault status`);
     }
   }
   return live;
 }
 
 const ARKADE_IDENTITY_FIELDS = [
-  "arkadeEmulatorBasePub",
-  "tweakedArkadeXOnly",
-  "arkadeEmulatorOrigin",
-  "arkadeEmulatorVersion",
+  "arkadeCosignerBasePub",
+  "tweakedArkadeCosignerXOnly",
+  "arkadeCosignerOrigin",
+  "arkadeCosignerVersion",
   "network",
 ];
 
-function requireArkadeEmulatorIdentity(value, name, required) {
+function requireArkadeIdentity(value, name, required) {
   const source = value && typeof value === "object" ? value : {};
   const present = ARKADE_IDENTITY_FIELDS.filter((field) =>
     Object.prototype.hasOwnProperty.call(source, field));
@@ -136,31 +144,86 @@ function requireArkadeEmulatorIdentity(value, name, required) {
     throw new Error(`${name} identity is incomplete`);
   }
   const identity = {
-    arkadeEmulatorBasePub: requireCompressed(source.arkadeEmulatorBasePub, `${name} base pub`),
-    tweakedArkadeXOnly: requireXOnly(source.tweakedArkadeXOnly, `${name} tweaked key`),
-    arkadeEmulatorOrigin: requireIdentityString(source.arkadeEmulatorOrigin, `${name} origin`, 2048),
-    arkadeEmulatorVersion: requireIdentityString(source.arkadeEmulatorVersion, `${name} version`, 128),
+    arkadeCosignerBasePub: requireCompressed(source.arkadeCosignerBasePub, `${name} base pub`),
+    tweakedArkadeCosignerXOnly: requireXOnly(source.tweakedArkadeCosignerXOnly, `${name} tweaked key`),
+    arkadeCosignerOrigin: requireIdentityString(source.arkadeCosignerOrigin, `${name} origin`, 2048),
+    arkadeCosignerVersion: requireIdentityString(source.arkadeCosignerVersion, `${name} version`, 128),
     network: requireNetwork(source.network, `${name} network`),
   };
   if (identity.network !== "regtest") {
-    if (!identity.arkadeEmulatorOrigin || !identity.arkadeEmulatorVersion) {
+    if (!identity.arkadeCosignerOrigin || !identity.arkadeCosignerVersion) {
       throw new Error(`${name} origin and version are required outside regtest`);
     }
     let parsed;
     try {
-      parsed = new URL(identity.arkadeEmulatorOrigin);
+      parsed = new URL(identity.arkadeCosignerOrigin);
     } catch {
       throw new Error(`${name} origin must be a canonical HTTPS origin`);
     }
-    if (parsed.protocol !== "https:" || parsed.origin !== identity.arkadeEmulatorOrigin) {
+    if (parsed.protocol !== "https:" || parsed.origin !== identity.arkadeCosignerOrigin) {
       throw new Error(`${name} origin must be a canonical HTTPS origin`);
     }
   }
   return identity;
 }
 
-function requireIdentityString(value, name, maxLength) {
-  if (typeof value !== "string" || value.length > maxLength || value.trim() !== value || /[\u0000-\u001f\u007f]/.test(value)) {
+const DESCRIPTOR_IDENTITY_FIELDS = [
+  "externalOwnerWalletPub",
+  "recoveryKeyPub",
+  "vaultCosignerBasePub",
+  "tweakedVaultCosignerXOnly",
+  ...ARKADE_IDENTITY_FIELDS,
+  "templateVersion",
+  "policyVersion",
+];
+
+export function assertDescriptorIdentity(persisted, status) {
+  const live = requireDescriptorIdentity(status, "status descriptor", true);
+  if (!persisted) return live;
+  const stored = requireDescriptorIdentity(persisted, "persisted descriptor", true);
+  for (const field of DESCRIPTOR_IDENTITY_FIELDS) {
+    if (stored[field] !== live[field]) {
+      throw new Error(`persisted descriptor ${field} does not match vault status`);
+    }
+  }
+  return live;
+}
+
+function requireDescriptorIdentity(value, name, required) {
+  const source = value && typeof value === "object" ? value : {};
+  const present = DESCRIPTOR_IDENTITY_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(source, field));
+  if (!required && present.length === 0) return null;
+  if (present.length !== DESCRIPTOR_IDENTITY_FIELDS.length) {
+    throw new Error(`${name} identity is incomplete`);
+  }
+  const arkade = requireArkadeIdentity(source, `${name} ArkadeCosigner`, true);
+  const identity = {
+    externalOwnerWalletPub: requireCompressed(source.externalOwnerWalletPub, `${name} ExternalOwnerWallet`),
+    recoveryKeyPub: requireCompressed(source.recoveryKeyPub, `${name} RecoveryKey`),
+    vaultCosignerBasePub: requireCompressed(source.vaultCosignerBasePub, `${name} VaultCosigner base`),
+    tweakedVaultCosignerXOnly: requireXOnly(source.tweakedVaultCosignerXOnly, `${name} tweaked VaultCosigner`),
+    ...arkade,
+    templateVersion: requireIdentityString(source.templateVersion, `${name} template version`, 256, true),
+    policyVersion: requireIdentityString(source.policyVersion, `${name} policy version`, 256, true),
+  };
+  const secpRoles = [
+    source.phoneRoutineBip340Pub ? requireCompressed(source.phoneRoutineBip340Pub, `${name} PhoneRoutineBIP340`).slice(2) : null,
+    identity.externalOwnerWalletPub.slice(2),
+    identity.recoveryKeyPub.slice(2),
+    identity.vaultCosignerBasePub.slice(2),
+    identity.tweakedVaultCosignerXOnly,
+    identity.arkadeCosignerBasePub.slice(2),
+    identity.tweakedArkadeCosignerXOnly,
+  ].filter(Boolean);
+  if (new Set(secpRoles).size !== secpRoles.length) {
+    throw new Error(`${name} secp256k1 roles are not x-only independent`);
+  }
+  return identity;
+}
+
+function requireIdentityString(value, name, maxLength, nonempty = false) {
+  if (typeof value !== "string" || value.length > maxLength || (nonempty && value.length === 0) || value.trim() !== value || /[\u0000-\u001f\u007f]/.test(value)) {
     throw new Error(name);
   }
   return value;
@@ -173,10 +236,10 @@ function requireNetwork(value, name) {
 
 function identityLabel(field) {
   return ({
-    arkadeEmulatorBasePub: "base key",
-    tweakedArkadeXOnly: "tweaked key",
-    arkadeEmulatorOrigin: "origin",
-    arkadeEmulatorVersion: "version",
+    arkadeCosignerBasePub: "base key",
+    tweakedArkadeCosignerXOnly: "tweaked key",
+    arkadeCosignerOrigin: "origin",
+    arkadeCosignerVersion: "version",
     network: "network",
   })[field];
 }

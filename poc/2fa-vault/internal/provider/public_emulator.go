@@ -172,7 +172,7 @@ func (s *publicEmulatorSigner) Sign(ctx context.Context, packet *psbt.Packet) (*
 	if err != nil {
 		return nil, err
 	}
-	signed, err := s.client.SubmitOnchainTx(ctx, encoded)
+	signed, err := s.client.signPinnedOnchain(ctx, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (c *publicEmulatorClient) getInfo(ctx context.Context) (publicEmulatorInfoR
 	return out, nil
 }
 
-func (c *publicEmulatorClient) SubmitOnchainTx(ctx context.Context, encoded string) (string, error) {
+func (c *publicEmulatorClient) signPinnedOnchain(ctx context.Context, encoded string) (string, error) {
 	if c == nil || c.hc == nil {
 		return "", fmt.Errorf("public arkade emulator client not configured")
 	}

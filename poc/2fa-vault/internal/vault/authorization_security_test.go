@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/arkade-os/arkd/pkg/ark-lib/txutils"
 	"github.com/arkade-os/emulator/pkg/arkade"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -18,7 +19,7 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	spend, err := BuildCollaborativeSpend(f.collaborativeParams())
+	spend, err := BuildRoutineSpend(f.routineParams())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,14 +29,14 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := SetPacketWitness(ptx.UnsignedTx, wire.TxWitness{signDirectP256LowS(t, f.direct, challenge)}); err != nil {
+		if err := SetPacketWitness(ptx.UnsignedTx, wire.TxWitness{signDirectP256LowS(t, f.phoneDirect, challenge)}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	bindDirect(spend.Packet)
 	cosigners := map[string]*btcec.PublicKey{
-		"private provider":       f.provider.PubKey(),
-		"public arkade emulator": f.arkade.PubKey(),
+		"private vault cosigner":  f.vaultCosigner.PubKey(),
+		"ArkadeCosigner cosigner": f.arkadeCosigner.PubKey(),
 	}
 	policy := f.operational.Record.AuthorizationPolicy
 	for name, base := range cosigners {
@@ -44,35 +45,43 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 		}
 	}
 
-	// Exercise the alternate valid branch with recipient+packet and no change.
+	// A routine full drain is rejected by both the builder and the raw policy.
 	noChangePrev := f.prevTx.Copy()
 	noChangePrev.TxOut[0].Value = securityRecipientSats + securityFeeSats
-	noChangeParams := f.collaborativeParams()
+	noChangeParams := f.routineParams()
 	noChangeParams.PrevTx = noChangePrev
 	noChangeParams.PrevOutPoint.Hash = noChangePrev.TxHash()
-	noChange, err := BuildCollaborativeSpend(noChangeParams)
-	if err != nil {
+	if _, err := BuildRoutineSpend(noChangeParams); err == nil {
+		t.Fatal("routine builder accepted a no-change full drain")
+	}
+	noChange := clonePSBT(t, spend.Packet)
+	noChange.UnsignedTx.TxIn[0].PreviousOutPoint.Hash = noChangePrev.TxHash()
+	noChange.Inputs[0].WitnessUtxo = &wire.TxOut{
+		Value:    noChangePrev.TxOut[0].Value,
+		PkScript: append([]byte(nil), noChangePrev.TxOut[0].PkScript...),
+	}
+	noChange.UnsignedTx.TxOut = []*wire.TxOut{
+		{Value: securityRecipientSats, PkScript: append([]byte(nil), spend.Packet.UnsignedTx.TxOut[0].PkScript...)},
+		spend.Packet.UnsignedTx.TxOut[2],
+	}
+	if err := txutils.SetArkPsbtField(noChange, 0, arkade.PrevoutTxField, *noChangePrev); err != nil {
 		t.Fatal(err)
 	}
-	bindDirect(noChange.Packet)
-	if len(noChange.Packet.UnsignedTx.TxOut) != 2 {
-		t.Fatalf("no-change output count = %d, want recipient+packet", len(noChange.Packet.UnsignedTx.TxOut))
-	}
+	bindDirect(noChange)
 	for name, base := range cosigners {
-		if err := executeRawPacketAuthorization(noChange.Packet, base); err != nil {
-			t.Fatalf("%s rejected valid no-change policy branch: %v", name, err)
+		if err := executeRawPacketAuthorization(noChange, base); err == nil {
+			t.Fatalf("%s accepted a raw no-change full drain", name)
 		}
 	}
 
-	// This is not the ordinary three-output swap (which can fail only because
-	// recursive change moved). Put the real ARK extension at positive-value
-	// recipient index zero and an unrelated zero OP_RETURN last in the valid
-	// two-output form. Both raw signers must reject the moved packet itself.
-	movedPacket := clonePSBT(t, noChange.Packet)
+	// Put the real ARK extension at positive-value recipient index zero and an
+	// unrelated zero OP_RETURN last. Both raw signers must reject the moved
+	// packet itself, independently of the ordinary change-script check.
+	movedPacket := clonePSBT(t, spend.Packet)
 	recipientValue := movedPacket.UnsignedTx.TxOut[0].Value
-	extensionScript := append([]byte(nil), movedPacket.UnsignedTx.TxOut[1].PkScript...)
+	extensionScript := append([]byte(nil), movedPacket.UnsignedTx.TxOut[2].PkScript...)
 	movedPacket.UnsignedTx.TxOut[0] = &wire.TxOut{Value: recipientValue, PkScript: extensionScript}
-	movedPacket.UnsignedTx.TxOut[1] = &wire.TxOut{Value: 0, PkScript: []byte{txscript.OP_RETURN, 0x01, 0x00}}
+	movedPacket.UnsignedTx.TxOut[2] = &wire.TxOut{Value: 0, PkScript: []byte{txscript.OP_RETURN, 0x01, 0x00}}
 	bindDirect(movedPacket)
 	for name, base := range cosigners {
 		if err := executeRawPacketAuthorization(movedPacket, base); err == nil {
@@ -81,8 +90,8 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 	}
 
 	// Bind the exact raw-VM feerate edge, independently of Go classification.
-	stripped := noChange.Packet.UnsignedTx.SerializeSizeStripped()
-	vbytes := int64((stripped*4 + int(CollaborativeWitnessBytes) + 3) / 4)
+	stripped := spend.Packet.UnsignedTx.SerializeSizeStripped()
+	vbytes := int64((stripped*4 + int(RoutineWitnessBytes) + 3) / 4)
 	feeLimit := policy.FeerateCeilingSatPerV * vbytes
 	if feeLimit > policy.AbsoluteFeeCeilingSats {
 		t.Fatalf("fixture feerate boundary %d exceeds absolute cap %d", feeLimit, policy.AbsoluteFeeCeilingSats)
@@ -92,8 +101,8 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 		"one sat over feerate cap": feeLimit + 1,
 	} {
 		t.Run(name, func(t *testing.T) {
-			candidate := clonePSBT(t, noChange.Packet)
-			candidate.UnsignedTx.TxOut[0].Value = noChangePrev.TxOut[0].Value - fee
+			candidate := clonePSBT(t, spend.Packet)
+			candidate.UnsignedTx.TxOut[1].Value = securityPrevoutValue - candidate.UnsignedTx.TxOut[0].Value - fee
 			bindDirect(candidate)
 			for role, base := range cosigners {
 				err := executeRawPacketAuthorization(candidate, base)
@@ -123,6 +132,9 @@ func TestAuthorizationScriptEnforcesTransactionPolicyForBothCosigners(t *testing
 			p.UnsignedTx.TxOut[1].Value = securityPrevoutValue - p.UnsignedTx.TxOut[0].Value - securityFeeSats
 		}},
 		{name: "change leaves vault", mutate: func(p *psbt.Packet) { p.UnsignedTx.TxOut[1].PkScript = []byte{txscript.OP_TRUE} }},
+		{name: "change below dust", mutate: func(p *psbt.Packet) {
+			p.UnsignedTx.TxOut[1].Value = policy.RecipientDustSats - 1
+		}},
 		{name: "packet not last", mutate: func(p *psbt.Packet) {
 			p.UnsignedTx.TxOut[1], p.UnsignedTx.TxOut[2] = p.UnsignedTx.TxOut[2], p.UnsignedTx.TxOut[1]
 		}},
@@ -195,22 +207,23 @@ func TestAuthorizationScriptRejectsLegacyWebAuthnWireWitness(t *testing.T) {
 
 	f := newSecurityVaultFixture(t)
 	op, err := NewOperational(OperationalKeys{
-		Hot:          f.hot.PubKey(),
-		Offline:      f.offline.PubKey(),
-		ProviderBase: f.provider.PubKey(),
-		ArkadeBase:   f.arkade.PubKey(),
-		DirectP256:   webauthn.CompressedP256(directKey),
+		PhoneRoutineBIP340:  f.phoneRoutine.PubKey(),
+		ExternalOwnerWallet: f.externalOwner.PubKey(),
+		RecoveryKey:         f.recovery.PubKey(),
+		VaultCosignerBase:   f.vaultCosigner.PubKey(),
+		ArkadeCosignerBase:  f.arkadeCosigner.PubKey(),
+		PhoneDirectP256:     webauthn.CompressedP256(directKey),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	prevTx := f.prevTx.Copy()
 	prevTx.TxOut[0].PkScript = append([]byte(nil), op.PkScript...)
-	params := f.collaborativeParams()
+	params := f.routineParams()
 	params.Vault = op
 	params.PrevTx = prevTx
 	params.PrevOutPoint.Hash = prevTx.TxHash()
-	spend, err := BuildCollaborativeSpend(params)
+	spend, err := BuildRoutineSpend(params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +232,7 @@ func TestAuthorizationScriptRejectsLegacyWebAuthnWireWitness(t *testing.T) {
 	if err := SetPacketWitness(spend.Packet.UnsignedTx, wire.TxWitness{directSig}); err != nil {
 		t.Fatal(err)
 	}
-	if err := executeRawPacketAuthorization(spend.Packet, f.provider.PubKey()); err != nil {
+	if err := executeRawPacketAuthorization(spend.Packet, f.vaultCosigner.PubKey()); err != nil {
 		t.Fatalf("test setup failed: one-item direct signature was rejected: %v", err)
 	}
 
@@ -238,7 +251,7 @@ func TestAuthorizationScriptRejectsLegacyWebAuthnWireWitness(t *testing.T) {
 	if err := SetPacketWitness(spend.Packet.UnsignedTx, witness); err != nil {
 		t.Fatal(err)
 	}
-	if err := executeRawPacketAuthorization(spend.Packet, f.provider.PubKey()); err == nil {
+	if err := executeRawPacketAuthorization(spend.Packet, f.vaultCosigner.PubKey()); err == nil {
 		t.Fatal("direct authorization script accepted legacy WebAuthn assertion witness")
 	}
 }
@@ -262,7 +275,7 @@ func TestAuthorizationScriptRejectsOffCurveAndNoncanonicalP256(t *testing.T) {
 	}
 	valid := webauthn.CompressedP256(priv)
 	if _, err := AuthorizationScript(valid, fixtureAuthorizationPolicy()); err != nil {
-		t.Fatalf("valid compressed DirectP256: %v", err)
+		t.Fatalf("valid compressed PhoneDirectP256: %v", err)
 	}
 
 	offCurve := make([]byte, 33)

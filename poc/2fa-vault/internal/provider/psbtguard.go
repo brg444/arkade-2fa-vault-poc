@@ -51,36 +51,36 @@ func signExactStage(
 	return out.B64Encode()
 }
 
-func verifyExactCollaborativeSignatures(ptx *psbt.Packet, op *vault.Built, pubs ...*btcec.PublicKey) error {
-	if ptx == nil || ptx.UnsignedTx == nil || op == nil || op.Leaves.Collaborative == nil || len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
-		return fmt.Errorf("collaborative signature stage inputs")
+func verifyExactRoutineSignatures(ptx *psbt.Packet, op *vault.Built, pubs ...*btcec.PublicKey) error {
+	if ptx == nil || ptx.UnsignedTx == nil || op == nil || op.Leaves.Routine == nil || len(ptx.Inputs) != 1 || len(ptx.UnsignedTx.TxIn) != 1 {
+		return fmt.Errorf("routine signature stage inputs")
 	}
 	if len(pubs) == 0 || len(ptx.Inputs[0].TaprootScriptSpendSig) != len(pubs) {
-		return fmt.Errorf("expected exactly %d collaborative signatures", len(pubs))
+		return fmt.Errorf("expected exactly %d routine signatures", len(pubs))
 	}
 	if ptx.Inputs[0].WitnessUtxo == nil || len(ptx.Inputs[0].TaprootLeafScript) != 1 || ptx.Inputs[0].TaprootLeafScript[0] == nil {
-		return fmt.Errorf("collaborative leaf commitment required")
+		return fmt.Errorf("routine leaf commitment required")
 	}
-	leaf := txscript.NewBaseTapLeaf(op.Leaves.Collaborative.Script)
+	leaf := txscript.NewBaseTapLeaf(op.Leaves.Routine.Script)
 	leafHash := leaf.TapHash()
 	expected := make(map[string][]byte, len(pubs))
 	for _, pub := range pubs {
 		if pub == nil {
-			return fmt.Errorf("collaborative signer key required")
+			return fmt.Errorf("routine signer key required")
 		}
 		xonly := schnorr.SerializePubKey(pub)
 		if _, duplicate := expected[string(xonly)]; duplicate {
-			return fmt.Errorf("duplicate collaborative signer identity")
+			return fmt.Errorf("duplicate routine signer identity")
 		}
 		expected[string(xonly)] = xonly
 	}
 	for _, sig := range ptx.Inputs[0].TaprootScriptSpendSig {
 		if sig == nil || sig.SigHash != txscript.SigHashDefault || !bytes.Equal(sig.LeafHash, leafHash[:]) {
-			return fmt.Errorf("malformed collaborative signature")
+			return fmt.Errorf("malformed routine signature")
 		}
 		xonly, ok := expected[string(sig.XOnlyPubKey)]
 		if !ok {
-			return fmt.Errorf("unexpected or duplicate collaborative signature")
+			return fmt.Errorf("unexpected or duplicate routine signature")
 		}
 		if err := verifySignerSig(ptx, sig, xonly, leaf); err != nil {
 			return err
@@ -88,7 +88,7 @@ func verifyExactCollaborativeSignatures(ptx *psbt.Packet, op *vault.Built, pubs 
 		delete(expected, string(sig.XOnlyPubKey))
 	}
 	if len(expected) != 0 {
-		return fmt.Errorf("missing collaborative signature")
+		return fmt.Errorf("missing routine signature")
 	}
 	return nil
 }

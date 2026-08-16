@@ -11,18 +11,18 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// CollaborativeWitnessBytes is the serialized witness contribution expected
-// by OP_TXWEIGHT for the Operational 3-of-3 collaborative leaf: marker+flag,
+// RoutineWitnessBytes is the serialized witness contribution expected
+// by OP_TXWEIGHT for the Operational 3-of-3 Routine leaf: marker+flag,
 // five witness items, three 64-byte signatures, the multisig script and its
 // three-leaf control block. Tests bind this constant to the generated tree and
 // a finalized witness so a template edit cannot silently weaken the feerate
 // check committed below.
-const CollaborativeWitnessBytes int64 = 399
+const RoutineWitnessBytes int64 = 399
 
 // AuthorizationScript is the committed transaction-local Operational policy.
 // It requires the canonical one-input recipient/change/packet shape, caps the
 // recipient and fee, requires recursive change to this exact vault, and then
-// verifies the transaction-bound DirectP256 signature.
+// verifies the transaction-bound PhoneDirectP256 signature.
 //
 // The initial stack is a single compact low-S 64-byte P-256 signature over
 // the current transaction's Arkade sighash. The enrolled key is the
@@ -95,37 +95,10 @@ func buildAuthorizationScript(compressedDirectP256 []byte, policy AuthorizationP
 		AddOp(txscript.OP_GREATERTHANOREQUAL).
 		AddOp(txscript.OP_VERIFY).
 		AddOp(txscript.OP_DROP).
-		// There are either recipient+packet outputs or
-		// recipient+recursive-change+packet outputs. Each branch leaves the
-		// calculated fee above the DirectP256 signature.
+		// Routine spends always contain recipient+recursive-change+packet.
+		// Requiring non-dust same-script change prevents this path from being
+		// used for a full drain or policy replacement.
 		AddOp(arkade.OP_INSPECTNUMOUTPUTS).
-		AddOp(txscript.OP_DUP).
-		AddInt64(2).
-		AddOp(txscript.OP_EQUAL).
-		AddOp(txscript.OP_IF).
-		AddOp(txscript.OP_DROP).
-		AddInt64(1).
-		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
-		AddInt64(0).
-		AddOp(txscript.OP_EQUALVERIFY).
-		AddInt64(int64(arkade.PacketType)).
-		AddOp(arkade.OP_INSPECTPACKET).
-		AddOp(txscript.OP_VERIFY).
-		AddData(packetOutputPrefix).
-		AddOp(txscript.OP_SWAP).
-		AddOp(arkade.OP_CAT).
-		AddOp(txscript.OP_SHA256).
-		AddInt64(1).
-		AddOp(arkade.OP_INSPECTOUTPUTSCRIPTPUBKEY).
-		AddInt64(-1).
-		AddOp(txscript.OP_EQUALVERIFY).
-		AddOp(txscript.OP_EQUALVERIFY).
-		AddInt64(0).
-		AddOp(arkade.OP_INSPECTINPUTVALUE).
-		AddInt64(0).
-		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
-		AddOp(txscript.OP_SUB).
-		AddOp(txscript.OP_ELSE).
 		AddInt64(3).
 		AddOp(txscript.OP_EQUALVERIFY).
 		AddInt64(1).
@@ -168,7 +141,6 @@ func buildAuthorizationScript(compressedDirectP256 []byte, policy AuthorizationP
 		AddInt64(1).
 		AddOp(arkade.OP_INSPECTOUTPUTVALUE).
 		AddOp(txscript.OP_SUB).
-		AddOp(txscript.OP_ENDIF).
 		// Fee must be non-negative and satisfy both absolute and exact
 		// feerate caps using the final three-signature witness size.
 		AddOp(txscript.OP_DUP).
@@ -181,7 +153,7 @@ func buildAuthorizationScript(compressedDirectP256 []byte, policy AuthorizationP
 		AddOp(txscript.OP_VERIFY).
 		AddOp(txscript.OP_DUP).
 		AddOp(arkade.OP_TXWEIGHT).
-		AddInt64(CollaborativeWitnessBytes).
+		AddInt64(RoutineWitnessBytes).
 		AddOp(txscript.OP_ADD).
 		AddInt64(3).
 		AddOp(txscript.OP_ADD).
@@ -192,7 +164,7 @@ func buildAuthorizationScript(compressedDirectP256 []byte, policy AuthorizationP
 		AddOp(txscript.OP_LESSTHANOREQUAL).
 		AddOp(txscript.OP_VERIFY).
 		AddOp(txscript.OP_DROP).
-		// Bind the user-authorized DirectP256 signature to this transaction.
+		// Bind the user-authorized PhoneDirectP256 signature to this transaction.
 		AddOp(txscript.OP_0).
 		AddOp(arkade.OP_SIGHASH).
 		AddData(key).

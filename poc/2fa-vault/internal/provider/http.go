@@ -38,7 +38,8 @@ func NewServer(addr string, h http.Handler) *http.Server {
 }
 
 // ContentSecurityPolicy is the page policy for the decrypt-and-sign UI.
-// Remote script and connect sources are forbidden so a CDN cannot see the hot key.
+// Remote script and connect sources are forbidden so a CDN cannot see the
+// PRF-unlocked PhoneRoutineBIP340 software key.
 const ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'none'"
 
 // Handler is the public POC HTTP API. It never proxies /v1/onchain-tx.

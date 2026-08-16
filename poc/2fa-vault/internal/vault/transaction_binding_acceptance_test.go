@@ -40,11 +40,12 @@ func TestDirectP256AuthorizationIsTransactionBoundAndKeepsWebAuthnOffChain(t *te
 
 	f := newSecurityVaultFixture(t)
 	op, err := NewOperational(OperationalKeys{
-		Hot:          f.hot.PubKey(),
-		Offline:      f.offline.PubKey(),
-		ProviderBase: f.provider.PubKey(),
-		ArkadeBase:   f.arkade.PubKey(),
-		DirectP256:   directPub,
+		PhoneRoutineBIP340:  f.phoneRoutine.PubKey(),
+		ExternalOwnerWallet: f.externalOwner.PubKey(),
+		RecoveryKey:         f.recovery.PubKey(),
+		VaultCosignerBase:   f.vaultCosigner.PubKey(),
+		ArkadeCosignerBase:  f.arkadeCosigner.PubKey(),
+		PhoneDirectP256:     directPub,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -52,17 +53,17 @@ func TestDirectP256AuthorizationIsTransactionBoundAndKeepsWebAuthnOffChain(t *te
 	prevTx := f.prevTx.Copy()
 	prevTx.TxOut[0].PkScript = append([]byte(nil), op.PkScript...)
 
-	paramsA := f.collaborativeParams()
+	paramsA := f.routineParams()
 	paramsA.Vault = op
 	paramsA.PrevTx = prevTx
 	paramsA.PrevOutPoint = wire.OutPoint{Hash: prevTx.TxHash(), Index: 0}
-	spendA, err := BuildCollaborativeSpend(paramsA)
+	spendA, err := BuildRoutineSpend(paramsA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	paramsB := paramsA
 	paramsB.RecipientAmount++
-	spendB, err := BuildCollaborativeSpend(paramsB)
+	spendB, err := BuildRoutineSpend(paramsB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestDirectP256AuthorizationIsTransactionBoundAndKeepsWebAuthnOffChain(t *te
 	if err := SetPacketWitness(spendA.Packet.UnsignedTx, wire.TxWitness{directSigA}); err != nil {
 		t.Fatal(err)
 	}
-	if err := executeRawPacketAuthorization(spendA.Packet, f.provider.PubKey()); err != nil {
+	if err := executeRawPacketAuthorization(spendA.Packet, f.vaultCosigner.PubKey()); err != nil {
 		t.Fatalf("raw Arkade signer rejected a direct signature for spend A: %v", err)
 	}
 
@@ -92,7 +93,7 @@ func TestDirectP256AuthorizationIsTransactionBoundAndKeepsWebAuthnOffChain(t *te
 	if err := SetPacketWitness(spendB.Packet.UnsignedTx, wire.TxWitness{directSigA}); err != nil {
 		t.Fatal(err)
 	}
-	if err := executeRawPacketAuthorization(spendB.Packet, f.provider.PubKey()); err == nil {
+	if err := executeRawPacketAuthorization(spendB.Packet, f.vaultCosigner.PubKey()); err == nil {
 		t.Fatal("raw Arkade signer accepted spend A's direct P-256 signature on changed spend B")
 	}
 }

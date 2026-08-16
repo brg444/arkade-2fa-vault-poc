@@ -35,7 +35,7 @@ func (stubEmulatorSigner) Sign(context.Context, *psbt.Packet) (*psbt.Packet, err
 	return nil, errors.New("stub public signer must not be called")
 }
 
-func TestLoadProviderKeyRejectsNormalizedAndOutOfRangeScalars(t *testing.T) {
+func TestLoadVaultCosignerKeyRejectsNormalizedAndOutOfRangeScalars(t *testing.T) {
 	order := btcec.S256().N
 	orderMinusOne := new(big.Int).Sub(new(big.Int).Set(order), big.NewInt(1))
 	orderPlusOne := new(big.Int).Add(new(big.Int).Set(order), big.NewInt(1))
@@ -51,12 +51,12 @@ func TestLoadProviderKeyRejectsNormalizedAndOutOfRangeScalars(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "provider-key")
+			path := filepath.Join(t.TempDir(), "vault-cosigner-key")
 			if err := os.WriteFile(path, []byte(hex.EncodeToString(test.raw)+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadProviderKey(path); err == nil {
-				t.Fatal("unsafe provider scalar accepted")
+			if _, err := LoadVaultCosignerKey(path); err == nil {
+				t.Fatal("unsafe VaultCosigner scalar accepted")
 			}
 		})
 	}
@@ -65,22 +65,22 @@ func TestLoadProviderKeyRejectsNormalizedAndOutOfRangeScalars(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "provider-key")
+	path := filepath.Join(t.TempDir(), "vault-cosigner-key")
 	if err := os.WriteFile(path, []byte(hex.EncodeToString(valid.Serialize())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadProviderKey(path)
+	loaded, err := LoadVaultCosignerKey(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !loaded.PubKey().IsEqual(valid.PubKey()) {
-		t.Fatal("loaded provider key changed")
+		t.Fatal("loaded VaultCosigner key changed")
 	}
-	overlong := filepath.Join(t.TempDir(), "provider-key")
+	overlong := filepath.Join(t.TempDir(), "vault-cosigner-key")
 	if err := os.WriteFile(overlong, []byte(hex.EncodeToString(valid.Serialize())+"  ignored"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadProviderKey(overlong); err == nil {
+	if _, err := LoadVaultCosignerKey(overlong); err == nil {
 		t.Fatal("overlong file with a valid key prefix was accepted")
 	}
 }
@@ -120,8 +120,8 @@ func TestCredentialIntegrityKeyUsesDomainSeparatedHKDF(t *testing.T) {
 	}
 }
 
-func TestOfflineKeyRejectsFixtureEncodings(t *testing.T) {
-	fixtureRaw, err := hex.DecodeString(fixture.OfflinePubHex)
+func TestDeploymentKeyRejectsFixtureEncodings(t *testing.T) {
+	fixtureRaw, err := hex.DecodeString(fixture.RecoveryKeyPubHex)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,13 +130,13 @@ func TestOfflineKeyRejectsFixtureEncodings(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, encoded := range []string{
-		fixture.OfflinePubHex,
-		strings.ToUpper(fixture.OfflinePubHex),
+		fixture.RecoveryKeyPubHex,
+		strings.ToUpper(fixture.RecoveryKeyPubHex),
 		hex.EncodeToString(negatePub(t, fixturePub).SerializeCompressed()),
 		hex.EncodeToString(fixturePub.SerializeUncompressed()),
 	} {
-		if _, err := parseOfflinePub(encoded); err == nil {
-			t.Fatalf("unsafe offline key accepted: %s", encoded)
+		if _, err := parseDeploymentPub("RecoveryKey", encoded); err == nil {
+			t.Fatalf("unsafe RecoveryKey accepted: %s", encoded)
 		}
 	}
 }
@@ -154,16 +154,20 @@ func negatePub(t *testing.T, pub *btcec.PublicKey) *btcec.PublicKey {
 
 func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	dir := t.TempDir()
-	providerKey, err := btcec.NewPrivateKey()
+	vaultCosignerKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	offlineKey, err := btcec.NewPrivateKey()
+	externalOwnerKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	providerPath := filepath.Join(dir, "provider-key")
-	if err := os.WriteFile(providerPath, []byte(hex.EncodeToString(providerKey.Serialize())+"\n"), 0o600); err != nil {
+	recoveryKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultCosignerPath := filepath.Join(dir, "vault-cosigner-key")
+	if err := os.WriteFile(vaultCosignerPath, []byte(hex.EncodeToString(vaultCosignerKey.Serialize())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const token = "one-time enrollment secret with enough entropy"
@@ -176,10 +180,11 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 			ClientOrigin: "https://vault.example.com", RPID: "vault.example.com",
 			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
 		},
-		DatabasePath:    filepath.Join(dir, "vault.sqlite"),
-		ProviderKeyFile: providerPath,
-		OfflinePubHex:   hex.EncodeToString(offlineKey.PubKey().SerializeCompressed()),
-		EsploraURL:      "https://mempool.mutinynet.arkade.sh/api",
+		DatabasePath:              filepath.Join(dir, "vault.sqlite"),
+		VaultCosignerKeyFile:      vaultCosignerPath,
+		ExternalOwnerWalletPubHex: hex.EncodeToString(externalOwnerKey.PubKey().SerializeCompressed()),
+		RecoveryKeyPubHex:         hex.EncodeToString(recoveryKey.PubKey().SerializeCompressed()),
+		EsploraURL:                "https://mempool.mutinynet.arkade.sh/api",
 	}
 	dials := 0
 	dial := func(_ context.Context, baseURL, network string) (provider.Broadcaster, error) {
@@ -192,9 +197,9 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	emulatorDials := 0
 	emulatorDial := func(_ context.Context, origin string, expected *btcec.PublicKey, versions []string, allowDeprecated bool) (provider.Signer, provider.PublicEmulatorIdentity, error) {
 		emulatorDials++
-		if origin != deployment.MutinynetArkadeEmulatorOrigin ||
-			expected == nil || hex.EncodeToString(expected.SerializeCompressed()) != deployment.MutinynetArkadeEmulatorPubHex ||
-			len(versions) != 1 || versions[0] != deployment.MutinynetArkadeEmulatorVersion {
+		if origin != deployment.MutinynetArkadeCosignerOrigin ||
+			expected == nil || hex.EncodeToString(expected.SerializeCompressed()) != deployment.MutinynetArkadeCosignerPubHex ||
+			len(versions) != 1 || versions[0] != deployment.MutinynetArkadeCosignerVersion {
 			t.Fatalf("public emulator pin = %q %x %v", origin, expected.SerializeCompressed(), versions)
 		}
 		if allowDeprecated != (emulatorDials > 1) {
@@ -217,8 +222,8 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := runtime.service.Signer.(provider.LocalSigner); !ok {
-		t.Fatalf("protected runtime signer = %T, want local policy-final signer", runtime.service.Signer)
+	if _, ok := runtime.service.VaultSigner.(provider.LocalSigner); !ok {
+		t.Fatalf("protected runtime signer = %T, want local policy-final signer", runtime.service.VaultSigner)
 	}
 	if len(runtime.service.EnrollmentTokenHash) != 32 {
 		t.Fatal("fresh runtime did not load the enrollment authorization hash")
@@ -230,10 +235,10 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	direct, _ := webauthn.NewP256()
 	hot, _ := btcec.NewPrivateKey()
 	err = runtime.service.RegisterWithBootstrap(provider.RegisterRequest{
-		CredentialID: hex.EncodeToString([]byte("mutinynet-credential")),
-		WebAuthnP256: hex.EncodeToString(webauthn.CompressedP256(passkey)),
-		DirectP256:   hex.EncodeToString(webauthn.CompressedP256(direct)),
-		HotPub:       hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		CredentialID:          hex.EncodeToString([]byte("mutinynet-credential")),
+		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}, token)
 	if err != nil {
 		t.Fatal(err)

@@ -15,7 +15,7 @@ import (
 // former intentionally green raw-signer bypass proof. LocalSigner remains a
 // small policy-agnostic primitive, but the deployed authorizer never exposes
 // it: every provider-key operation is reached only through Service.Authorize
-// after independent transaction, WebAuthn, DirectP256, hot-signature, policy,
+// after independent transaction, WebAuthn, PhoneDirectP256, hot-signature, policy,
 // and durable-reservation checks.
 func TestAuthorizerHTTPBoundaryEnforcesPolicyBeforeProviderKeyUse(t *testing.T) {
 	t.Run("recipient cap", func(t *testing.T) {
