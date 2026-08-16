@@ -209,7 +209,14 @@ running while RPC stays down, the launcher fails with a stale/warming
 message and does not stop or delete user Nigiri state. It refuses to run
 beside an official Nigiri
 `ark` container, validates the merged compose, `up -d --build`, polls
-`/health`, and runtime-asserts the
+the arkd v0.9.13 admin status, and makes its disposable operator wallet
+initialized, unlocked, and synced before polling `/health`. Fresh stacks create
+the wallet; reruns and restarts only unlock it when needed. The fixed default
+password (`arkade-regtest-only-wallet-fixture`) is a public REGTEST-only fixture,
+not a secret. `ARKD_REGTEST_WALLET_PASSWORD` may override it for this launcher.
+The create command's mnemonic output is suppressed, every wallet admin command
+has a timeout, and the readiness poll has a finite attempt limit. The launcher
+then runtime-asserts the
 Emulator has no host port, is not on `nigiri`, has exactly one attached
 network, and that network is `Internal=true`. The provider uses **RemoteSigner only**. `VAULT_DEMO=1` enables
 fund/mine only. After `/v1/demo/fund` the browser requires

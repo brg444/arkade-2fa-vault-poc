@@ -109,6 +109,13 @@ func TestVaultComposeOverlayBuildContextResolvesFromEmulatorRoot(t *testing.T) {
 	if !strings.Contains(sh, "up -d --build") {
 		t.Fatal("regtest-up.sh must start the stack detached")
 	}
+	bootstrapCall := `sh "$SCRIPT_DIR/arkd-wallet-bootstrap.sh"`
+	bootstrapAt := strings.Index(sh, bootstrapCall)
+	upAt := strings.Index(sh, "$COMPOSE up -d --build")
+	healthAt := strings.Index(sh, `while ! curl -sf "$HEALTH_URL"`)
+	if upAt < 0 || bootstrapAt < 0 || healthAt < 0 || !(upAt < bootstrapAt && bootstrapAt < healthAt) {
+		t.Fatal("regtest-up.sh must bootstrap arkd wallet after compose up and before Provider health polling")
+	}
 	if !strings.Contains(sh, "http://localhost:8787") {
 		t.Fatal("regtest-up.sh must print the WebAuthn origin")
 	}

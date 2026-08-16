@@ -23,6 +23,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)"
+SCRIPT_DIR="$ROOT/poc/2fa-vault/scripts"
 cd "$ROOT"
 
 COMPOSE="docker compose -f docker-compose.regtest.yml -f poc/2fa-vault/docker-compose.yml"
@@ -113,6 +114,12 @@ $COMPOSE config >/dev/null
 
 echo "starting private emulator + vault-provider"
 $COMPOSE up -d --build
+
+# arkd v0.9.13 exposes its admin service before a fresh operator wallet is
+# initialized. Bootstrap that disposable REGTEST-only wallet before treating
+# Provider health as meaningful. The helper is restart-safe and never prints
+# the mnemonic returned by `arkd wallet create`.
+sh "$SCRIPT_DIR/arkd-wallet-bootstrap.sh"
 
 i=0
 while ! curl -sf "$HEALTH_URL" >/dev/null 2>&1; do
