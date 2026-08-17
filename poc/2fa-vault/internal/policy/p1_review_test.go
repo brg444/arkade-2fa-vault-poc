@@ -515,8 +515,8 @@ func TestPendingEnrollmentReplayReusesVaultIdentity(t *testing.T) {
 	if replay.VaultID != first.VaultID || replay.Handle != first.Handle {
 		t.Fatalf("replay allocated a new identity: first=%+v replay=%+v", first, replay)
 	}
-	if !bytes.Equal(replay.Challenge, []byte("challenge-2")) {
-		t.Fatal("replay did not refresh the pending challenge")
+	if !bytes.Equal(replay.Challenge, first.Challenge) {
+		t.Fatal("unexpired replay rotated the pending challenge")
 	}
 	var n int
 	if err := led.db.QueryRow(`SELECT COUNT(*) FROM pending_enrollment`).Scan(&n); err != nil || n != 1 {
@@ -536,6 +536,21 @@ func TestPendingEnrollmentReplayReusesVaultIdentity(t *testing.T) {
 	}
 	if second.VaultID == first.VaultID {
 		t.Fatal("distinct invites shared a pending vault id")
+	}
+
+	expired := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)
+	if _, err := led.db.Exec(`UPDATE pending_enrollment SET expires_at = ? WHERE token_hash = ?`, expired, token); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := led.ReservePendingEnrollment(PendingEnrollment{
+		Handle: "handle-1", VaultID: "vault-one", TokenHash: token,
+		Challenge: []byte("challenge-rotated"), ExpiresAt: now, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rotated.Challenge, []byte("challenge-rotated")) {
+		t.Fatal("expired pending did not rotate the challenge")
 	}
 }
 

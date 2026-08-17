@@ -75,9 +75,12 @@ func reservePendingEnrollmentTx(tx *sql.Tx, p PendingEnrollment) (*PendingEnroll
 		return nil, err
 	}
 	if existing != nil {
+		if existing.ExpiresAt != "" && existing.ExpiresAt >= p.CreatedAt {
+			return existing, nil
+		}
 		if _, err := tx.Exec(
-			`UPDATE pending_enrollment SET challenge = ?, expires_at = ? WHERE token_hash = ?`,
-			p.Challenge, p.ExpiresAt, p.TokenHash,
+			`UPDATE pending_enrollment SET challenge = ?, expires_at = ? WHERE token_hash = ? AND challenge = ?`,
+			p.Challenge, p.ExpiresAt, p.TokenHash, existing.Challenge,
 		); err != nil {
 			return nil, err
 		}

@@ -46,6 +46,7 @@ type EnrollFinishRequest struct {
 	UserHandle        string `json:"userHandle"`
 	ClientDataJSON    string `json:"clientDataJSON"`
 	AuthenticatorData string `json:"authenticatorData"`
+	AttestationObject string `json:"attestationObject,omitempty"`
 	RegisterRequest
 }
 
@@ -163,7 +164,20 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 	if err != nil {
 		return nil, fmt.Errorf("authenticatorData: %w", err)
 	}
-	attestedID, err := webauthn.ValidateCreate(clientData, authData, pending.Challenge, cfg.ClientOrigin, cfg.RPID)
+	if req.AttestationObject != "" {
+		obj, err := decodeHex(req.AttestationObject)
+		if err != nil {
+			return nil, fmt.Errorf("attestationObject: %w", err)
+		}
+		fromObj, err := webauthn.ParseAttestationObject(obj)
+		if err != nil {
+			return nil, fmt.Errorf("attestationObject: %w", err)
+		}
+		if !bytesEqualConst(fromObj, authData) {
+			return nil, fmt.Errorf("attestationObject authData mismatch")
+		}
+	}
+	created, err := webauthn.ValidateCreate(clientData, authData, pending.Challenge, cfg.ClientOrigin, cfg.RPID)
 	if err != nil {
 		return nil, fmt.Errorf("webauthn create: %w", err)
 	}
@@ -174,11 +188,13 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 	if !bytesEqualConst([]byte(pending.VaultID), userHandle) {
 		return nil, fmt.Errorf("userHandle does not match assigned vault")
 	}
-	if len(attestedID) > 0 {
-		posted, err := decodeHex(req.CredentialID)
-		if err != nil || !bytesEqualConst(attestedID, posted) {
-			return nil, fmt.Errorf("credential id does not match authenticator")
-		}
+	postedID, err := decodeHex(req.CredentialID)
+	if err != nil || !bytesEqualConst(created.CredentialID, postedID) {
+		return nil, fmt.Errorf("credential id does not match authenticator")
+	}
+	postedP256, err := decodeHex(req.WebAuthnP256)
+	if err != nil || !bytesEqualConst(created.WebAuthnP256, postedP256) {
+		return nil, fmt.Errorf("webauthn p256 does not match authenticator")
 	}
 	if req.ExternalOwnerWalletXOnly == "" || req.RecoveryKeyXOnly == "" {
 		return nil, fmt.Errorf("tenant owner and recovery pubs required")

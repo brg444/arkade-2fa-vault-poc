@@ -52,7 +52,7 @@ type Service struct {
 	OpenEnrollment bool
 	// MultiTenantEnrollment arms invite-scoped /v1/enroll/* and /v1/invite.
 	// Default false: those routes stay 404 until an explicit cutover.
-	MultiTenantEnrollment bool
+	MultiTenantEnrollment     bool
 	PhoneRoutineBIP340        *btcec.PublicKey
 	ExternalOwnerWallet       *btcec.PublicKey
 	RecoveryKey               *btcec.PublicKey
@@ -388,7 +388,19 @@ func (s *Service) acceptPersistedEnrollment(existing *policy.Credential, parsed 
 	return s.publishStoredEnrollment(existing, false)
 }
 
-func (s *Service) parseRegisterRequest(req RegisterRequest, existing *policy.Credential) (parsed parsedRegisterRequest, err error) {
+func (s *Service) parseRegisterRequest(req RegisterRequest, existing *policy.Credential) (parsedRegisterRequest, error) {
+	return s.parseRegisterRequestWithKeys(req, existing, s.PhoneRoutineBIP340, s.ExternalOwnerWallet, s.RecoveryKey)
+}
+
+func (s *Service) parseRegisterRequestIndependent(req RegisterRequest) (parsedRegisterRequest, error) {
+	return s.parseRegisterRequestWithKeys(req, nil, nil, nil, nil)
+}
+
+func (s *Service) parseRegisterRequestWithKeys(
+	req RegisterRequest,
+	existing *policy.Credential,
+	phoneFallback, ownerFallback, recoveryFallback *btcec.PublicKey,
+) (parsed parsedRegisterRequest, err error) {
 	parsed.id, err = decodeHex(req.CredentialID)
 	if err != nil {
 		return parsed, fmt.Errorf("credentialId: %w", err)
@@ -413,7 +425,7 @@ func (s *Service) parseRegisterRequest(req RegisterRequest, existing *policy.Cre
 	if bytes.Equal(parsed.webauthnP256, parsed.phoneDirectP256) {
 		return parsed, fmt.Errorf("direct-auth p256 must be distinct from the webauthn credential p256")
 	}
-	parsed.phoneRoutine, err = parsePhoneRoutineBIP340Pub(req.PhoneRoutineBIP340Pub, s.PhoneRoutineBIP340)
+	parsed.phoneRoutine, err = parsePhoneRoutineBIP340Pub(req.PhoneRoutineBIP340Pub, phoneFallback)
 	if err != nil {
 		return parsed, err
 	}
@@ -428,23 +440,15 @@ func (s *Service) parseRegisterRequest(req RegisterRequest, existing *policy.Cre
 			return parsed, fmt.Errorf("stored RecoveryKey: %w", err)
 		}
 	}
-	parsed.externalOwner, err = s.parseOnboardingKey("externalOwnerWalletXOnly", req.ExternalOwnerWalletXOnly, s.ExternalOwnerWallet, existingOwner)
+	parsed.externalOwner, err = s.parseOnboardingKey("externalOwnerWalletXOnly", req.ExternalOwnerWalletXOnly, ownerFallback, existingOwner)
 	if err != nil {
 		return parsed, err
 	}
-	parsed.recovery, err = s.parseOnboardingKey("recoveryKeyXOnly", req.RecoveryKeyXOnly, s.RecoveryKey, existingRecovery)
+	parsed.recovery, err = s.parseOnboardingKey("recoveryKeyXOnly", req.RecoveryKeyXOnly, recoveryFallback, existingRecovery)
 	if err != nil {
 		return parsed, err
 	}
 	return parsed, nil
-}
-
-func (s *Service) parseRegisterRequestIndependent(req RegisterRequest) (parsedRegisterRequest, error) {
-	owner, recovery := s.ExternalOwnerWallet, s.RecoveryKey
-	s.ExternalOwnerWallet, s.RecoveryKey = nil, nil
-	parsed, err := s.parseRegisterRequest(req, nil)
-	s.ExternalOwnerWallet, s.RecoveryKey = owner, recovery
-	return parsed, err
 }
 
 func sameEnrollmentTuple(c *policy.Credential, parsed parsedRegisterRequest) bool {
@@ -1102,7 +1106,7 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 		st.ArkadeCosignerBasePub = hex.EncodeToString(cred.ArkadeCosignerBase)
 		st.ArkadeCosignerOrigin = cred.ArkadeCosignerOrigin
 		st.ArkadeCosignerVersion = cred.ArkadeCosignerVersion
-		envelope, envelopeErr := s.loadVerifiedCredentialEnvelope(cred.ID)
+		envelope, envelopeErr := s.loadVerifiedEnvelopeFor(vaultID, cred.ID)
 		if envelopeErr != nil {
 			return Status{}, envelopeErr
 		}
@@ -1562,11 +1566,34 @@ func (s *Service) sealCredentialEnvelope(envelope *policy.CredentialEnvelope, cr
 }
 
 func (s *Service) loadVerifiedCredentialEnvelope(credentialID []byte) (*policy.CredentialEnvelope, error) {
+	return s.loadVerifiedEnvelopeFor(fixture.VaultID, credentialID)
+}
+
+func (s *Service) loadVerifiedEnvelopeFor(vaultID string, credentialID []byte) (*policy.CredentialEnvelope, error) {
 	key, err := s.credentialIntegrityKey()
 	if err != nil {
 		return nil, err
 	}
 	defer zeroServiceBytes(key)
+	vaultID = routeVaultID(vaultID)
+	if s.Ledger != nil && s.Ledger.MultiTenantReady() {
+		envelope, err := s.Ledger.GetVaultEnvelope(vaultID)
+		if err != nil {
+			return nil, err
+		}
+		if envelope != nil {
+			if err := policy.VerifyCredentialEnvelope(envelope, credentialID, key); err != nil {
+				return nil, fmt.Errorf("authoritative credential envelope integrity verification failed: %w; restore a verified backup or use a reviewed migration", err)
+			}
+			return envelope, nil
+		}
+		if vaultID != fixture.VaultID {
+			return nil, nil
+		}
+	}
+	if vaultID != fixture.VaultID {
+		return nil, nil
+	}
 	envelope, err := s.Ledger.GetCredentialEnvelope()
 	if err != nil || envelope == nil {
 		return envelope, err

@@ -453,8 +453,12 @@ VALUES (?,?,?,?,?,?,?,?)`,
 }
 
 func getVaultEnvelopeTx(tx *sql.Tx, vaultID string) (*CredentialEnvelope, error) {
+	return getVaultEnvelope(tx, vaultID)
+}
+
+func getVaultEnvelope(q queryRower, vaultID string) (*CredentialEnvelope, error) {
 	var envelope CredentialEnvelope
-	err := tx.QueryRow(`
+	err := q.QueryRow(`
 SELECT version, binding, nonce, ciphertext, direct_signature, phone_signature, integrity_mac
   FROM vault_envelope WHERE vault_id = ?`, vaultID).Scan(
 		&envelope.Version, &envelope.Binding, &envelope.Nonce, &envelope.Ciphertext,
@@ -470,6 +474,18 @@ SELECT version, binding, nonce, ciphertext, direct_signature, phone_signature, i
 		return nil, err
 	}
 	return &envelope, nil
+}
+
+// GetVaultEnvelope returns the tenant-scoped recovery envelope, if any.
+// It never reads the legacy singleton credential_envelope table.
+func (l *Ledger) GetVaultEnvelope(vaultID string) (*CredentialEnvelope, error) {
+	if vaultID == "" {
+		return nil, fmt.Errorf("vault id required")
+	}
+	if !v4TableExists(l.db) {
+		return nil, nil
+	}
+	return getVaultEnvelope(l.db, vaultID)
 }
 
 func envelopesEqual(a, b CredentialEnvelope) bool {
