@@ -147,7 +147,7 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		zero(credentialIntegrityKey)
 		return nil, fmt.Errorf("multi-tenant migration: %w", err)
 	}
-	if err := ledger.BackupSQLiteIfAbsent(cfg.DatabasePath + ".pre-v5"); err != nil {
+	if err := ledger.BackupGenerationIfAbsent(cfg.DatabasePath+".pre-v5", policy.BackupGenerationPreV5); err != nil {
 		zero(credentialIntegrityKey)
 		return nil, fmt.Errorf("pre-v5 backup: %w", err)
 	}

@@ -45,7 +45,7 @@ func TestRehearseLiveV5IssuanceMigrateOnDownloadedSnapshot(t *testing.T) {
 	if err := led.SetIntegrityKey(key); err != nil {
 		t.Fatal(err)
 	}
-	if err := led.BackupSQLiteIfAbsent(dst + ".pre-v5"); err != nil {
+	if err := led.BackupGenerationIfAbsent(dst+".pre-v5", policy.BackupGenerationPreV5); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(dst + ".pre-v5"); err != nil {

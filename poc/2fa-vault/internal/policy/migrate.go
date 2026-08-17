@@ -8,14 +8,42 @@ import (
 	"path/filepath"
 )
 
-// BackupSQLiteIfAbsent writes a consistent snapshot of the verified live v3
-// credential to dest via VACUUM INTO when dest does not exist. An existing
-// dest is accepted only after SQLite integrity, exact v3 schema validation,
-// and an identity match against the live record. The v4 migration is
-// forward-only: restore this file and the pre-v4 binary to roll back.
+// BackupGeneration is the schema generation a rollback file must represent.
+type BackupGeneration int
+
+const (
+	// BackupGenerationPreV4 is .pre-v4: no schema_meta, for the v3 binary.
+	BackupGenerationPreV4 BackupGeneration = 3
+	// BackupGenerationPreV5 is .pre-v5: schema_meta=4 and unsealed issuance,
+	// for the v4 binary. A v5 live file must never be accepted as this.
+	BackupGenerationPreV5 BackupGeneration = 4
+)
+
+func (g BackupGeneration) String() string {
+	switch g {
+	case BackupGenerationPreV4:
+		return "pre-v4"
+	case BackupGenerationPreV5:
+		return "pre-v5"
+	default:
+		return "unknown"
+	}
+}
+
+// BackupSQLiteIfAbsent writes a v3 rollback snapshot (.pre-v4).
 func (l *Ledger) BackupSQLiteIfAbsent(dest string) error {
+	return l.BackupGenerationIfAbsent(dest, BackupGenerationPreV4)
+}
+
+// BackupGenerationIfAbsent writes dest only while the live database is still
+// at that generation. A missing historical backup is not invented after
+// the live file has advanced.
+func (l *Ledger) BackupGenerationIfAbsent(dest string, gen BackupGeneration) error {
 	if dest == "" {
 		return fmt.Errorf("backup path required")
+	}
+	if gen != BackupGenerationPreV4 && gen != BackupGenerationPreV5 {
+		return fmt.Errorf("unknown backup generation")
 	}
 	if len(l.integrityKey) != sha256.Size {
 		return fmt.Errorf("integrity key required to verify backup")
@@ -34,11 +62,22 @@ func (l *Ledger) BackupSQLiteIfAbsent(dest string) error {
 	}
 
 	if _, err := os.Stat(dest); err == nil {
-		return acceptExistingBackup(dest, live, l.integrityKey)
+		return acceptExistingBackup(dest, live, l.integrityKey, gen)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if live == nil {
+		return nil
+	}
+	liveGen, err := inspectSchemaGeneration(l.db)
+	if err != nil {
+		return err
+	}
+	if !liveGen.canCreate(gen) {
+		if gen == BackupGenerationPreV5 && liveGen.HasMeta && liveGen.MetaVersion >= schemaVersionIssuanceMAC {
+			return fmt.Errorf("cannot create %s backup: live database has already advanced past this generation", gen)
+		}
+		// A historical snapshot cannot be invented from a later generation.
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
@@ -48,14 +87,14 @@ func (l *Ledger) BackupSQLiteIfAbsent(dest string) error {
 		_ = os.Remove(dest)
 		return fmt.Errorf("sqlite backup: %w", err)
 	}
-	if err := acceptExistingBackup(dest, live, l.integrityKey); err != nil {
+	if err := acceptExistingBackup(dest, live, l.integrityKey, gen); err != nil {
 		_ = os.Remove(dest)
 		return fmt.Errorf("new backup failed validation: %w", err)
 	}
 	return nil
 }
 
-func acceptExistingBackup(dest string, live *Credential, integrityKey []byte) error {
+func acceptExistingBackup(dest string, live *Credential, integrityKey []byte, gen BackupGeneration) error {
 	db, err := sql.Open("sqlite", dest)
 	if err != nil {
 		return fmt.Errorf("open backup: %w", err)
@@ -67,6 +106,13 @@ func acceptExistingBackup(dest string, live *Credential, integrityKey []byte) er
 	}
 	if err := validateV3Schema(db, dest); err != nil {
 		return fmt.Errorf("backup schema: %w", err)
+	}
+	got, err := inspectSchemaGeneration(db)
+	if err != nil {
+		return fmt.Errorf("backup generation: %w", err)
+	}
+	if err := got.require(gen); err != nil {
+		return fmt.Errorf("existing %s backup: %w", gen, err)
 	}
 	stored, err := loadCredential(db)
 	if err != nil {
@@ -84,6 +130,69 @@ func acceptExistingBackup(dest string, live *Credential, integrityKey []byte) er
 		return fmt.Errorf("backup identity mismatch (%v)", err)
 	}
 	return nil
+}
+
+type schemaGeneration struct {
+	HasMeta        bool
+	MetaVersion    int
+	IssuanceSealed bool
+}
+
+func inspectSchemaGeneration(db *sql.DB) (schemaGeneration, error) {
+	var g schemaGeneration
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'`).Scan(&name)
+	switch {
+	case err == sql.ErrNoRows:
+	case err != nil:
+		return g, err
+	default:
+		g.HasMeta = true
+		ver, n, err := schemaMetaState(db)
+		if err != nil {
+			return g, err
+		}
+		if n == 1 {
+			g.MetaVersion = ver
+		}
+	}
+	cols, err := tableColumns(db, "issuance")
+	if err != nil {
+		return g, err
+	}
+	g.IssuanceSealed = sameColumns(cols, issuanceColumns)
+	return g, nil
+}
+
+func (g schemaGeneration) require(gen BackupGeneration) error {
+	switch gen {
+	case BackupGenerationPreV4:
+		if g.HasMeta {
+			return fmt.Errorf("must not have schema_meta")
+		}
+		return nil
+	case BackupGenerationPreV5:
+		if !g.HasMeta || g.MetaVersion != schemaVersionMultiTenant {
+			return fmt.Errorf("must be schema v4")
+		}
+		if g.IssuanceSealed {
+			return fmt.Errorf("must have unsealed legacy issuance")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown backup generation")
+	}
+}
+
+func (g schemaGeneration) canCreate(gen BackupGeneration) bool {
+	switch gen {
+	case BackupGenerationPreV4:
+		return !g.HasMeta
+	case BackupGenerationPreV5:
+		return g.HasMeta && g.MetaVersion == schemaVersionMultiTenant && !g.IssuanceSealed
+	default:
+		return false
+	}
 }
 
 func requireSQLiteIntegrity(db *sql.DB) error {
@@ -175,10 +284,15 @@ func (l *Ledger) MigrateIssuanceIntegrity(integrityKey []byte) error {
 			return err
 		}
 	}
+	cols, err := tableColumns(l.db, "issuance")
+	if err != nil {
+		return err
+	}
+	wasLegacy := sameColumns(cols, issuanceColumnsLegacy)
 	if err := ensureIssuanceIntegrity(l.db, "issuance"); err != nil {
 		return err
 	}
-	if v4TableExists(l.db) && n == 1 && ver == schemaVersionMultiTenant {
+	if wasLegacy && v4TableExists(l.db) && n == 1 && ver == schemaVersionMultiTenant {
 		if _, err := l.db.Exec(`UPDATE schema_meta SET version = ? WHERE version = ?`, schemaVersionIssuanceMAC, schemaVersionMultiTenant); err != nil {
 			return fmt.Errorf("issuance mac schema version: %w", err)
 		}

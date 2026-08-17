@@ -97,10 +97,7 @@ func TestV4BinaryRejectsV5IssuanceSchema(t *testing.T) {
 		!strings.Contains(err.Error(), "newer than this binary") {
 		t.Fatalf("v4 binary accepted v5: %v", err)
 	}
-	led := openTestLedger(t, nil)
-	if err := led.MigrateLegacySingleton(testIntegrityKey()); err != nil {
-		t.Fatal(err)
-	}
+	led := openV4LegacyLedger(t)
 	if err := led.MigrateIssuanceIntegrity(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
