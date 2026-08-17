@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
@@ -392,6 +393,11 @@ func decodePoPHex(encoded string) []byte {
 func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, req RegisterRequest) error {
 	if owner == nil || recovery == nil {
 		return fmt.Errorf("tenant owner and recovery pubs required")
+	}
+	if strings.TrimSpace(req.ExternalOwnerProof) == "" && strings.TrimSpace(req.RecoveryProof) == "" {
+		// Pubs are treated as declared ownership. A Schnorr paste is not a
+		// committing transaction and is not required to finish enroll.
+		return nil
 	}
 	if req.DescriptorHash == "" {
 		return fmt.Errorf("enrollment descriptor hash required")

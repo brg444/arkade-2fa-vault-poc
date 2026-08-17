@@ -137,6 +137,12 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 	if _, err := svc.FinishEnrollment(context.Background(), token, missing); err == nil {
 		t.Fatal("finish accepted a tenant without owner/recovery pubs")
 	}
+	unsigned := req
+	unsigned.ExternalOwnerProof = ""
+	unsigned.RecoveryProof = ""
+	if _, err := svc.FinishEnrollment(context.Background(), token, unsigned); err != nil {
+		t.Fatalf("finish without ownership proofs: %v", err)
+	}
 	st, err := svc.FinishEnrollment(context.Background(), token, req)
 	if err != nil {
 		t.Fatal(err)
