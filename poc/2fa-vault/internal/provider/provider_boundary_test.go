@@ -1439,11 +1439,9 @@ func TestRemoteSignerRejectsUnsignedTransactionSubstitution(t *testing.T) {
 			return candidate.B64Encode()
 		},
 	}
-	signer := &RemoteSigner{
-		Client:        transport,
-		ExpectedXOnly: schnorr.SerializePubKey(e.service.Operational.TweakedVaultCosigner),
-	}
-	if signed, err := signer.Sign(context.Background(), original); err == nil {
+	expected := schnorr.SerializePubKey(e.service.Operational.TweakedVaultCosigner)
+	signer := &RemoteSigner{Client: transport}
+	if signed, err := signer.SignExpected(context.Background(), original, expected); err == nil {
 		t.Fatalf("remote signer accepted substituted unsigned transaction: %v", signed.UnsignedTx.TxHash())
 	}
 }
@@ -1487,11 +1485,11 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 			}
 			return signed.B64Encode()
 		}}
-		signer := &RemoteSigner{Client: transport, ExpectedXOnly: expected}
+		signer := &RemoteSigner{Client: transport}
 		if signer.SuccessfulCalls() != 0 {
 			t.Fatal("new RemoteSigner success count is not zero")
 		}
-		signed, err := signer.Sign(context.Background(), original)
+		signed, err := signer.SignExpected(context.Background(), original, expected)
 		if err != nil {
 			t.Fatalf("valid remote signer response: %v", err)
 		}
@@ -1509,8 +1507,8 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 		transport := &boundaryTransport{submit: func(_ context.Context, encoded string) (string, error) {
 			return encoded, nil
 		}}
-		signer := &RemoteSigner{Client: transport, ExpectedXOnly: expected}
-		if _, err := signer.Sign(context.Background(), original); err == nil {
+		signer := &RemoteSigner{Client: transport}
+		if _, err := signer.SignExpected(context.Background(), original, expected); err == nil {
 			t.Fatal("unchanged response without provider signature was accepted")
 		}
 		if signer.SuccessfulCalls() != 0 {
@@ -1715,8 +1713,8 @@ func TestRemoteSignerRequiresExactProviderSignatureDelta(t *testing.T) {
 				test.mutate(signed)
 				return signed.B64Encode()
 			}}
-			signer := &RemoteSigner{Client: transport, ExpectedXOnly: expected}
-			got, err := signer.Sign(context.Background(), original)
+			signer := &RemoteSigner{Client: transport}
+			got, err := signer.SignExpected(context.Background(), original, expected)
 			if reject[test.name] {
 				if err == nil {
 					t.Fatalf("remote signer accepted response with %s", test.name)

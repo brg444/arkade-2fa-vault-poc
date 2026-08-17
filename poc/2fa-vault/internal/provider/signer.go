@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"sync"
 	"sync/atomic"
 
 	"github.com/arkade-os/emulator/pkg/arkade"
@@ -95,11 +94,11 @@ func (s LocalSigner) Sign(_ context.Context, ptx *psbt.Packet) (*psbt.Packet, er
 }
 
 // RemoteSigner calls the private regtest Emulator SubmitOnchainTx endpoint.
+// Expected tweaked keys are supplied per SignExpected call. They are never
+// stored on the adapter.
 type RemoteSigner struct {
-	Client        RemoteTransport
-	ExpectedXOnly []byte
-	expectedMu    sync.RWMutex
-	successes     atomic.Uint64
+	Client    RemoteTransport
+	successes atomic.Uint64
 }
 
 // RemoteTransport is the regtest-only Emulator method used by RemoteSigner.
@@ -108,31 +107,13 @@ type RemoteTransport interface {
 	SubmitOnchainTx(context.Context, string) (string, error)
 }
 
-// BindExpectedSigner pins the one tweaked signer key accepted in an Emulator
-// response. It is immutable after first bind.
-func (s *RemoteSigner) BindExpectedSigner(expected []byte) {
-	if s == nil || len(expected) != 32 {
-		return
-	}
-	s.expectedMu.Lock()
-	defer s.expectedMu.Unlock()
-	if len(s.ExpectedXOnly) == 0 {
-		s.ExpectedXOnly = append([]byte(nil), expected...)
-	}
-}
+// BindExpectedSigner is retained so older callers compile. It must not store
+// a process-wide expected key; SignExpected receives the key per call.
+func (s *RemoteSigner) BindExpectedSigner([]byte) {}
 
 // BindExpectedProvider is retained for the regtest demo compatibility layer.
 func (s *RemoteSigner) BindExpectedProvider(expected []byte) {
 	s.BindExpectedSigner(expected)
-}
-
-func (s *RemoteSigner) expectedSigner() []byte {
-	if s == nil {
-		return nil
-	}
-	s.expectedMu.RLock()
-	defer s.expectedMu.RUnlock()
-	return append([]byte(nil), s.ExpectedXOnly...)
 }
 
 // SuccessfulCalls counts responses that passed exact transaction and pinned
@@ -158,13 +139,16 @@ func isNilInterface(value any) bool {
 }
 
 func (s *RemoteSigner) Sign(ctx context.Context, ptx *psbt.Packet) (*psbt.Packet, error) {
+	return nil, fmt.Errorf("remote signer expected key must be supplied per call")
+}
+
+func (s *RemoteSigner) SignExpected(ctx context.Context, ptx *psbt.Packet, expected []byte) (*psbt.Packet, error) {
 	if s == nil {
 		return nil, fmt.Errorf("remote signer required")
 	}
 	if isNilInterface(s.Client) {
 		return nil, fmt.Errorf("remote signer missing client")
 	}
-	expected := s.expectedSigner()
 	if len(expected) != 32 {
 		return nil, fmt.Errorf("remote signer missing expected key")
 	}

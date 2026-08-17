@@ -236,8 +236,8 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		if !bytes.Equal(svc.VaultCosignerPub.SerializeCompressed(), providerKey.PubKey().SerializeCompressed()) {
 			t.Fatal("runtime provider was not replaced with the stored enrolled base key")
 		}
-		if !bytes.Equal(remote.ExpectedXOnly, wantTweak) {
-			t.Fatal("RemoteSigner expected key was not the stored tweaked provider")
+		if !bytes.Equal(schnorr.SerializePubKey(svc.Operational.TweakedVaultCosigner), wantTweak) {
+			t.Fatal("rebuilt snapshot tweak was not the stored tweaked provider")
 		}
 		if !bytes.Equal(svc.Operational.TweakedVaultCosigner.SerializeCompressed(), enrolled.Operational.TweakedVaultCosigner.SerializeCompressed()) {
 			t.Fatal("rebuilt tweaked provider does not match enrollment")
@@ -266,8 +266,8 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		if !bytes.Equal(svc.ArkadeCosignerPub.SerializeCompressed(), arkadeKey.PubKey().SerializeCompressed()) {
 			t.Fatal("runtime Arkade identity was not replaced with the exact enrolled base key")
 		}
-		if !bytes.Equal(remote.ExpectedXOnly, wantArkadeTweak) {
-			t.Fatal("public signer expected key was not the stored tweaked Arkade identity")
+		if !bytes.Equal(schnorr.SerializePubKey(svc.Operational.TweakedArkadeCosigner), wantArkadeTweak) {
+			t.Fatal("rebuilt snapshot tweak was not the stored tweaked Arkade identity")
 		}
 		if svc.Operational.Address != wantOp || svc.Savings.Address != wantSv {
 			t.Fatal("active-deprecated Arkade restart changed enrolled addresses")

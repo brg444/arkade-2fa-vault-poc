@@ -28,9 +28,10 @@ type Clock func() time.Time
 
 // Ledger is the SQLite issuance store.
 type Ledger struct {
-	db    *sql.DB
-	clock Clock
-	mu    sync.Mutex // extra process-local serialization around the SQL tx
+	db           *sql.DB
+	clock        Clock
+	mu           sync.Mutex // extra process-local serialization around the SQL tx
+	integrityKey []byte     // authorizer-only; used to dual-write operational-vault-v1
 }
 
 // OpenLedger opens (or creates) the SQLite file.
@@ -48,6 +49,7 @@ func OpenLedger(path string, clock Clock) (*Ledger, error) {
 		// The policy reservation must reach durable storage before VaultCosigner
 		// use. Pin this explicitly instead of inheriting a driver/default mode.
 		`PRAGMA synchronous = FULL`,
+		`PRAGMA foreign_keys = ON`,
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			_ = db.Close()
@@ -55,6 +57,12 @@ func OpenLedger(path string, clock Clock) (*Ledger, error) {
 		}
 	}
 	if err := ensurePOCSchema(db, path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// v4 tables are created only after a verified backup, inside the
+	// migration transaction. Reject a future schema before any DDL.
+	if err := rejectUnsupportedSchemaVersion(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -79,6 +87,10 @@ var credentialColumns = []string{
 var issuanceColumns = []string{
 	"vault_id", "arkade_sighash", "period_start", "recipient_amount", "fee",
 	"state", "request_psbt", "vault_psbt", "signed_psbt", "created_at", "updated_at",
+}
+
+var credentialEnvelopeColumns = []string{
+	"id", "version", "binding", "nonce", "ciphertext", "direct_signature", "phone_signature", "integrity_mac",
 }
 
 const createPOCSchema = `
@@ -138,6 +150,19 @@ CREATE TABLE issuance (
 );
 `
 
+const createCredentialEnvelopeSchema = `
+CREATE TABLE IF NOT EXISTS credential_envelope (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL CHECK (version = 1),
+  binding TEXT NOT NULL CHECK (length(binding) > 0 AND length(binding) <= 16384),
+  nonce BLOB NOT NULL CHECK (length(nonce) = 12),
+  ciphertext BLOB NOT NULL CHECK (length(ciphertext) = 48),
+  direct_signature BLOB NOT NULL CHECK (length(direct_signature) = 64),
+  phone_signature BLOB NOT NULL CHECK (length(phone_signature) = 64),
+  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32)
+);
+`
+
 func ensurePOCSchema(db *sql.DB, path string) error {
 	var table string
 	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='credential'`).Scan(&table)
@@ -146,52 +171,29 @@ func ensurePOCSchema(db *sql.DB, path string) error {
 		if _, err := db.Exec(createPOCSchema); err != nil {
 			return err
 		}
-		return nil
+		return ensureCredentialEnvelopeSchema(db, path)
 	case err != nil:
 		return err
 	}
-	cols, err := tableColumns(db, "credential")
-	if err != nil {
+	if err := validateV3CoreSchema(db, path); err != nil {
 		return err
 	}
-	if !sameColumns(cols, credentialColumns) {
-		return fmt.Errorf("incompatible vault database %s: credential columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, credentialColumns)
+	return ensureCredentialEnvelopeSchema(db, path)
+}
+
+func ensureCredentialEnvelopeSchema(db *sql.DB, path string) error {
+	// This auxiliary table does not alter or reinterpret the authenticated v3
+	// descriptor. It is an additive migration that stores only the browser's
+	// PRF-encrypted PhoneRoutine key envelope for passkey recovery on another
+	// device.
+	if _, err := db.Exec(createCredentialEnvelopeSchema); err != nil {
+		return fmt.Errorf("credential envelope schema: %w", err)
 	}
-	if err := requireSchemaFragments(db, "credential", []string{
-		"id INTEGER PRIMARY KEY CHECK (id = 1)",
-	}); err != nil {
-		return fmt.Errorf("incompatible vault database %s: credential constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
-	}
-	var issuance string
-	err = db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='issuance'`).Scan(&issuance)
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("incompatible vault database %s: missing issuance table; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path)
-	}
-	if err != nil {
-		return err
-	}
-	cols, err = tableColumns(db, "issuance")
-	if err != nil {
-		return err
-	}
-	if !sameColumns(cols, issuanceColumns) {
-		return fmt.Errorf("incompatible vault database %s: issuance columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, issuanceColumns)
-	}
-	if err := requireSchemaFragments(db, "issuance", []string{
-		"state TEXT NOT NULL CHECK (state IN ('reserved', 'vault_signed', 'completed'))",
-		"request_psbt TEXT NOT NULL CHECK (length(request_psbt) > 0)",
-		"(state = 'reserved' AND vault_psbt IS NULL AND signed_psbt IS NULL)",
-		"(state = 'vault_signed' AND vault_psbt IS NOT NULL AND signed_psbt IS NULL)",
-		"(state = 'completed' AND vault_psbt IS NOT NULL AND signed_psbt IS NOT NULL)",
-		"PRIMARY KEY (vault_id, arkade_sighash)",
-	}); err != nil {
-		return fmt.Errorf("incompatible vault database %s: issuance constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
-	}
-	return nil
+	return validateCredentialEnvelopeSchema(db, path)
 }
 
 func requireSchemaFragments(db *sql.DB, table string, fragments []string) error {
-	if table != "credential" && table != "issuance" {
+	if !knownSchemaTable(table) {
 		return fmt.Errorf("unknown table")
 	}
 	var schema string
@@ -208,8 +210,19 @@ func requireSchemaFragments(db *sql.DB, table string, fragments []string) error 
 	return nil
 }
 
+func knownSchemaTable(table string) bool {
+	switch table {
+	case "credential", "issuance", "credential_envelope",
+		"vault", "vault_credential", "vault_envelope",
+		"invite", "pending_enrollment", "schema_meta":
+		return true
+	default:
+		return false
+	}
+}
+
 func tableColumns(db *sql.DB, table string) ([]string, error) {
-	if table != "credential" && table != "issuance" {
+	if !knownSchemaTable(table) {
 		return nil, fmt.Errorf("unknown table")
 	}
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
@@ -247,7 +260,24 @@ func sameColumns(got, want []string) bool {
 	return true
 }
 
-func (l *Ledger) Close() error { return l.db.Close() }
+func (l *Ledger) Close() error {
+	zeroBytes(l.integrityKey)
+	l.integrityKey = nil
+	return l.db.Close()
+}
+
+// SetIntegrityKey stores the authorizer-derived MAC key so dual-write of
+// operational-vault-v1 can seal v4 rows. The key is copied and zeroed on Close.
+func (l *Ledger) SetIntegrityKey(key []byte) error {
+	if len(key) != sha256.Size {
+		return fmt.Errorf("credential integrity key must be 32 bytes")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	zeroBytes(l.integrityKey)
+	l.integrityKey = append([]byte(nil), key...)
+	return nil
+}
 
 // PeriodStart is the UTC date of now.
 func (l *Ledger) PeriodStart() string {
@@ -401,8 +431,12 @@ func zeroBytes(raw []byte) {
 }
 
 func (l *Ledger) GetCredential() (*Credential, error) {
+	return loadCredential(l.db)
+}
+
+func loadCredential(q queryRower) (*Credential, error) {
 	var c Credential
-	err := l.db.QueryRow(`
+	err := q.QueryRow(`
 SELECT credential_id, webauthn_p256_compressed, phone_direct_p256_compressed, rp_id, origin, phone_routine_bip340_compressed,
        external_owner_wallet_compressed,
        recovery_key_compressed, vault_cosigner_base_compressed, tweaked_vault_cosigner_compressed,
@@ -432,7 +466,7 @@ SELECT credential_id, webauthn_p256_compressed, phone_direct_p256_compressed, rp
 	return &c, nil
 }
 
-func (l *Ledger) Enroll(c Credential) error {
+func validateCredential(c Credential) error {
 	if len(c.ID) == 0 {
 		return fmt.Errorf("credential id required")
 	}
@@ -496,7 +530,15 @@ func (l *Ledger) Enroll(c Credential) error {
 	if len(c.IntegrityMAC) != sha256.Size {
 		return fmt.Errorf("credential integrity MAC must be 32 bytes")
 	}
-	_, err := l.db.Exec(
+	return nil
+}
+
+type credentialExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func insertCredential(exec credentialExecer, c Credential) error {
+	_, err := exec.Exec(
 		`INSERT INTO credential (
 		   id, credential_id, webauthn_p256_compressed, phone_direct_p256_compressed, rp_id, origin,
 		   phone_routine_bip340_compressed, external_owner_wallet_compressed,
@@ -520,6 +562,86 @@ func (l *Ledger) Enroll(c Credential) error {
 	)
 	if err != nil {
 		return fmt.Errorf("enrollment locked or failed: %w", err)
+	}
+	return nil
+}
+
+// Enroll stores the immutable v3 descriptor without a cross-device recovery
+// envelope. It remains for existing tests and explicit legacy migrations.
+func (l *Ledger) Enroll(c Credential) error {
+	return l.EnrollWithEnvelope(c, nil)
+}
+
+// EnrollWithEnvelope atomically stores the singleton descriptor and an
+// optional PRF-encrypted PhoneRoutine envelope. The public onboarding flow
+// deliberately installs the client-signed envelope in a second authenticated
+// ceremony, so existing enrolled v3 databases can opt in without changing
+// their descriptor or credential row.
+func (l *Ledger) EnrollWithEnvelope(c Credential, envelope *CredentialEnvelope) error {
+	if err := validateCredential(c); err != nil {
+		return err
+	}
+	if envelope != nil {
+		if err := validateCredentialEnvelope(*envelope); err != nil {
+			return err
+		}
+		if len(envelope.IntegrityMAC) != sha256.Size {
+			return fmt.Errorf("credential envelope integrity MAC must be 32 bytes")
+		}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertCredential(tx, c); err != nil {
+		return err
+	}
+	if envelope != nil {
+		if _, err := tx.Exec(`INSERT INTO credential_envelope (id, version, binding, nonce, ciphertext, direct_signature, phone_signature, integrity_mac) VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
+			envelope.Version, envelope.Binding, envelope.Nonce, envelope.Ciphertext, envelope.DirectSig, envelope.PhoneSig, envelope.IntegrityMAC,
+		); err != nil {
+			return fmt.Errorf("credential envelope locked or failed: %w", err)
+		}
+	}
+	if err := l.dualWriteLegacyVaultTx(tx, c, envelope); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (l *Ledger) dualWriteLegacyVaultTx(tx *sql.Tx, c Credential, envelope *CredentialEnvelope) error {
+	if c.VaultID != LegacyFirstVaultID || len(l.integrityKey) != sha256.Size || !v4TableExists(tx) {
+		return nil
+	}
+	rec := vaultRecordFromCredential(c)
+	if err := sealVaultRecord(&rec, l.integrityKey); err != nil {
+		return err
+	}
+	cred := VaultCredential{
+		CredentialID: append([]byte(nil), c.ID...),
+		VaultID:      rec.VaultID,
+		WebAuthnP256: append([]byte(nil), c.WebAuthnP256...),
+		UserHandle:   nil,
+		Resident:     false,
+	}
+	if err := sealVaultCredential(&cred, l.integrityKey); err != nil {
+		return err
+	}
+	existing, err := getVaultTx(tx, rec.VaultID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if err := verifyVaultRecord(existing, l.integrityKey); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := insertVaultTx(tx, rec, cred, envelope); err != nil {
+		return fmt.Errorf("legacy vault dual-write: %w", err)
 	}
 	return nil
 }

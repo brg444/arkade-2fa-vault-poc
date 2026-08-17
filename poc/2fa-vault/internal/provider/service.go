@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -39,7 +40,16 @@ type Service struct {
 	// EnrollmentTokenHash gates the first and only enrollment. Once a
 	// credential exists, the token is never consulted again; only the exact
 	// persisted tuple remains idempotent.
-	EnrollmentTokenHash       []byte
+	EnrollmentTokenHash []byte
+	// EnrollmentDeadline bounds how long a fresh deployment can be claimed.
+	// An enrolled deployment never consults it. Production sets this at
+	// process start; tests may inject EnrollmentNow.
+	EnrollmentDeadline time.Time
+	EnrollmentNow      func() time.Time
+	// OpenEnrollment explicitly arms a first-come claim without an invite.
+	// Production still sets a short EnrollmentDeadline. The singleton insert
+	// permanently closes this mode after the first successful claimant.
+	OpenEnrollment            bool
 	PhoneRoutineBIP340        *btcec.PublicKey
 	ExternalOwnerWallet       *btcec.PublicKey
 	RecoveryKey               *btcec.PublicKey
@@ -61,9 +71,12 @@ type Service struct {
 	MaxConcurrentVerifications int
 	Broadcaster                Broadcaster
 	mu                         sync.Mutex
-	published                  atomic.Pointer[enrolledSnapshot]
+	published                  atomic.Pointer[publishedIndex]
 	verificationOnce           sync.Once
 	verificationSlots          chan struct{}
+	sessionMu                  sync.Mutex
+	sessionChallenges          map[string]passkeyChallenge
+	SessionNow                 func() time.Time
 }
 
 const defaultConcurrentVerifications = 4
@@ -72,9 +85,10 @@ const regtestCredentialIntegrityDomain = "arkade-2fa-vault/regtest-public-creden
 
 var ErrVerificationBusy = errors.New("crypto verification capacity exhausted")
 
-// enrolledSnapshot is one immutable published enrollment. Register and
-// LoadVaults store a single pointer; readers load that pointer only.
+// enrolledSnapshot is one immutable published enrollment for a single vault.
 type enrolledSnapshot struct {
+	VaultID             string
+	CredentialID        []byte
 	PhoneRoutineBIP340  *btcec.PublicKey
 	ExternalOwnerWallet *btcec.PublicKey
 	RecoveryKey         *btcec.PublicKey
@@ -82,6 +96,12 @@ type enrolledSnapshot struct {
 	ArkadeCosignerBase  *btcec.PublicKey
 	Operational         *vault.Built
 	Savings             *vault.Built
+}
+
+// publishedIndex is a swapped immutable map of vaults and credential IDs.
+type publishedIndex struct {
+	byVault map[string]*enrolledSnapshot
+	byCred  map[string]string
 }
 
 // RegisterRequest is the enrollment payload. All byte fields are hex.
@@ -94,14 +114,26 @@ type RegisterRequest struct {
 	WebAuthnP256          string `json:"webauthnP256"`
 	PhoneDirectP256       string `json:"phoneDirectP256"`
 	PhoneRoutineBIP340Pub string `json:"phoneRoutineBip340Pub"`
+	// These BIP340 x-only keys are chosen exactly once for a fresh portable
+	// deployment. A configured deployment may precommit the same identities.
+	ExternalOwnerWalletXOnly string `json:"externalOwnerWalletXOnly,omitempty"`
+	RecoveryKeyXOnly         string `json:"recoveryKeyXOnly,omitempty"`
+}
+
+type parsedRegisterRequest struct {
+	id, webauthnP256, phoneDirectP256 []byte
+	phoneRoutine                      *btcec.PublicKey
+	externalOwner                     *btcec.PublicKey
+	recovery                          *btcec.PublicKey
 }
 
 func (s *Service) Register(req RegisterRequest) error {
 	return s.RegisterWithBootstrap(req, "")
 }
 
-// RegisterWithBootstrap requires the deployment bootstrap token only while
-// the ledger is unenrolled. Errors never include token material.
+// RegisterWithBootstrap applies the configured first-enrollment mode only
+// while the ledger is unenrolled. Open mode requires an empty bootstrap;
+// optional token mode validates it without ever reflecting token material.
 func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -109,39 +141,38 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		return fmt.Errorf("deployment: %w", err)
 	}
 
-	id, webauthnP256, phoneDirectP256, phoneRoutine, err := parseRegisterRequest(req, s.PhoneRoutineBIP340)
-	if err != nil {
-		return err
-	}
-
 	existing, err := s.loadVerifiedCredential()
 	if err != nil {
 		return err
 	}
 	if existing != nil {
-		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, phoneDirectP256, phoneRoutine); err != nil {
+		parsed, err := s.parseRegisterRequest(req, existing)
+		if err != nil {
+			return err
+		}
+		if err := s.acceptPersistedEnrollment(existing, parsed); err != nil {
 			return err
 		}
 		s.clearEnrollmentTokenHash()
 		return nil
 	}
-	if s.runtimeConfig().Network != deployment.NetworkRegtest && len(s.EnrollmentTokenHash) != sha256.Size {
-		return fmt.Errorf("enrollment bootstrap authorization is not configured")
+	// Validate the explicitly armed claim mode and deadline before parsing
+	// attacker-controlled public keys or deriving any descriptor. Open mode is
+	// intentionally first-come; token mode authenticates one intended claimant.
+	if err := s.validateEnrollmentBootstrap(bootstrap); err != nil {
+		return err
 	}
-	if len(s.EnrollmentTokenHash) > 0 {
-		got := sha256.Sum256([]byte(bootstrap))
-		if len(s.EnrollmentTokenHash) != sha256.Size || subtle.ConstantTimeCompare(got[:], s.EnrollmentTokenHash) != 1 {
-			return fmt.Errorf("enrollment bootstrap authorization failed")
-		}
+	parsed, err := s.parseRegisterRequest(req, nil)
+	if err != nil {
+		return err
 	}
-
-	op, sv, err := s.makeTrees(phoneRoutine, phoneDirectP256)
+	op, sv, err := s.makeTrees(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery)
 	if err != nil {
 		return err
 	}
 	descriptor := descriptorFromTrees(
-		s.runtimeConfig(), id, webauthnP256, phoneDirectP256,
-		phoneRoutine, s.ExternalOwnerWallet, s.RecoveryKey,
+		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
+		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
 		s.VaultCosignerPub, s.ArkadeCosignerPub,
 		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
 	)
@@ -156,16 +187,169 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 		if existing == nil {
 			return err
 		}
-		if err := s.acceptPersistedEnrollment(existing, id, webauthnP256, phoneDirectP256, phoneRoutine); err != nil {
+		if err := s.acceptPersistedEnrollment(existing, parsed); err != nil {
 			return err
 		}
 		s.clearEnrollmentTokenHash()
 		return nil
 	}
 	s.bindRemoteExpected(op)
-	s.publishEnrollment(phoneRoutine, op, sv)
+	s.publishEnrollmentAt(fixture.VaultID, parsed.id, parsed.phoneRoutine, op, sv)
 	s.clearEnrollmentTokenHash()
 	return nil
+}
+
+// CreateTenantVault atomically persists a new HKDF-derived vault and consumes
+// the invite. HTTP enrollment remains gated; this is the PR1 service primitive.
+func (s *Service) CreateTenantVault(vaultID string, tokenHash []byte, req RegisterRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.runtimeConfig().Validate(); err != nil {
+		return fmt.Errorf("deployment: %w", err)
+	}
+	if vaultID == "" || vaultID == fixture.VaultID {
+		return fmt.Errorf("tenant vault id required")
+	}
+	if req.ExternalOwnerWalletXOnly == "" || req.RecoveryKeyXOnly == "" {
+		return fmt.Errorf("tenant owner and recovery pubs required")
+	}
+	master, err := s.vaultCosignerMaster()
+	if err != nil {
+		return err
+	}
+	child, err := policy.DeriveVaultCosignerScalar(master, vaultID, policy.CosignerModeHKDFSHA256V1)
+	if err != nil {
+		return err
+	}
+	parsed, err := s.parseRegisterRequestIndependent(req)
+	if err != nil {
+		return err
+	}
+	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())
+	if err != nil {
+		return err
+	}
+	descriptor := descriptorFromTrees(
+		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
+		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
+		child.PubKey(), s.ArkadeCosignerPub,
+		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
+	)
+	descriptor.VaultID = vaultID
+	if err := s.sealCredential(&descriptor); err != nil {
+		return err
+	}
+	rec := policy.VaultRecord{}
+	rec = vaultRecordFromDescriptor(descriptor)
+	if err := sealVaultRecordForService(&rec, s); err != nil {
+		return err
+	}
+	vcred := policy.VaultCredential{
+		CredentialID: append([]byte(nil), descriptor.ID...),
+		VaultID:      vaultID,
+		WebAuthnP256: append([]byte(nil), descriptor.WebAuthnP256...),
+		UserHandle:   []byte(vaultID),
+		Resident:     true,
+	}
+	if err := sealVaultCredentialForService(&vcred, s); err != nil {
+		return err
+	}
+	if err := s.Ledger.CreateVault(policy.CreateVaultInput{
+		Record: rec, Credential: vcred, TokenHash: tokenHash,
+	}); err != nil {
+		return err
+	}
+	s.publishEnrollmentAt(vaultID, descriptor.ID, parsed.phoneRoutine, op, sv)
+	return nil
+}
+
+func (s *Service) vaultCosignerMaster() (*btcec.PrivateKey, error) {
+	ls, ok := s.VaultSigner.(LocalSigner)
+	if !ok || ls.Priv == nil {
+		return nil, fmt.Errorf("local VaultCosigner required to derive tenant keys")
+	}
+	return ls.Priv, nil
+}
+
+func vaultRecordFromDescriptor(c policy.Credential) policy.VaultRecord {
+	return policy.VaultRecordFromCredential(c)
+}
+
+func sealVaultRecordForService(rec *policy.VaultRecord, s *Service) error {
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	return policy.SealVaultRecord(rec, key)
+}
+
+func sealVaultCredentialForService(cred *policy.VaultCredential, s *Service) error {
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	return policy.SealVaultCredential(cred, key)
+}
+
+func (s *Service) validateEnrollmentBootstrap(bootstrap string) error {
+	if s.runtimeConfig().Network == deployment.NetworkRegtest && len(s.EnrollmentTokenHash) == 0 {
+		return nil
+	}
+	if s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline) {
+		return fmt.Errorf("enrollment window is closed")
+	}
+	if s.OpenEnrollment {
+		if bootstrap != "" {
+			return fmt.Errorf("open enrollment does not accept an invitation token")
+		}
+		return nil
+	}
+	if len(s.EnrollmentTokenHash) != sha256.Size {
+		return fmt.Errorf("enrollment bootstrap authorization is not configured")
+	}
+	raw, err := decodeEnrollmentToken(bootstrap)
+	if err != nil {
+		return fmt.Errorf("enrollment bootstrap authorization failed")
+	}
+	defer zeroServiceBytes(raw)
+	got := sha256.Sum256(raw)
+	if subtle.ConstantTimeCompare(got[:], s.EnrollmentTokenHash) != 1 {
+		return fmt.Errorf("enrollment bootstrap authorization failed")
+	}
+	return nil
+}
+
+func (s *Service) currentEnrollmentTime() time.Time {
+	if s.EnrollmentNow != nil {
+		return s.EnrollmentNow()
+	}
+	return time.Now()
+}
+
+// HashEnrollmentToken validates the one supported token encoding and returns
+// the SHA-256 digest held by the authorizer process.
+func HashEnrollmentToken(token string) ([]byte, error) {
+	raw, err := decodeEnrollmentToken(token)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroServiceBytes(raw)
+	digest := sha256.Sum256(raw)
+	return append([]byte(nil), digest[:]...), nil
+}
+
+func decodeEnrollmentToken(token string) ([]byte, error) {
+	if len(token) != 43 || strings.TrimSpace(token) != token {
+		return nil, fmt.Errorf("enrollment token must be 32-byte base64url without padding")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != token {
+		zeroServiceBytes(raw)
+		return nil, fmt.Errorf("enrollment token must be 32-byte base64url without padding")
+	}
+	return raw, nil
 }
 
 func (s *Service) clearEnrollmentTokenHash() {
@@ -179,48 +363,80 @@ func (s *Service) clearEnrollmentTokenHash() {
 // runtime config matches the stored descriptor and trees rebuilt from that
 // record equal the persisted addresses/scripts/tweaked provider. It never
 // publishes trees derived from this process's speculative RecoveryKey/Provider.
-func (s *Service) acceptPersistedEnrollment(existing *policy.Credential, id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey) error {
-	if !sameEnrollmentTuple(existing, id, webauthnP256, phoneDirectP256, phoneRoutine) {
+func (s *Service) acceptPersistedEnrollment(existing *policy.Credential, parsed parsedRegisterRequest) error {
+	if !sameEnrollmentTuple(existing, parsed) {
 		return fmt.Errorf("enrollment locked")
 	}
 	return s.publishStoredEnrollment(existing, false)
 }
 
-func parseRegisterRequest(req RegisterRequest, fallbackPhoneRoutine *btcec.PublicKey) (id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey, err error) {
-	id, err = decodeHex(req.CredentialID)
+func (s *Service) parseRegisterRequest(req RegisterRequest, existing *policy.Credential) (parsed parsedRegisterRequest, err error) {
+	parsed.id, err = decodeHex(req.CredentialID)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("credentialId: %w", err)
+		return parsed, fmt.Errorf("credentialId: %w", err)
 	}
-	webauthnP256, err = decodeHex(req.WebAuthnP256)
+	if len(parsed.id) > 1024 {
+		return parsed, fmt.Errorf("credentialId too large")
+	}
+	parsed.webauthnP256, err = decodeHex(req.WebAuthnP256)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("webauthnP256: %w", err)
+		return parsed, fmt.Errorf("webauthnP256: %w", err)
 	}
-	if _, err = webauthn.ParseCompressedP256(webauthnP256); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("webauthnP256: %w", err)
+	if _, err = webauthn.ParseCompressedP256(parsed.webauthnP256); err != nil {
+		return parsed, fmt.Errorf("webauthnP256: %w", err)
 	}
-	phoneDirectP256, err = decodeHex(req.PhoneDirectP256)
+	parsed.phoneDirectP256, err = decodeHex(req.PhoneDirectP256)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("phoneDirectP256: %w", err)
+		return parsed, fmt.Errorf("phoneDirectP256: %w", err)
 	}
-	if _, err = webauthn.ParseCompressedP256(phoneDirectP256); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("phoneDirectP256: %w", err)
+	if _, err = webauthn.ParseCompressedP256(parsed.phoneDirectP256); err != nil {
+		return parsed, fmt.Errorf("phoneDirectP256: %w", err)
 	}
-	if bytes.Equal(webauthnP256, phoneDirectP256) {
-		return nil, nil, nil, nil, fmt.Errorf("direct-auth p256 must be distinct from the webauthn credential p256")
+	if bytes.Equal(parsed.webauthnP256, parsed.phoneDirectP256) {
+		return parsed, fmt.Errorf("direct-auth p256 must be distinct from the webauthn credential p256")
 	}
-	phoneRoutine, err = parsePhoneRoutineBIP340Pub(req.PhoneRoutineBIP340Pub, fallbackPhoneRoutine)
+	parsed.phoneRoutine, err = parsePhoneRoutineBIP340Pub(req.PhoneRoutineBIP340Pub, s.PhoneRoutineBIP340)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return parsed, err
 	}
-	return id, webauthnP256, phoneDirectP256, phoneRoutine, nil
+	var existingOwner, existingRecovery *btcec.PublicKey
+	if existing != nil {
+		existingOwner, err = btcec.ParsePubKey(existing.ExternalOwnerWallet)
+		if err != nil {
+			return parsed, fmt.Errorf("stored ExternalOwnerWallet: %w", err)
+		}
+		existingRecovery, err = btcec.ParsePubKey(existing.RecoveryKey)
+		if err != nil {
+			return parsed, fmt.Errorf("stored RecoveryKey: %w", err)
+		}
+	}
+	parsed.externalOwner, err = s.parseOnboardingKey("externalOwnerWalletXOnly", req.ExternalOwnerWalletXOnly, s.ExternalOwnerWallet, existingOwner)
+	if err != nil {
+		return parsed, err
+	}
+	parsed.recovery, err = s.parseOnboardingKey("recoveryKeyXOnly", req.RecoveryKeyXOnly, s.RecoveryKey, existingRecovery)
+	if err != nil {
+		return parsed, err
+	}
+	return parsed, nil
 }
 
-func sameEnrollmentTuple(c *policy.Credential, id, webauthnP256, phoneDirectP256 []byte, phoneRoutine *btcec.PublicKey) bool {
-	return c != nil && phoneRoutine != nil &&
-		bytes.Equal(c.ID, id) &&
-		bytes.Equal(c.WebAuthnP256, webauthnP256) &&
-		bytes.Equal(c.PhoneDirectP256, phoneDirectP256) &&
-		bytes.Equal(c.PhoneRoutineBIP340, phoneRoutine.SerializeCompressed())
+func (s *Service) parseRegisterRequestIndependent(req RegisterRequest) (parsedRegisterRequest, error) {
+	owner, recovery := s.ExternalOwnerWallet, s.RecoveryKey
+	s.ExternalOwnerWallet, s.RecoveryKey = nil, nil
+	parsed, err := s.parseRegisterRequest(req, nil)
+	s.ExternalOwnerWallet, s.RecoveryKey = owner, recovery
+	return parsed, err
+}
+
+func sameEnrollmentTuple(c *policy.Credential, parsed parsedRegisterRequest) bool {
+	return c != nil && parsed.phoneRoutine != nil && parsed.externalOwner != nil && parsed.recovery != nil &&
+		bytes.Equal(c.ID, parsed.id) &&
+		bytes.Equal(c.WebAuthnP256, parsed.webauthnP256) &&
+		bytes.Equal(c.PhoneDirectP256, parsed.phoneDirectP256) &&
+		bytes.Equal(c.PhoneRoutineBIP340, parsed.phoneRoutine.SerializeCompressed()) &&
+		bytes.Equal(c.ExternalOwnerWallet, parsed.externalOwner.SerializeCompressed()) &&
+		bytes.Equal(c.RecoveryKey, parsed.recovery.SerializeCompressed())
 }
 
 // LoadVaults rebuilds trees from the persisted enrollment descriptor.
@@ -232,14 +448,39 @@ func (s *Service) LoadVaults() error {
 	if err := s.runtimeConfig().Validate(); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
-	cred, err := s.loadVerifiedCredential()
+	ids, err := s.Ledger.ListVaultIDs()
 	if err != nil {
 		return err
 	}
-	if cred == nil {
-		return nil
+	if len(ids) == 0 {
+		cred, err := s.loadVerifiedCredential()
+		if err != nil {
+			return err
+		}
+		if cred == nil {
+			return nil
+		}
+		return s.publishStoredEnrollment(cred, true)
 	}
-	return s.publishStoredEnrollment(cred, true)
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	for _, id := range ids {
+		rec, vcred, err := s.Ledger.LoadVerifiedVault(id, key)
+		if err != nil {
+			return err
+		}
+		if rec == nil || vcred == nil {
+			return fmt.Errorf("vault %s missing credential", id)
+		}
+		cred := rec.ToCredential(*vcred)
+		if err := s.publishStoredEnrollment(&cred, true && id == fixture.VaultID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) publishStoredEnrollment(cred *policy.Credential, startup bool) error {
@@ -258,7 +499,7 @@ func (s *Service) publishStoredEnrollment(cred *policy.Credential, startup bool)
 		s.ArkadeCosignerPub = arkadeBase
 	}
 	s.bindRemoteExpected(op)
-	s.publishEnrollment(phoneRoutine, op, sv)
+	s.publishEnrollmentAt(cred.VaultID, cred.ID, phoneRoutine, op, sv)
 	if runtimeVaultCosigner != nil && !sameCompressed(runtimeVaultCosigner, cred.VaultCosignerBase) {
 		log.Printf("rebuilt vault from enrolled VaultCosigner base %x; current runtime signer %x must remain deprecated",
 			cred.VaultCosignerBase, runtimeVaultCosigner.SerializeCompressed())
@@ -338,8 +579,12 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 	return phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase, op, sv, nil
 }
 
-func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte) (*vault.Built, *vault.Built, error) {
-	if phoneRoutine == nil || s.ExternalOwnerWallet == nil || s.RecoveryKey == nil || s.VaultCosignerPub == nil || s.ArkadeCosignerPub == nil {
+func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner, recovery *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
+	return s.makeTreesWithCosigner(phoneRoutine, phoneDirectP256, externalOwner, recovery, s.VaultCosignerPub)
+}
+
+func (s *Service) makeTreesWithCosigner(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner, recovery, vaultCosigner *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
+	if phoneRoutine == nil || externalOwner == nil || recovery == nil || vaultCosigner == nil || s.ArkadeCosignerPub == nil {
 		return nil, nil, fmt.Errorf("vault keys not configured")
 	}
 	cfg := s.runtimeConfig()
@@ -348,17 +593,17 @@ func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byt
 	op, err := vault.NewOperationalWithPolicy(vault.OperationalKeys{
 		PhoneRoutineBIP340:  phoneRoutine,
 		PhoneDirectP256:     phoneDirectP256,
-		ExternalOwnerWallet: s.ExternalOwnerWallet,
-		RecoveryKey:         s.RecoveryKey,
-		VaultCosignerBase:   s.VaultCosignerPub,
+		ExternalOwnerWallet: externalOwner,
+		RecoveryKey:         recovery,
+		VaultCosignerBase:   vaultCosigner,
 		ArkadeCosignerBase:  s.ArkadeCosignerPub,
 	}, cfg.Network, opCSV, configuredAuthorizationPolicy())
 	if err != nil {
 		return nil, nil, err
 	}
 	sv, err := vault.NewSavingsWithPolicy(
-		s.ExternalOwnerWallet, s.RecoveryKey, cfg.Network, svCSV,
-		s.VaultCosignerPub, op.TweakedVaultCosigner, s.ArkadeCosignerPub, op.TweakedArkadeCosigner,
+		externalOwner, recovery, cfg.Network, svCSV,
+		vaultCosigner, op.TweakedVaultCosigner, s.ArkadeCosignerPub, op.TweakedArkadeCosigner,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -437,8 +682,8 @@ func (s *Service) requireCompatible(cred *policy.Credential) error {
 	if cred.Network != cfg.Network {
 		return fmt.Errorf("stored network %q incompatible with runtime %q", cred.Network, cfg.Network)
 	}
-	if cred.VaultID != fixture.VaultID {
-		return fmt.Errorf("stored vault id %q incompatible with runtime %q", cred.VaultID, fixture.VaultID)
+	if cred.VaultID == "" {
+		return fmt.Errorf("stored vault id required")
 	}
 	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.OperationalCSVBlocks}
 	svCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.SavingsCSVBlocks}
@@ -472,14 +717,16 @@ func (s *Service) requireCompatible(cred *policy.Credential) error {
 	// equal after a reviewed key/version rotation: an existing descriptor stays
 	// live only when its exact MAC-authenticated key is still advertised as an
 	// active deprecated signer.
-	if s.ExternalOwnerWallet != nil && !sameCompressed(s.ExternalOwnerWallet, cred.ExternalOwnerWallet) {
-		return fmt.Errorf("runtime ExternalOwnerWallet does not match enrolled vault")
-	}
-	if s.RecoveryKey != nil && !sameCompressed(s.RecoveryKey, cred.RecoveryKey) {
-		return fmt.Errorf("runtime RecoveryKey does not match enrolled vault")
-	}
-	if err := requireSignerCompatible("VaultCosigner", s.VaultCosignerPub, s.DeprecatedVaultCosigners, cred.VaultCosignerBase); err != nil {
-		return err
+	if cred.VaultID == fixture.VaultID {
+		if s.ExternalOwnerWallet != nil && !sameCompressed(s.ExternalOwnerWallet, cred.ExternalOwnerWallet) {
+			return fmt.Errorf("runtime ExternalOwnerWallet does not match enrolled vault")
+		}
+		if s.RecoveryKey != nil && !sameCompressed(s.RecoveryKey, cred.RecoveryKey) {
+			return fmt.Errorf("runtime RecoveryKey does not match enrolled vault")
+		}
+		if err := requireSignerCompatible("VaultCosigner", s.VaultCosignerPub, s.DeprecatedVaultCosigners, cred.VaultCosignerBase); err != nil {
+			return err
+		}
 	}
 	if err := requireSignerCompatible("ArkadeCosigner", s.ArkadeCosignerPub, s.DeprecatedArkadeCosigners, cred.ArkadeCosignerBase); err != nil {
 		return err
@@ -507,15 +754,7 @@ func sameCompressed(pub *btcec.PublicKey, raw []byte) bool {
 }
 
 func (s *Service) bindRemoteExpected(op *vault.Built) {
-	if op == nil {
-		return
-	}
-	if binder, ok := s.VaultSigner.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedVaultCosigner != nil {
-		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedVaultCosigner))
-	}
-	if binder, ok := s.ArkadeCosignerSigner.(interface{ BindExpectedSigner([]byte) }); ok && op.TweakedArkadeCosigner != nil {
-		binder.BindExpectedSigner(schnorr.SerializePubKey(op.TweakedArkadeCosigner))
-	}
+	// Expected tweaked keys are supplied per signExactStage call.
 }
 
 func parsePhoneRoutineBIP340Pub(hexPub string, fallback *btcec.PublicKey) (*btcec.PublicKey, error) {
@@ -536,6 +775,53 @@ func parsePhoneRoutineBIP340Pub(hexPub string, fallback *btcec.PublicKey) (*btce
 	return pub, nil
 }
 
+func (s *Service) parseOnboardingKey(name, encoded string, configured, persisted *btcec.PublicKey) (*btcec.PublicKey, error) {
+	if encoded == "" {
+		if persisted != nil {
+			return persisted, nil
+		}
+		if configured != nil {
+			return configured, nil
+		}
+		return nil, fmt.Errorf("%s required", name)
+	}
+	if len(encoded) != 64 || encoded != strings.ToLower(encoded) {
+		return nil, fmt.Errorf("%s must be canonical 32-byte BIP340 x-only lowercase hex", name)
+	}
+	raw, err := hex.DecodeString(encoded)
+	if err != nil || len(raw) != 32 {
+		return nil, fmt.Errorf("%s must be canonical 32-byte BIP340 x-only lowercase hex", name)
+	}
+	pub, err := schnorr.ParsePubKey(raw)
+	if err != nil || !bytes.Equal(schnorr.SerializePubKey(pub), raw) {
+		return nil, fmt.Errorf("%s is invalid", name)
+	}
+	if configured != nil && !bytes.Equal(schnorr.SerializePubKey(configured), raw) {
+		return nil, fmt.Errorf("%s does not match deployment precommit", name)
+	}
+	if persisted != nil && !bytes.Equal(schnorr.SerializePubKey(persisted), raw) {
+		return nil, fmt.Errorf("enrollment locked")
+	}
+	if s.runtimeConfig().Network != deployment.NetworkRegtest && knownFixtureXOnly(raw) {
+		return nil, fmt.Errorf("public test fixture is forbidden for %s", name)
+	}
+	return pub, nil
+}
+
+func knownFixtureXOnly(xonly []byte) bool {
+	for _, encoded := range []string{fixture.ExternalOwnerWalletPubHex, fixture.RecoveryKeyPubHex} {
+		raw, err := hex.DecodeString(encoded)
+		if err != nil {
+			continue
+		}
+		pub, err := btcec.ParsePubKey(raw)
+		if err == nil && bytes.Equal(schnorr.SerializePubKey(pub), xonly) {
+			return true
+		}
+	}
+	return false
+}
+
 // Status is the UI snapshot.
 type Status struct {
 	Enrolled                        bool   `json:"enrolled"`
@@ -551,12 +837,16 @@ type Status struct {
 	RecoveryKeyPub                  string `json:"recoveryKeyPub,omitempty"`
 	VaultCosignerBasePub            string `json:"vaultCosignerBasePub,omitempty"`
 	ArkadeCosignerBasePub           string `json:"arkadeCosignerBasePub,omitempty"`
-	ArkadeCosignerOrigin            string `json:"arkadeCosignerOrigin,omitempty"`
-	ArkadeCosignerVersion           string `json:"arkadeCosignerVersion,omitempty"`
+	ArkadeCosignerOrigin            string `json:"arkadeCosignerOrigin"`
+	ArkadeCosignerVersion           string `json:"arkadeCosignerVersion"`
 	OperationalAddr                 string `json:"operationalAddress"`
 	OperationalScript               string `json:"operationalScript,omitempty"`
 	SavingsAddr                     string `json:"savingsAddress"`
+	SavingsScript                   string `json:"savingsScript,omitempty"`
 	SavingsExcludesRoutineCosigners bool   `json:"savingsExcludesRoutineCosigners"`
+	PasskeyLoginAvailable           bool   `json:"passkeyLoginAvailable"`
+	EnrollmentMode                  string `json:"enrollmentMode"`
+	EnrollmentExpiresAt             string `json:"enrollmentExpiresAt,omitempty"`
 	PeriodAllowance                 int64  `json:"periodAllowance"`
 	PeriodSpent                     int64  `json:"periodSpent"`
 	PeriodRemaining                 int64  `json:"periodRemaining"`
@@ -570,28 +860,63 @@ type Status struct {
 }
 
 func (s *Service) publishEnrollment(phoneRoutine *btcec.PublicKey, op, sv *vault.Built) {
-	snap := &enrolledSnapshot{PhoneRoutineBIP340: phoneRoutine, Operational: op, Savings: sv}
+	s.publishEnrollmentAt(fixture.VaultID, nil, phoneRoutine, op, sv)
+}
+
+func (s *Service) publishEnrollmentAt(vaultID string, credID []byte, phoneRoutine *btcec.PublicKey, op, sv *vault.Built) {
+	snap := &enrolledSnapshot{
+		VaultID:            vaultID,
+		CredentialID:       append([]byte(nil), credID...),
+		PhoneRoutineBIP340: phoneRoutine, Operational: op, Savings: sv,
+	}
 	if op != nil {
 		snap.ExternalOwnerWallet = op.Record.ExternalOwnerWallet
 		snap.RecoveryKey = op.Record.RecoveryKey
 		snap.VaultCosignerBase = op.Record.VaultCosignerBase
 		snap.ArkadeCosignerBase = op.Record.ArkadeCosignerBase
 	}
-	s.published.Store(snap)
+	prev := s.published.Load()
+	next := &publishedIndex{
+		byVault: make(map[string]*enrolledSnapshot, 4),
+		byCred:  make(map[string]string, 4),
+	}
+	if prev != nil {
+		for k, v := range prev.byVault {
+			next.byVault[k] = v
+		}
+		for k, v := range prev.byCred {
+			next.byCred[k] = v
+		}
+	}
+	next.byVault[vaultID] = snap
+	if len(credID) > 0 {
+		next.byCred[hex.EncodeToString(credID)] = vaultID
+	}
+	s.published.Store(next)
 	// Keep exported legacy/test fields stable after their first publication.
-	if s.PhoneRoutineBIP340 == nil {
-		s.PhoneRoutineBIP340 = phoneRoutine
-	}
-	if s.Operational == nil {
-		s.Operational = op
-	}
-	if s.Savings == nil {
-		s.Savings = sv
+	if vaultID == fixture.VaultID {
+		if s.PhoneRoutineBIP340 == nil {
+			s.PhoneRoutineBIP340 = phoneRoutine
+		}
+		if s.Operational == nil {
+			s.Operational = op
+		}
+		if s.Savings == nil {
+			s.Savings = sv
+		}
 	}
 }
 
 func (s *Service) enrolled() enrolledSnapshot {
-	if snap := s.published.Load(); snap != nil {
+	return s.snapshot(fixture.VaultID)
+}
+
+func (s *Service) snapshot(vaultID string) enrolledSnapshot {
+	idx := s.published.Load()
+	if idx == nil {
+		return enrolledSnapshot{}
+	}
+	if snap := idx.byVault[vaultID]; snap != nil {
 		return *snap
 	}
 	return enrolledSnapshot{}
@@ -631,6 +956,25 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		AbsoluteFeeCap:       fixture.AbsoluteFeeCeiling,
 		FeerateCapSatPerV:    fixture.FeerateCeilingSatPerV,
 	}
+	if cred != nil {
+		st.EnrollmentMode = "closed"
+	} else {
+		switch {
+		case cfg.Network == deployment.NetworkRegtest:
+			st.EnrollmentMode = "open"
+		case s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline):
+			st.EnrollmentMode = "expired"
+		case s.OpenEnrollment:
+			st.EnrollmentMode = "open"
+		case len(s.EnrollmentTokenHash) == sha256.Size:
+			st.EnrollmentMode = "token"
+		default:
+			st.EnrollmentMode = "unavailable"
+		}
+		if !s.EnrollmentDeadline.IsZero() {
+			st.EnrollmentExpiresAt = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
+		}
+	}
 	snap := s.enrolled()
 	if cred == nil {
 		if s.ExternalOwnerWallet != nil {
@@ -655,6 +999,11 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		st.ArkadeCosignerBasePub = hex.EncodeToString(cred.ArkadeCosignerBase)
 		st.ArkadeCosignerOrigin = cred.ArkadeCosignerOrigin
 		st.ArkadeCosignerVersion = cred.ArkadeCosignerVersion
+		envelope, envelopeErr := s.loadVerifiedCredentialEnvelope(cred.ID)
+		if envelopeErr != nil {
+			return Status{}, envelopeErr
+		}
+		st.PasskeyLoginAvailable = envelope != nil
 	}
 	if snap.Operational != nil {
 		st.OperationalAddr = snap.Operational.Address
@@ -668,6 +1017,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	}
 	if snap.Savings != nil {
 		st.SavingsAddr = snap.Savings.Address
+		st.SavingsScript = hex.EncodeToString(snap.Savings.PkScript)
 		var forbidden []*btcec.PublicKey
 		if snap.VaultCosignerBase != nil {
 			forbidden = append(forbidden, snap.VaultCosignerBase)
@@ -1072,6 +1422,34 @@ func (s *Service) sealCredential(cred *policy.Credential) error {
 		return fmt.Errorf("seal credential record: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) sealCredentialEnvelope(envelope *policy.CredentialEnvelope, credentialID []byte) error {
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	if err := policy.SealCredentialEnvelope(envelope, credentialID, key); err != nil {
+		return fmt.Errorf("seal credential envelope: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) loadVerifiedCredentialEnvelope(credentialID []byte) (*policy.CredentialEnvelope, error) {
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return nil, err
+	}
+	defer zeroServiceBytes(key)
+	envelope, err := s.Ledger.GetCredentialEnvelope()
+	if err != nil || envelope == nil {
+		return envelope, err
+	}
+	if err := policy.VerifyCredentialEnvelope(envelope, credentialID, key); err != nil {
+		return nil, fmt.Errorf("authoritative credential envelope integrity verification failed: %w; restore a verified backup or use a reviewed migration", err)
+	}
+	return envelope, nil
 }
 
 func (s *Service) loadVerifiedCredential() (*policy.Credential, error) {

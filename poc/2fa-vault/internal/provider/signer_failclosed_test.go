@@ -69,17 +69,18 @@ func TestRemoteSignerRejectsNilAndMalformedInputs(t *testing.T) {
 	var typedNilClient *boundaryTransport
 
 	cases := []struct {
-		name   string
-		signer *RemoteSigner
-		ptx    *psbt.Packet
+		name     string
+		signer   *RemoteSigner
+		ptx      *psbt.Packet
+		expected []byte
 	}{
 		{name: "nil receiver", signer: nil, ptx: ptx},
-		{name: "nil client", signer: &RemoteSigner{ExpectedXOnly: expected}, ptx: ptx},
-		{name: "typed nil client", signer: &RemoteSigner{Client: typedNilClient, ExpectedXOnly: expected}, ptx: ptx},
-		{name: "missing expected key", signer: &RemoteSigner{Client: stub}, ptx: ptx},
-		{name: "nil packet", signer: &RemoteSigner{Client: stub, ExpectedXOnly: expected}, ptx: nil},
-		{name: "nil unsigned tx", signer: &RemoteSigner{Client: stub, ExpectedXOnly: expected}, ptx: &psbt.Packet{Inputs: []psbt.PInput{{}}}},
-		{name: "empty inputs", signer: &RemoteSigner{Client: stub, ExpectedXOnly: expected}, ptx: &psbt.Packet{UnsignedTx: tx}},
+		{name: "nil client", signer: &RemoteSigner{}, ptx: ptx, expected: expected},
+		{name: "typed nil client", signer: &RemoteSigner{Client: typedNilClient}, ptx: ptx, expected: expected},
+		{name: "missing expected key", signer: &RemoteSigner{Client: stub}, ptx: ptx, expected: nil},
+		{name: "nil packet", signer: &RemoteSigner{Client: stub}, ptx: nil, expected: expected},
+		{name: "nil unsigned tx", signer: &RemoteSigner{Client: stub}, ptx: &psbt.Packet{Inputs: []psbt.PInput{{}}}, expected: expected},
+		{name: "empty inputs", signer: &RemoteSigner{Client: stub}, ptx: &psbt.Packet{UnsignedTx: tx}, expected: expected},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -88,9 +89,12 @@ func TestRemoteSignerRejectsNilAndMalformedInputs(t *testing.T) {
 					t.Fatalf("panicked: %v", recovered)
 				}
 			}()
-			if _, err := tc.signer.Sign(ctx, tc.ptx); err == nil {
+			if _, err := tc.signer.SignExpected(ctx, tc.ptx, tc.expected); err == nil {
 				t.Fatal("malformed input accepted")
 			}
 		})
+	}
+	if _, err := (&RemoteSigner{Client: stub}).Sign(ctx, ptx); err == nil {
+		t.Fatal("Sign without a per-call expected key was accepted")
 	}
 }
