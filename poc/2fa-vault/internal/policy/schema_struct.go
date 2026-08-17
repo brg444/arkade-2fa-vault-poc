@@ -205,83 +205,235 @@ func validateMultiTenantSchemaOn(q schemaQuerier) error {
 	return nil
 }
 
-var expectedChecks = map[string][]string{
-	"vault": {
-		"in('legacy-direct-v0','hkdf-sha256-v1')",
-		"length(integrity_mac)=32",
-	},
-	"vault_credential": {
-		"in(0,1)",
-		"length(integrity_mac)=32",
-	},
-	"vault_envelope": {
-		"version=1",
-		"length(binding)>0andlength(binding)<=16384",
-		"length(nonce)=12",
-		"length(ciphertext)=48",
-		"length(direct_signature)=64",
-		"length(phone_signature)=64",
-		"length(integrity_mac)=32",
-	},
-	"invite": {
-		"length(token_hash)=32",
-	},
-	"pending_enrollment": {
-		"length(token_hash)=32",
-	},
+func canonicalChecksByTable() map[string][]string {
+	return extractChecksByTable(createMultiTenantSchema)
 }
 
 func matchCheckConstraints(q schemaQuerier, table string) error {
-	want := expectedChecks[table]
-	if len(want) == 0 {
-		return nil
+	want := canonicalChecksByTable()[table]
+	if want == nil {
+		want = []string{}
 	}
 	var sqlText string
 	if err := q.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&sqlText); err != nil {
 		return fmt.Errorf("incompatible vault database: %s missing create sql", table)
 	}
 	got := extractNormalizedChecks(sqlText)
-	for _, w := range want {
-		if !containsNormalizedCheck(got, w) {
+	return sameCheckSet(table, got, want)
+}
+
+func sameCheckSet(table string, got, want []string) error {
+	if len(got) != len(want) {
+		return fmt.Errorf("incompatible vault database: %s CHECK count %d, want %d", table, len(got), len(want))
+	}
+	used := make([]bool, len(want))
+	for _, g := range got {
+		found := false
+		for i, w := range want {
+			if used[i] || g != w {
+				continue
+			}
+			used[i] = true
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("incompatible vault database: %s unexpected CHECK %s", table, g)
+		}
+	}
+	for i, w := range want {
+		if !used[i] {
 			return fmt.Errorf("incompatible vault database: %s missing CHECK %s", table, w)
 		}
 	}
 	return nil
 }
 
-func extractNormalizedChecks(createSQL string) []string {
-	upper := strings.ToUpper(createSQL)
-	var out []string
-	for i := 0; i < len(upper); i++ {
-		if !strings.HasPrefix(upper[i:], "CHECK") {
+func extractChecksByTable(schemaSQL string) map[string][]string {
+	out := make(map[string][]string)
+	upper := strings.ToUpper(schemaSQL)
+	for i := 0; i < len(schemaSQL); {
+		if skip, next := skipQuotedSQL(schemaSQL, i); skip {
+			i = next
 			continue
 		}
-		if i > 0 {
-			prev := upper[i-1]
-			if (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_' {
-				continue
+		if !hasKeywordAt(upper, i, "CREATE") {
+			i++
+			continue
+		}
+		j := skipSQLSpace(schemaSQL, i+6)
+		if !hasKeywordAt(strings.ToUpper(schemaSQL), j, "TABLE") {
+			i++
+			continue
+		}
+		j = skipSQLSpace(schemaSQL, j+5)
+		if hasKeywordAt(strings.ToUpper(schemaSQL), j, "IF") {
+			j = skipSQLSpace(schemaSQL, j+2)
+			if hasKeywordAt(strings.ToUpper(schemaSQL), j, "NOT") {
+				j = skipSQLSpace(schemaSQL, j+3)
+				if hasKeywordAt(strings.ToUpper(schemaSQL), j, "EXISTS") {
+					j = skipSQLSpace(schemaSQL, j+6)
+				}
 			}
 		}
-		j := i + 5
-		for j < len(createSQL) && (createSQL[j] == ' ' || createSQL[j] == '\n' || createSQL[j] == '\t' || createSQL[j] == '\r') {
-			j++
-		}
-		if j >= len(createSQL) || createSQL[j] != '(' {
-			continue
-		}
-		end, ok := matchParen(createSQL, j)
+		name, next, ok := readSQLIdent(schemaSQL, j)
 		if !ok {
+			i++
 			continue
 		}
-		out = append(out, normalizeCheck(createSQL[j:end+1]))
-		i = end
+		j = skipSQLSpace(schemaSQL, next)
+		if j >= len(schemaSQL) || schemaSQL[j] != '(' {
+			i++
+			continue
+		}
+		end, ok := matchParen(schemaSQL, j)
+		if !ok {
+			i++
+			continue
+		}
+		out[strings.ToLower(name)] = extractNormalizedChecks(schemaSQL[j : end+1])
+		i = end + 1
 	}
 	return out
 }
 
+func extractNormalizedChecks(createSQL string) []string {
+	var out []string
+	for i := 0; i < len(createSQL); {
+		if skip, next := skipQuotedSQL(createSQL, i); skip {
+			i = next
+			continue
+		}
+		if hasKeywordAt(strings.ToUpper(createSQL), i, "CHECK") {
+			j := skipSQLSpace(createSQL, i+5)
+			if j < len(createSQL) && createSQL[j] == '(' {
+				end, ok := matchParen(createSQL, j)
+				if ok {
+					out = append(out, normalizeCheck(createSQL[j:end+1]))
+					i = end + 1
+					continue
+				}
+			}
+		}
+		i++
+	}
+	return out
+}
+
+func hasKeywordAt(upper string, i int, word string) bool {
+	if i+len(word) > len(upper) || upper[i:i+len(word)] != word {
+		return false
+	}
+	if i > 0 && isSQLIdentChar(upper[i-1]) {
+		return false
+	}
+	if i+len(word) < len(upper) && isSQLIdentChar(upper[i+len(word)]) {
+		return false
+	}
+	return true
+}
+
+func isSQLIdentChar(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+func skipSQLSpace(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\n', '\t', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func readSQLIdent(s string, i int) (string, int, bool) {
+	if i >= len(s) {
+		return "", i, false
+	}
+	switch s[i] {
+	case '"', '`', '\'':
+		end := skipSQLQuoted(s, i, s[i])
+		if end <= i+1 {
+			return "", i, false
+		}
+		return s[i+1 : end-1], end, true
+	case '[':
+		j := i + 1
+		for j < len(s) && s[j] != ']' {
+			j++
+		}
+		if j >= len(s) {
+			return "", i, false
+		}
+		return s[i+1 : j], j + 1, true
+	}
+	if !isSQLIdentChar(s[i]) {
+		return "", i, false
+	}
+	j := i
+	for j < len(s) && isSQLIdentChar(s[j]) {
+		j++
+	}
+	return s[i:j], j, true
+}
+
+func skipQuotedSQL(s string, i int) (bool, int) {
+	if i >= len(s) {
+		return false, i
+	}
+	switch s[i] {
+	case '\'', '"', '`':
+		return true, skipSQLQuoted(s, i, s[i])
+	case '[':
+		j := i + 1
+		for j < len(s) && s[j] != ']' {
+			j++
+		}
+		if j < len(s) {
+			return true, j + 1
+		}
+		return true, len(s)
+	case '-':
+		if i+1 < len(s) && s[i+1] == '-' {
+			j := i + 2
+			for j < len(s) && s[j] != '\n' {
+				j++
+			}
+			return true, j
+		}
+	}
+	return false, i
+}
+
+func skipSQLQuoted(s string, i int, quote byte) int {
+	i++
+	for i < len(s) {
+		if s[i] != quote {
+			i++
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == quote {
+			i += 2
+			continue
+		}
+		return i + 1
+	}
+	return len(s)
+}
+
 func matchParen(s string, open int) (int, bool) {
+	if open >= len(s) || s[open] != '(' {
+		return -1, false
+	}
 	depth := 0
-	for i := open; i < len(s); i++ {
+	for i := open; i < len(s); {
+		if skip, next := skipQuotedSQL(s, i); skip {
+			i = next
+			continue
+		}
 		switch s[i] {
 		case '(':
 			depth++
@@ -291,6 +443,7 @@ func matchParen(s string, open int) (int, bool) {
 				return i, true
 			}
 		}
+		i++
 	}
 	return -1, false
 }
@@ -298,26 +451,27 @@ func matchParen(s string, open int) (int, bool) {
 func normalizeCheck(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < len(s); {
+		if skip, next := skipQuotedSQL(s, i); skip && next > i {
+			for _, c := range s[i:next] {
+				if c >= 'A' && c <= 'Z' {
+					c += 'a' - 'A'
+				}
+				b.WriteByte(byte(c))
+			}
+			i = next
+			continue
+		}
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			c += 'a' - 'A'
 		}
-		if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
-			continue
+		if c != ' ' && c != '\n' && c != '\t' && c != '\r' {
+			b.WriteByte(c)
 		}
-		b.WriteByte(c)
+		i++
 	}
 	return b.String()
-}
-
-func containsNormalizedCheck(got []string, want string) bool {
-	for _, g := range got {
-		if strings.Contains(g, want) {
-			return true
-		}
-	}
-	return false
 }
 
 func readTableXInfo(q schemaQuerier, table string) ([]colSpec, error) {

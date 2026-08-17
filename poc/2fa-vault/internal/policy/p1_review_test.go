@@ -397,6 +397,79 @@ CREATE TABLE vault (
 	_ = led.Close()
 }
 
+func TestCheckParserIsQuoteAwareAndComparesExactSets(t *testing.T) {
+	got := extractNormalizedChecks(`CREATE TABLE t (
+  a TEXT CHECK (length(')') = 1),
+  b TEXT CHECK (length(")") = 1)
+)`)
+	want := []string{"(length(')')=1)", `(length(")")=1)`}
+	if err := sameCheckSet("t", got, want); err != nil {
+		t.Fatalf("quote-aware parse: %v got=%v", err, got)
+	}
+
+	// Weakened token-hash check used to pass substring matching.
+	if err := sameCheckSet("invite",
+		[]string{"(length(token_hash)=32or1=1)"},
+		[]string{"(length(token_hash)=32)"},
+	); err == nil {
+		t.Fatal("OR 1=1 weakening accepted as the required CHECK")
+	}
+
+	// Extra restrictive CHECK must be rejected even if all required ones exist.
+	if err := sameCheckSet("invite",
+		[]string{"(length(token_hash)=32)", "(length(expires_at)>1000)"},
+		[]string{"(length(token_hash)=32)"},
+	); err == nil {
+		t.Fatal("unexpected extra CHECK accepted")
+	}
+}
+
+func TestSchemaRejectsWeakenedAndExtraInviteChecks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "weak-invite.sqlite")
+	led, err := OpenLedger(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	if err := ensureMultiTenantSchema(led.db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.db.Exec(`DROP TABLE pending_enrollment`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.db.Exec(`DROP TABLE invite`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.db.Exec(`
+CREATE TABLE invite (
+  token_hash BLOB PRIMARY KEY CHECK (length(token_hash) = 32 OR 1 = 1),
+  expires_at TEXT NOT NULL,
+  consumed_vault_id TEXT UNIQUE REFERENCES vault(vault_id),
+  created_at TEXT NOT NULL
+)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := matchCheckConstraints(led.db, "invite"); err == nil || !strings.Contains(err.Error(), "CHECK") {
+		t.Fatalf("weakened invite CHECK accepted: %v", err)
+	}
+
+	if _, err := led.db.Exec(`DROP TABLE invite`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.db.Exec(`
+CREATE TABLE invite (
+  token_hash BLOB PRIMARY KEY CHECK (length(token_hash) = 32),
+  expires_at TEXT NOT NULL CHECK (length(expires_at) > 1000),
+  consumed_vault_id TEXT UNIQUE REFERENCES vault(vault_id),
+  created_at TEXT NOT NULL
+)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := matchCheckConstraints(led.db, "invite"); err == nil || !strings.Contains(err.Error(), "CHECK") {
+		t.Fatalf("extra restrictive invite CHECK accepted: %v", err)
+	}
+}
+
 func TestRequiredChecksRejectInvalidRows(t *testing.T) {
 	led := openTestLedger(t, nil)
 	if err := ensureMultiTenantSchema(led.db); err != nil {
