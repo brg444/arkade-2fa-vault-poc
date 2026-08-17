@@ -37,10 +37,20 @@ func withPoP(vaultID string, owner, recovery *btcec.PrivateKey, req RegisterRequ
 	return req
 }
 
+func proposedPoP(t *testing.T, svc *Service, vaultID string, owner, recovery *btcec.PrivateKey, req RegisterRequest) RegisterRequest {
+	t.Helper()
+	preview, err := svc.previewTenantDescriptor(vaultID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.DescriptorHash = preview.DescriptorHash
+	return withPoP(vaultID, owner, recovery, req)
+}
+
 func TestEnrollRoutesAreUnreachableWhenFlagOff(t *testing.T) {
 	svc := &Service{Deployment: deployment.Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: deployment.NetworkMutinynet}}
 	h := AuthorizerHandler(svc)
-	for _, path := range []string{"/v1/invite", "/v1/enroll/start", "/v1/enroll/finish"} {
+	for _, path := range []string{"/v1/invite", "/v1/enroll/start", "/v1/enroll/propose", "/v1/enroll/finish"} {
 		method := http.MethodPost
 		body := "{}"
 		if path == "/v1/invite" {
@@ -116,7 +126,7 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 		t.Fatal("unexpired start replay rotated the challenge")
 	}
 
-	req := attestedFinish(t, replay, pass, []byte("cred-b"), RegisterRequest{
+	req := attestedFinish(t, svc, replay, pass, []byte("cred-b"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -148,6 +158,41 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 	forged.PhoneRoutineBIP340Pub = hex.EncodeToString(other.PubKey().SerializeCompressed())
 	if _, err := svc.FinishEnrollment(context.Background(), token, forged); err == nil {
 		t.Fatal("forged finish replaced the tenant")
+	}
+}
+
+func TestProposeBindsDescriptorIntoEnrollmentProof(t *testing.T) {
+	svc, token, start := enrollReady(t)
+	pass, _ := webauthn.NewP256()
+	direct, _ := webauthn.NewP256()
+	hot, _ := btcec.NewPrivateKey()
+	owner, _ := btcec.NewPrivateKey()
+	recovery, _ := btcec.NewPrivateKey()
+	base := RegisterRequest{
+		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
+		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
+	}
+	req := attestedFinish(t, svc, start, pass, []byte("cred-desc"), base, owner, recovery)
+	if req.DescriptorHash == "" {
+		t.Fatal("propose did not fill descriptor hash")
+	}
+	wrong := req
+	wrong.RegisterRequest = withPoP(start.VaultID, owner, recovery, RegisterRequest{
+		CredentialID:             req.CredentialID,
+		WebAuthnP256:             req.WebAuthnP256,
+		PhoneDirectP256:          req.PhoneDirectP256,
+		PhoneRoutineBIP340Pub:    req.PhoneRoutineBIP340Pub,
+		ExternalOwnerWalletXOnly: req.ExternalOwnerWalletXOnly,
+		RecoveryKeyXOnly:         req.RecoveryKeyXOnly,
+		DescriptorHash:           strings.Repeat("ab", 32),
+	})
+	if _, err := svc.FinishEnrollment(context.Background(), token, wrong); err == nil {
+		t.Fatal("finish accepted a proof over the wrong descriptor")
+	}
+	if _, err := svc.FinishEnrollment(context.Background(), token, req); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -185,7 +230,7 @@ func TestFinishDoesNotInheritProcessOwnerPubs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = svc.FinishEnrollment(context.Background(), token, attestedFinish(t, start, pass, []byte("cred-x"), RegisterRequest{
+	_, err = svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, start, pass, []byte("cred-x"), RegisterRequest{
 		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 	}))
@@ -213,7 +258,7 @@ func TestFinishAcceptsPRFShapedAuthenticatorExtensions(t *testing.T) {
 		ClientDataJSON:    hex.EncodeToString([]byte(`{"type":"webauthn.create","challenge":"` + webauthn.EncodeChallenge(challenge) + `","origin":"` + fixture.Origin + `","crossOrigin":false}`)),
 		AuthenticatorData: hex.EncodeToString(auth),
 		AttestationObject: hex.EncodeToString(webauthn.EncodeNoneAttestationObject(auth)),
-		RegisterRequest: withPoP(start.VaultID, owner, recovery, RegisterRequest{
+		RegisterRequest: proposedPoP(t, svc, start.VaultID, owner, recovery, RegisterRequest{
 			CredentialID:             hex.EncodeToString(credID),
 			WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(pass)),
 			PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
@@ -245,7 +290,7 @@ func TestFinishCannotConsumeAfterConcurrentChallengeRotation(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
-	stale := attestedFinish(t, start, pass, []byte("stale-race"), RegisterRequest{
+	stale := attestedFinish(t, svc, start, pass, []byte("stale-race"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -278,7 +323,7 @@ func TestFinishCannotConsumeAfterConcurrentChallengeRotation(t *testing.T) {
 		t.Fatal("stale finish consumed the invite after rotation")
 	}
 	fresh, _ := webauthn.NewP256()
-	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, rotated, fresh, []byte("fresh-race"), stale.RegisterRequest, owner, recovery)); err != nil {
+	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, rotated, fresh, []byte("fresh-race"), stale.RegisterRequest, owner, recovery)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -295,7 +340,7 @@ func TestCredentialCannotOperateAnotherVault(t *testing.T) {
 	}
 }
 
-func attestedFinish(t *testing.T, start *EnrollStartResponse, pass *ecdsa.PrivateKey, credID []byte, extra RegisterRequest, keys ...*btcec.PrivateKey) EnrollFinishRequest {
+func attestedFinish(t *testing.T, svc *Service, start *EnrollStartResponse, pass *ecdsa.PrivateKey, credID []byte, extra RegisterRequest, keys ...*btcec.PrivateKey) EnrollFinishRequest {
 	t.Helper()
 	challenge, err := hex.DecodeString(start.Challenge)
 	if err != nil {
@@ -310,7 +355,7 @@ func attestedFinish(t *testing.T, start *EnrollStartResponse, pass *ecdsa.Privat
 	extra.CredentialID = hex.EncodeToString(credID)
 	extra.WebAuthnP256 = hex.EncodeToString(compressed)
 	if len(keys) >= 2 && keys[0] != nil && keys[1] != nil {
-		extra = withPoP(start.VaultID, keys[0], keys[1], extra)
+		extra = proposedPoP(t, svc, start.VaultID, keys[0], keys[1], extra)
 	}
 	return EnrollFinishRequest{
 		Handle:            start.Handle,
@@ -329,7 +374,7 @@ func TestFinishRejectsUnattestedOrMismatchedCreate(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
-	req := attestedFinish(t, start, pass, []byte("cred-at"), RegisterRequest{
+	req := attestedFinish(t, svc, start, pass, []byte("cred-at"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -370,7 +415,7 @@ func TestStaleStartChallengeCannotFinishAfterExpiryRotation(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
-	staleReq := attestedFinish(t, start, pass, []byte("stale"), RegisterRequest{
+	staleReq := attestedFinish(t, svc, start, pass, []byte("stale"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -380,7 +425,7 @@ func TestStaleStartChallengeCannotFinishAfterExpiryRotation(t *testing.T) {
 		t.Fatal("stale challenge finished after rotation")
 	}
 	fresh, _ := webauthn.NewP256()
-	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, rotated, fresh, []byte("fresh"), staleReq.RegisterRequest, owner, recovery)); err != nil {
+	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, rotated, fresh, []byte("fresh"), staleReq.RegisterRequest, owner, recovery)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -442,7 +487,7 @@ func TestSecondTenantStatusDoesNotInspectFirstVaultEnvelope(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
-	second, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, start, pass, []byte("cred-b"), RegisterRequest{
+	second, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, start, pass, []byte("cred-b"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -490,7 +535,7 @@ func TestConcurrentFinishAndStatusDoNotRaceSharedKeyFields(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
-	req := attestedFinish(t, start, pass, []byte("race"), RegisterRequest{
+	req := attestedFinish(t, svc, start, pass, []byte("race"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),

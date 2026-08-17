@@ -95,6 +95,7 @@ var authorizerRouteMethods = map[string]map[string]struct{}{
 	"/v1/status":            {http.MethodGet: {}, http.MethodOptions: {}},
 	"/v1/invite":            {http.MethodGet: {}, http.MethodOptions: {}},
 	"/v1/enroll/start":      {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/enroll/propose":    {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/enroll/finish":     {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/register":          {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/preflight":         {http.MethodPost: {}, http.MethodOptions: {}},
@@ -170,6 +171,15 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 			return
 		}
 		out, err := svc.StartEnrollment(r.Header.Get(EnrollmentTokenHeader))
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/enroll/propose", func(w http.ResponseWriter, r *http.Request) {
+		var req EnrollFinishRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.ProposeEnrollment(r.Header.Get(EnrollmentTokenHeader), req)
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("POST /v1/enroll/finish", func(w http.ResponseWriter, r *http.Request) {

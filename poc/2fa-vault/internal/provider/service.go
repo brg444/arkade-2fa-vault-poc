@@ -127,6 +127,7 @@ type RegisterRequest struct {
 	VaultID            string `json:"vaultId,omitempty"`
 	ExternalOwnerProof string `json:"externalOwnerProof,omitempty"`
 	RecoveryProof      string `json:"recoveryProof,omitempty"`
+	DescriptorHash     string `json:"descriptorHash,omitempty"`
 }
 
 type parsedRegisterRequest struct {
@@ -253,6 +254,13 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	parsed, err := s.parseRegisterRequestIndependent(req)
 	if err != nil {
 		return err
+	}
+	proposed, err := s.previewTenantDescriptor(vaultID, req)
+	if err != nil {
+		return err
+	}
+	if req.DescriptorHash == "" || req.DescriptorHash != proposed.DescriptorHash {
+		return fmt.Errorf("enrollment descriptor hash does not match the proposed vault")
 	}
 	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, parsed.recovery, req); err != nil {
 		return err

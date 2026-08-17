@@ -128,6 +128,7 @@ func TestAuthorizerRouteAllowlistIsExact(t *testing.T) {
 		"/v1/status":            {http.MethodGet, http.MethodOptions},
 		"/v1/invite":            {http.MethodGet, http.MethodOptions},
 		"/v1/enroll/start":      {http.MethodOptions, http.MethodPost},
+		"/v1/enroll/propose":    {http.MethodOptions, http.MethodPost},
 		"/v1/enroll/finish":     {http.MethodOptions, http.MethodPost},
 		"/v1/register":          {http.MethodOptions, http.MethodPost},
 		"/v1/preflight":         {http.MethodOptions, http.MethodPost},

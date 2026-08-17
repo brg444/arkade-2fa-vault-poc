@@ -41,6 +41,7 @@ type Config struct {
 	EnrollmentWindow          time.Duration
 	OpenEnrollment            bool
 	MultiTenantEnrollment     bool
+	FreshOnly                 bool
 	EsploraURL                string
 }
 
@@ -113,6 +114,11 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		return nil, fmt.Errorf("public arkade emulator dialer required")
 	}
 
+	if cfg.FreshOnly {
+		if err := policy.RefuseLegacyDatabase(cfg.DatabasePath); err != nil {
+			return nil, fmt.Errorf("fresh-only: %w", err)
+		}
+	}
 	vaultCosignerKey, err := LoadVaultCosignerKey(cfg.VaultCosignerKeyFile)
 	if err != nil {
 		return nil, err

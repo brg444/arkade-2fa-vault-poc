@@ -75,7 +75,7 @@ func TestHTTPTenantBInstallRecoverDoesNotTouchA(t *testing.T) {
 	dirB, _ := webauthn.NewP256()
 	credB := []byte("cred-b")
 	const tenantB = "tenant-b"
-	if err := svc.CreateTenantVault(tenantB, token, withPoP(tenantB, ownerB, recB, RegisterRequest{
+	if err := svc.CreateTenantVault(tenantB, token, proposedPoP(t, svc, tenantB, ownerB, recB, RegisterRequest{
 		CredentialID:             hex.EncodeToString(credB),
 		WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(passB)),
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),

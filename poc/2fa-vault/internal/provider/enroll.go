@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -133,6 +134,71 @@ func (s *Service) StartEnrollment(token string) (*EnrollStartResponse, error) {
 		UserName:  "vault",
 		TimeoutMS: int(pendingEnrollmentTTL / time.Millisecond),
 	}, nil
+}
+
+// ProposeEnrollment returns the descriptor that Finish will persist. It does
+// not consume the invite or write a vault row.
+func (s *Service) ProposeEnrollment(token string, req EnrollFinishRequest) (*ProposedEnrollment, error) {
+	if err := s.requireMultiTenantEnrollment(); err != nil {
+		return nil, err
+	}
+	hash, err := HashEnrollmentToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("invite not available")
+	}
+	pending, err := s.Ledger.GetPendingByHandle(req.Handle)
+	if err != nil || pending == nil {
+		return nil, fmt.Errorf("pending enrollment not found")
+	}
+	if subtle.ConstantTimeCompare(pending.TokenHash, hash) != 1 {
+		return nil, fmt.Errorf("pending enrollment not found")
+	}
+	now := s.currentEnrollmentTime().UTC()
+	if pending.ExpiresAt != "" && pending.ExpiresAt < now.Format(time.RFC3339) {
+		return nil, fmt.Errorf("pending enrollment expired")
+	}
+	if req.VaultID != "" && req.VaultID != pending.VaultID {
+		return nil, fmt.Errorf("vault id does not match pending enrollment")
+	}
+	return s.previewTenantDescriptor(pending.VaultID, req.RegisterRequest)
+}
+
+func (s *Service) previewTenantDescriptor(vaultID string, req RegisterRequest) (*ProposedEnrollment, error) {
+	if vaultID == "" || vaultID == fixture.VaultID {
+		return nil, fmt.Errorf("tenant vault id required")
+	}
+	master, err := s.vaultCosignerMaster()
+	if err != nil {
+		return nil, err
+	}
+	child, err := policy.DeriveVaultCosignerScalar(master, vaultID, policy.CosignerModeHKDFSHA256V1)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := s.parseRegisterRequestIndependent(req)
+	if err != nil {
+		return nil, err
+	}
+	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())
+	if err != nil {
+		return nil, err
+	}
+	cred := descriptorFromTrees(
+		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
+		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
+		child.PubKey(), s.ArkadeCosignerPub,
+		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
+	)
+	cred.VaultID = vaultID
+	pub, err := publicDescriptorFromCredential(cred)
+	if err != nil {
+		return nil, err
+	}
+	hash, err := hashPublicDescriptor(pub)
+	if err != nil {
+		return nil, err
+	}
+	return &ProposedEnrollment{VaultID: vaultID, DescriptorHash: hash, Descriptor: pub}, nil
 }
 
 // FinishEnrollment verifies the create ceremony and CAS-consumes the invite.
@@ -286,11 +352,12 @@ func randomBytes(n int) ([]byte, error) {
 	return out, nil
 }
 
-const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v1"
+const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v2"
 
 // EnrollmentPoPDigest is the BIP340 message owner and recovery sign. It binds
-// the whole client-controlled enrollment tuple. The server-derived HKDF
-// VaultCosigner child is intentionally excluded.
+// the client enrollment tuple and the hashed v3 public descriptor that
+// ProposeEnrollment returned. The HKDF VaultCosigner child is included only
+// through that descriptor hash.
 func EnrollmentPoPDigest(vaultID string, req RegisterRequest) []byte {
 	h := sha256.New()
 	_, _ = h.Write([]byte(enrollmentPoPDomain))
@@ -301,6 +368,7 @@ func EnrollmentPoPDigest(vaultID string, req RegisterRequest) []byte {
 	writePoPField(h, decodePoPHex(req.PhoneRoutineBIP340Pub))
 	writePoPField(h, decodePoPHex(req.ExternalOwnerWalletXOnly))
 	writePoPField(h, decodePoPHex(req.RecoveryKeyXOnly))
+	writePoPField(h, decodePoPHex(req.DescriptorHash))
 	return h.Sum(nil)
 }
 
@@ -324,6 +392,9 @@ func decodePoPHex(encoded string) []byte {
 func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, req RegisterRequest) error {
 	if owner == nil || recovery == nil {
 		return fmt.Errorf("tenant owner and recovery pubs required")
+	}
+	if req.DescriptorHash == "" {
+		return fmt.Errorf("enrollment descriptor hash required")
 	}
 	digest := EnrollmentPoPDigest(vaultID, req)
 	if err := verifySchnorrHex(owner, digest, req.ExternalOwnerProof, "externalOwnerProof"); err != nil {

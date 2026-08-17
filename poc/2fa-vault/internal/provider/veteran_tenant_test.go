@@ -267,7 +267,7 @@ func TestVeteranFinishRequiresDurablePending(t *testing.T) {
 	recovery, _ := btcec.NewPrivateKey()
 	ghost := *start
 	ghost.Handle = strings.Repeat("ab", 16)
-	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, &ghost, pass, []byte("no-pending"), RegisterRequest{
+	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, &ghost, pass, []byte("no-pending"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
@@ -338,7 +338,7 @@ func twoTenantEnvClock(t *testing.T, clock func() time.Time) (*Service, *policy.
 	passB, _ := webauthn.NewP256()
 	dirB, _ := webauthn.NewP256()
 	const tenantB = "tenant-b"
-	if err := svc.CreateTenantVault(tenantB, token, withPoP(tenantB, ownerB, recB, RegisterRequest{
+	if err := svc.CreateTenantVault(tenantB, token, proposedPoP(t, svc, tenantB, ownerB, recB, RegisterRequest{
 		CredentialID:             hex.EncodeToString([]byte("cred-b")),
 		WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(passB)),
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),

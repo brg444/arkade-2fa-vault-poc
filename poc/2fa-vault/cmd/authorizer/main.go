@@ -41,6 +41,7 @@ func main() {
 		network     = flag.String("network", envOr("VAULT_NETWORK", deployment.NetworkMutinynet), "must be mutinynet")
 		opCSV       = flag.Uint64("operational-csv-blocks", uint64(opDefault), "Operational recovery delay in blocks")
 		savingsCSV  = flag.Uint64("savings-csv-blocks", uint64(savingsDefault), "Savings recovery delay in blocks")
+		freshOnly   = flag.Bool("fresh-only", !envTruthy("VAULT_ALLOW_LEGACY"), "refuse legacy credential/database files before any backup or migrate")
 	)
 	flag.Parse()
 	if *opCSV > uint64(deployment.MaxCSVBlockDelay) || *savingsCSV > uint64(deployment.MaxCSVBlockDelay) {
@@ -61,6 +62,7 @@ func main() {
 		RecoveryKeyPubHex:         *recoveryHex,
 		EnrollmentTokenFile:       *tokenFile,
 		MultiTenantEnrollment:     envTruthy("VAULT_MULTI_TENANT_ENROLLMENT"),
+		FreshOnly:                 *freshOnly,
 		EsploraURL:                *esploraURL,
 	}
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 40*time.Second)
