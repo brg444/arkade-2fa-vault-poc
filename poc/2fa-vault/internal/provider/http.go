@@ -2,18 +2,22 @@ package provider
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 )
+
+const GatewaySecretHeader = "X-Vault-Gateway-Secret"
 
 const maxJSONBody = 1 << 20
 const EnrollmentTokenHeader = "X-Vault-Enrollment-Token"
@@ -55,7 +59,7 @@ func AuthorizerHandler(svc *Service) http.Handler {
 	mux := http.NewServeMux()
 	attachCoreRoutes(mux, svc, origin)
 	inner := withCORS(mux, origin)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return requireGatewaySecret(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		methods, known := authorizerRouteMethods[r.URL.Path]
 		if !known {
 			http.NotFound(w, r)
@@ -67,6 +71,22 @@ func AuthorizerHandler(svc *Service) http.Handler {
 			return
 		}
 		inner.ServeHTTP(w, r)
+	}))
+}
+
+func requireGatewaySecret(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := strings.TrimSpace(os.Getenv("VAULT_GATEWAY_SECRET"))
+		if want == "" || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		got := r.Header.Get(GatewaySecretHeader)
+		if subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -57,6 +57,33 @@ func TestAuthorizerHTTPBoundaryEnforcesPolicyBeforeProviderKeyUse(t *testing.T) 
 	})
 }
 
+func TestAuthorizerRequiresGatewaySecretOnV1WhenConfigured(t *testing.T) {
+	t.Setenv("VAULT_GATEWAY_SECRET", "test-gateway-secret")
+	e := newBoundaryEnv(t)
+	handler := AuthorizerHandler(e.service)
+	denied := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	denied.Header.Set("Origin", fixture.Origin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, denied)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing gateway secret = %d %s", rec.Code, rec.Body.String())
+	}
+	allowed := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	allowed.Header.Set("Origin", fixture.Origin)
+	allowed.Header.Set(GatewaySecretHeader, "test-gateway-secret")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, allowed)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid gateway secret = %d %s", rec.Code, rec.Body.String())
+	}
+	health := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, health)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health without secret = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAuthorizerHTTPBoundaryHasNoGenericSigningOrStaticSurface(t *testing.T) {
 	e := newBoundaryEnv(t)
 	handler := AuthorizerHandler(e.service)
