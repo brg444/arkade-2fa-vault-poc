@@ -1,0 +1,20 @@
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/v1/:path*",
+      "destination": "https://authorizer-production-72de.up.railway.app/v1/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://authorizer-production-72de.up.railway.app/health"
+    }
+  ]
+}
