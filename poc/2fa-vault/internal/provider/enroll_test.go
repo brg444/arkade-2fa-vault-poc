@@ -600,6 +600,32 @@ func enrollReady(t *testing.T) (*Service, string, *EnrollStartResponse) {
 	return svc, token, start
 }
 
+func TestPublicStatusStaysTokenWhenMultiTenantPastSingletonDeadline(t *testing.T) {
+	svc := enrollService(t, nil)
+	svc.Deployment.Network = deployment.NetworkMutinynet
+	svc.Deployment.ClientOrigin = "https://arkade-vault-demo.vercel.app"
+	svc.Deployment.RPID = "arkade-vault-demo.vercel.app"
+	svc.Deployment.OperationalCSVBlocks = 288
+	svc.Deployment.SavingsCSVBlocks = 4032
+	svc.EnrollmentDeadline = time.Now().UTC().Add(-time.Minute)
+	svc.EnrollmentTokenHash = bytes.Repeat([]byte{0x11}, 32)
+	st, err := svc.PublicStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.EnrollmentMode != "token" || st.EnrollmentExpiresAt != "" {
+		t.Fatalf("multi-tenant public status = %+v", st)
+	}
+	svc.MultiTenantEnrollment = false
+	st, err = svc.PublicStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.EnrollmentMode != "expired" {
+		t.Fatalf("singleton past deadline = %+v", st)
+	}
+}
+
 func enrollService(t *testing.T, led *policy.Ledger) *Service {
 	t.Helper()
 	master, _ := btcec.NewPrivateKey()

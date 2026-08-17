@@ -1085,22 +1085,35 @@ func (s *Service) PublicStatus() (PublicStatus, error) {
 		OperationalCSVBlocks: cfg.OperationalCSVBlocks,
 		SavingsCSVBlocks:     cfg.SavingsCSVBlocks,
 	}
-	switch {
-	case cfg.Network == deployment.NetworkRegtest:
-		st.EnrollmentMode = "open"
-	case s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline):
-		st.EnrollmentMode = "expired"
-	case s.OpenEnrollment:
-		st.EnrollmentMode = "open"
-	case len(s.EnrollmentTokenHash) == sha256.Size:
-		st.EnrollmentMode = "token"
-	default:
-		st.EnrollmentMode = "unavailable"
-	}
-	if !s.EnrollmentDeadline.IsZero() {
-		st.EnrollmentExpiresAt = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
-	}
+	st.EnrollmentMode, st.EnrollmentExpiresAt = s.publicEnrollmentMode()
 	return st, nil
+}
+
+// publicEnrollmentMode is the unauthenticated setup state. Invite-gated
+// multi-tenant does not inherit the singleton 30-minute first-claim window;
+// each invite has its own expires_at.
+func (s *Service) publicEnrollmentMode() (mode, expires string) {
+	cfg := s.runtimeConfig()
+	if cfg.Network == deployment.NetworkRegtest {
+		return "open", ""
+	}
+	if s.MultiTenantEnrollment {
+		return "token", ""
+	}
+	deadline := ""
+	if !s.EnrollmentDeadline.IsZero() {
+		deadline = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
+	}
+	if s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline) {
+		return "expired", deadline
+	}
+	if s.OpenEnrollment {
+		return "open", deadline
+	}
+	if len(s.EnrollmentTokenHash) == sha256.Size {
+		return "token", deadline
+	}
+	return "unavailable", deadline
 }
 
 func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error) {
@@ -1149,21 +1162,7 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 	if cred != nil {
 		st.EnrollmentMode = "closed"
 	} else {
-		switch {
-		case cfg.Network == deployment.NetworkRegtest:
-			st.EnrollmentMode = "open"
-		case s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline):
-			st.EnrollmentMode = "expired"
-		case s.OpenEnrollment:
-			st.EnrollmentMode = "open"
-		case len(s.EnrollmentTokenHash) == sha256.Size:
-			st.EnrollmentMode = "token"
-		default:
-			st.EnrollmentMode = "unavailable"
-		}
-		if !s.EnrollmentDeadline.IsZero() {
-			st.EnrollmentExpiresAt = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
-		}
+		st.EnrollmentMode, st.EnrollmentExpiresAt = s.publicEnrollmentMode()
 	}
 	snap := s.snapshot(vaultID)
 	if cred == nil {
