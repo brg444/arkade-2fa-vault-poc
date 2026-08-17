@@ -24,6 +24,9 @@ func TestReviewerIndependentHandlesCannotOversubscribeRecipientPlusFee(t *testin
 		if err != nil {
 			t.Fatalf("open ledger %d: %v", i, err)
 		}
+		if err := ledger.SetIntegrityKey(testIntegrityKey()); err != nil {
+			t.Fatalf("integrity key %d: %v", i, err)
+		}
 		ledgers[i] = ledger
 		cleanupLedger := ledger
 		t.Cleanup(func() { _ = cleanupLedger.Close() })
@@ -92,6 +95,9 @@ func TestReviewerAmbiguousFullOutflowSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := ledger.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
 	d := digest(0xd0)
 	if _, _, err := ledger.Issue(
 		context.Background(), "vault-a", d, 75, 2, 100,
@@ -107,6 +113,9 @@ func TestReviewerAmbiguousFullOutflowSurvivesRestart(t *testing.T) {
 
 	ledger, err = OpenLedger(path, clock.Now)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ledger.Close() })

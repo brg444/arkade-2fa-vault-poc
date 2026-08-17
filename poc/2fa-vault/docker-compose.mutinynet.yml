@@ -6,7 +6,7 @@ services:
       context: ../..
       dockerfile: poc/2fa-vault/Dockerfile.mutinynet
     command:
-      - -addr=0.0.0.0:8788
+      - -addr=172.30.44.10:8788
       - -db=/app/data/vault.sqlite
       - -vault-cosigner-key-file=/run/secrets/vault_cosigner_key
     environment:
@@ -25,6 +25,7 @@ services:
       - vault-authorizer-data:/app/data
     networks:
       vault-boundary:
+        ipv4_address: 172.30.44.10
       vault-egress:
         # Compose >=2.33.1: force Internet-bound Esplora traffic onto the
         # non-internal network instead of relying on attachment order.
@@ -45,7 +46,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 20s
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8788/health"]
+      test: ["CMD", "wget", "-qO-", "http://172.30.44.10:8788/health"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -94,6 +95,9 @@ networks:
   vault-egress:
   vault-boundary:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.30.44.0/24
 
 volumes:
   vault-authorizer-data:

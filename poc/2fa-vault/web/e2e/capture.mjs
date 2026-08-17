@@ -49,11 +49,11 @@ async function browserCeremony(challengeB64) {
   const prfSalt = new TextEncoder().encode("arkade-2fa-vault/prf/v1");
   const created = await navigator.credentials.create({
     publicKey: {
-      rp: { name: "2FA Vault", id: "localhost" },
+      rp: { name: "Arkade Vault", id: "localhost" },
       user: {
         id: crypto.getRandomValues(new Uint8Array(16)),
-        name: "vault",
-        displayName: "vault",
+        name: "Arkade Vault",
+        displayName: "Arkade Vault",
       },
       challenge,
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],

@@ -3,48 +3,98 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Arkade 2FA Vault POC</title>
+  <title>Arkade Vault</title>
+  <meta name="application-name" content="Arkade Vault" />
+  <meta name="theme-color" content="#070809" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'none'" />
   <link rel="stylesheet" href="./app.css" />
 </head>
 <body>
-  <main>
-    <h1>2FA Operational Vault</h1>
-    <p class="sub">Passkey PRF unlocks the PhoneRoutineBIP340 software key in browser memory. VaultCosigner never sees PRF material.</p>
-    <section id="view-enroll">
-      <h2>1. Register</h2>
-      <label>One-time enrollment token <input id="bootstrap-token" type="password" autocomplete="off" /></label>
-      <button id="btn-enroll">Create passkey + encrypted PhoneRoutine key</button>
-    </section>
-    <section id="view-status">
-      <h2>2. Balances</h2>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <p class="kicker">Wallet</p>
+          <h1>Arkade Vault</h1>
+        </div>
+      </div>
+      <p id="network-pill" class="pill">Offline</p>
+    </header>
+    <p class="lede">Your passkey unlocks the phone key here. The vault never sees it.</p>
+
+    <section id="view-status" class="wallet">
+      <p class="kicker">Available</p>
+      <p class="amount">
+        <span id="wallet-available">—</span>
+        <span id="wallet-unit" class="amount-u" hidden>sats</span>
+      </p>
+      <p id="wallet-meta" class="meta"></p>
+      <div id="wallet-stats" class="stats"></div>
       <p id="savings-note" class="sub"></p>
-      <pre id="status"></pre>
+      <details class="raw">
+        <summary>Status</summary>
+        <pre id="status"></pre>
+      </details>
     </section>
+
+    <section id="view-enroll">
+      <p class="step">01</p>
+      <h2>Register</h2>
+      <label>Enrollment token <input id="bootstrap-token" type="password" autocomplete="off" /></label>
+      <button id="btn-enroll" class="primary">Create passkey</button>
+    </section>
+
     <section id="demo-controls" hidden>
-      <h2>Regtest funding</h2>
-      <p class="sub">Demo-only. Funds the Operational address from the local Bitcoin node.</p>
-      <button id="btn-fund">Fund Operational (100k sats)</button>
+      <p class="step">Regtest</p>
+      <h2>Add money</h2>
+      <p class="sub">Demo only. Funds the operational address from the local node.</p>
+      <button id="btn-fund" class="primary">Fund 100k sats</button>
     </section>
+
     <section id="view-send">
-      <h2>3. Send</h2>
-      <label>Recipient script hex <input id="dest" /></label>
-      <label>Amount (sats) <input id="amount" type="number" /></label>
-      <label>Fee (sats) <input id="fee" type="number" value="500" /></label>
-      <label id="prevtx-row">Funded prevout tx hex <input id="prevtx" /></label>
-      <label id="vout-row">vout <input id="vout" type="number" value="0" /></label>
-      <p id="fund-row" class="sub" hidden>Prevout comes from Fund Operational. Changing amount or destination after Review requires Review again.</p>
-      <button id="btn-review">Review</button>
-      <button id="btn-reject-cap">Demo: over-budget draft</button>
-      <button id="btn-reject-intent">Demo: change after review</button>
+      <p class="step">02</p>
+      <h2>Send</h2>
+      <label class="hero-field">Amount
+        <span class="hero-input">
+          <input id="amount" type="number" inputmode="numeric" />
+          <span class="unit">sats</span>
+        </span>
+      </label>
+      <label>To <input id="dest" spellcheck="false" autocomplete="off" placeholder="Recipient script" /></label>
+      <label>Fee <input id="fee" type="number" value="500" inputmode="numeric" /></label>
+      <label id="prevtx-row">Prevout tx <input id="prevtx" spellcheck="false" autocomplete="off" /></label>
+      <label id="vout-row">vout <input id="vout" type="number" value="0" inputmode="numeric" /></label>
+      <p id="fund-row" class="sub" hidden>Prevout is filled by Fund. Review again if you change the amount or destination.</p>
+      <div class="actions">
+        <button id="btn-review" class="primary">Review</button>
+        <div class="actions-secondary">
+          <button id="btn-reject-cap" class="ghost">Demo: over budget</button>
+          <button id="btn-reject-intent" class="ghost">Demo: change intent</button>
+        </div>
+      </div>
     </section>
-    <section id="view-review" hidden>
-      <h2>4. Review + sign</h2>
-      <pre id="review"></pre>
-      <p class="sub">This routine flow never uses or stores the ExternalOwnerWallet key. Admin sweeps use the separate file-only handoff.</p>
-      <button id="btn-sign">Phone approval + routine signature</button>
+
+    <section id="view-review" class="sheet" hidden>
+      <p class="step">03</p>
+      <h2>Review</h2>
+      <div id="review-receipt" class="receipt"></div>
+      <p class="sub">Routine send only. Admin sweeps are a separate file handoff.</p>
+      <div class="actions">
+        <button id="btn-sign" class="primary">Approve</button>
+      </div>
+      <details class="raw">
+        <summary>Transaction</summary>
+        <pre id="review"></pre>
+      </details>
     </section>
-    <pre id="out"></pre>
+
+    <section id="view-activity" class="sheet">
+      <p class="step">Activity</p>
+      <h2>Recent</h2>
+      <div id="activity-card" class="activity-card"></div>
+      <pre id="out"></pre>
+    </section>
   </main>
   <script type="module" src="./app.js"></script>
 </body>

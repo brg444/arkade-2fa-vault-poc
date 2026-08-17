@@ -25,6 +25,9 @@ func TestReservationIsDurableBeforeExternalSignerCanReleaseSignature(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := issuer.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = issuer.Close() })
 
 	var visibleBeforeSignature int64 = -1
@@ -33,6 +36,9 @@ func TestReservationIsDurableBeforeExternalSignerCanReleaseSignature(t *testing.
 		func(context.Context) (string, error) {
 			observer, err := OpenLedger(dbPath, clock)
 			if err != nil {
+				return "", err
+			}
+			if err := observer.SetIntegrityKey(testIntegrityKey()); err != nil {
 				return "", err
 			}
 			defer observer.Close()
@@ -65,6 +71,9 @@ func TestAmbiguousSignerTimeoutRetainsDurableReservation(t *testing.T) {
 	}
 	issuer, err := OpenLedger(dbPath, clock)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = issuer.Close() })

@@ -30,6 +30,9 @@ type PublishResult struct {
 // signed PSBT, never a client PSBT or raw transaction, then verifies and
 // broadcasts that exact spend.
 func (s *Service) Publish(ctx context.Context, challengeHex string) (*PublishResult, error) {
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return nil, err
+	}
 	raw, txid, err := s.preparePublication(ctx, challengeHex)
 	if err != nil {
 		return nil, err
@@ -41,6 +44,9 @@ func (s *Service) Publish(ctx context.Context, challengeHex string) (*PublishRes
 // the canonical txid from the stored PSBT, and looks that txid up. An
 // arbitrary txid is never accepted.
 func (s *Service) PublicationStatus(ctx context.Context, challengeHex string) (*PublishResult, error) {
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return nil, err
+	}
 	_, txid, err := s.preparePublication(ctx, challengeHex)
 	if err != nil {
 		return nil, err

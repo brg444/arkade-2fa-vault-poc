@@ -1,11 +1,13 @@
 package provider
 
 import (
-	"crypto/sha256"
+	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
@@ -25,11 +27,15 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 	hot, _ := btcec.NewPrivateKey()
 	passkey, _ := webauthn.NewP256()
 	direct, _ := webauthn.NewP256()
-	const token = "correct horse battery staple enrollment token"
-	digest := sha256.Sum256([]byte(token))
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x7a}, 32))
+	digestRaw, err := HashEnrollmentToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc := &Service{
 		Ledger: ledger, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
-		VaultSigner: LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey}, EnrollmentTokenHash: digest[:],
+		VaultSigner: LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey}, EnrollmentTokenHash: digestRaw,
+		EnrollmentDeadline: time.Now().Add(time.Hour),
 	}
 	req := RegisterRequest{
 		CredentialID:          hex.EncodeToString([]byte("credential-a")),

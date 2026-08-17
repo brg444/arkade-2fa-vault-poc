@@ -261,8 +261,14 @@ func sameColumns(got, want []string) bool {
 }
 
 func (l *Ledger) Close() error {
+	if l == nil {
+		return nil
+	}
 	zeroBytes(l.integrityKey)
 	l.integrityKey = nil
+	if l.db == nil {
+		return nil
+	}
 	return l.db.Close()
 }
 

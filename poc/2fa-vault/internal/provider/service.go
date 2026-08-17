@@ -134,9 +134,24 @@ func (s *Service) Register(req RegisterRequest) error {
 // RegisterWithBootstrap applies the configured first-enrollment mode only
 // while the ledger is unenrolled. Open mode requires an empty bootstrap;
 // optional token mode validates it without ever reflecting token material.
+func (s *Service) attachLedgerIntegrity() error {
+	if s == nil || s.Ledger == nil {
+		return fmt.Errorf("ledger required")
+	}
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	return s.Ledger.SetIntegrityKey(key)
+}
+
 func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return err
+	}
 	if err := s.runtimeConfig().Validate(); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
@@ -445,6 +460,9 @@ func sameEnrollmentTuple(c *policy.Credential, parsed parsedRegisterRequest) boo
 func (s *Service) LoadVaults() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return err
+	}
 	if err := s.runtimeConfig().Validate(); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
@@ -923,6 +941,9 @@ func (s *Service) snapshot(vaultID string) enrolledSnapshot {
 }
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return Status{}, err
+	}
 	cfg := s.runtimeConfig()
 	if err := cfg.Validate(); err != nil {
 		return Status{}, fmt.Errorf("deployment: %w", err)
@@ -1219,6 +1240,9 @@ type AuthorizeRequest struct {
 }
 
 func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPSBT string, replay bool, err error) {
+	if err := s.attachLedgerIntegrity(); err != nil {
+		return "", false, err
+	}
 	op := s.enrolled().Operational
 	if op == nil {
 		return "", false, fmt.Errorf("not enrolled")
@@ -1548,8 +1572,12 @@ func decodeHex(s string) ([]byte, error) {
 }
 
 func redact(s string) string {
-	if strings.Contains(strings.ToLower(s), "prf") {
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "prf") || strings.Contains(lower, "token") || strings.Contains(lower, "scalar") {
 		return "[redacted]"
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
 	}
 	return s
 }

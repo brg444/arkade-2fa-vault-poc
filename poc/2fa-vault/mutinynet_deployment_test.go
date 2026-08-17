@@ -48,6 +48,8 @@ func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 		"VAULT_RECOVERY_KEY_PUB:",
 		"vault-authorizer-data:/app/data",
 		"vault-boundary",
+		"ipv4_address: 172.30.44.10",
+		"-addr=172.30.44.10:8788",
 		"vault-egress",
 		"read_only: true",
 		"cap_drop:",
@@ -120,13 +122,15 @@ func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 			t.Fatalf("Docker build context does not exclude secret pattern %q", pattern)
 		}
 	}
-	for _, required := range []string{"chmod 0444", "mode 0600", "UID 10001", "uid/gid/mode", "0700"} {
+	for _, required := range []string{"chmod 0600", "UID 10001", "uid/gid/mode", "0700"} {
 		if !strings.Contains(runbook, required) {
 			t.Fatalf("runbook does not explain portable non-root file-secret access: missing %q", required)
 		}
 	}
 
 	for _, required := range []string{
+		"request_body {\n\t\tmax_size 1MB",
+		"Cache-Control \"no-store\"",
 		"request>headers>X-Vault-Enrollment-Token delete",
 		"method GET\n\t\tpath /v1/status /v1/tx",
 		"method POST\n\t\tpath /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish",

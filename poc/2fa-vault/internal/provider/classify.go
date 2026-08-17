@@ -114,6 +114,10 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 			if err != nil {
 				return nil, fmt.Errorf("extension: %w", err)
 			}
+			canonicalExt, err := ext.Serialize()
+			if err != nil || !bytes.Equal(canonicalExt, out.PkScript) {
+				return nil, fmt.Errorf("non-canonical ark extension encoding")
+			}
 			if len(ext) != 1 || ext[0].Type() != arkade.PacketType {
 				return nil, fmt.Errorf("extension must contain exactly one type 0x01 packet")
 			}
@@ -123,6 +127,18 @@ func classify(ptx *psbt.Packet, op *vault.Built) (*Classified, error) {
 			}
 			if len(pkt) != 1 {
 				return nil, fmt.Errorf("exactly one emulator entry required")
+			}
+			unknown, ok := ext[0].(extension.UnknownPacket)
+			if !ok {
+				return nil, fmt.Errorf("emulator packet")
+			}
+			rebuiltPkt, err := arkade.NewPacket(pkt[0])
+			if err != nil {
+				return nil, fmt.Errorf("emulator packet: %w", err)
+			}
+			canonicalPkt, err := rebuiltPkt.Serialize()
+			if err != nil || !bytes.Equal(canonicalPkt, unknown.Data) {
+				return nil, fmt.Errorf("non-canonical emulator packet encoding")
 			}
 			if pkt[0].Vin != 0 {
 				return nil, fmt.Errorf("emulator entry vin")

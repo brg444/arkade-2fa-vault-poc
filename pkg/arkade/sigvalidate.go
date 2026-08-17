@@ -287,10 +287,10 @@ func buildArkadeSigMsg(vm *Engine, hashType txscript.SigHashType) ([]byte, error
 // packet types) and returns a copy with every entry's witness blob masked
 // out, along with its index in tx.TxOut.
 //
-// Returns (nil, -1, nil) when there is no such output, when the extension
-// fails to parse, or when the extension contains no emulator packet —
-// masking is fail-open at any parsing boundary so a corrupted OP_RETURN
-// cannot disable digest computation.
+// Returns (nil, -1, nil) when there is no extension output or the
+// extension contains no emulator packet. A script that looks like an
+// extension but fails to parse is an error so digest computation cannot
+// silently hash an unmasked witness.
 func maskExtensionOutput(tx *wire.MsgTx) (*wire.TxOut, int, error) {
 	for i, out := range tx.TxOut {
 		if out == nil || !extension.IsExtension(out.PkScript) {
@@ -299,7 +299,7 @@ func maskExtensionOutput(tx *wire.MsgTx) (*wire.TxOut, int, error) {
 		// First (and effectively only) extension OP_RETURN found.
 		ext, err := extension.NewExtensionFromBytes(out.PkScript)
 		if err != nil {
-			return nil, -1, nil
+			return nil, -1, fmt.Errorf("extension output failed to parse: %w", err)
 		}
 		for j, pkt := range ext {
 			if pkt.Type() != PacketType {
@@ -307,11 +307,11 @@ func maskExtensionOutput(tx *wire.MsgTx) (*wire.TxOut, int, error) {
 			}
 			unknown, ok := pkt.(extension.UnknownPacket)
 			if !ok {
-				return nil, -1, nil
+				return nil, -1, fmt.Errorf("emulator packet has unexpected type")
 			}
 			ip, err := DeserializeEmulatorPacket(unknown.Data)
 			if err != nil {
-				return nil, -1, nil
+				return nil, -1, fmt.Errorf("emulator packet failed to parse: %w", err)
 			}
 			maskedData, err := serializeEmulatorPacketMasked(ip)
 			if err != nil {

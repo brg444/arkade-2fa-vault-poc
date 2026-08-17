@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 )
@@ -44,6 +45,7 @@ type Verified struct {
 	Assertion
 	CompactSig []byte
 	ClientData ClientData
+	SignCount  uint32
 }
 
 // Validate parses the original clientDataJSON bytes and checks credential,
@@ -94,6 +96,7 @@ func Validate(a Assertion, exp Expected) (*Verified, error) {
 	if flags&flagUV == 0 {
 		return nil, fmt.Errorf("user verification required")
 	}
+	signCount := binary.BigEndian.Uint32(a.AuthenticatorData[33:37])
 
 	compact, err := CompactLowS(a.DERSignature)
 	if err != nil {
@@ -106,7 +109,7 @@ func Validate(a Assertion, exp Expected) (*Verified, error) {
 	if err := VerifyES256(pub, a.AuthenticatorData, a.ClientDataJSON, compact); err != nil {
 		return nil, err
 	}
-	return &Verified{Assertion: a, CompactSig: compact, ClientData: cd}, nil
+	return &Verified{Assertion: a, CompactSig: compact, ClientData: cd, SignCount: signCount}, nil
 }
 
 func decodeChallenge(s string) ([]byte, error) {

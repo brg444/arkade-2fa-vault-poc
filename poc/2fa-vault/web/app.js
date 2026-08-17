@@ -28,6 +28,7 @@ import {
   stagePending,
   promotePending,
   assertDescriptorIdentity,
+  assertPinnedDepositOutputs,
 } from "./enrollstore.js";
 import { createAuthorizeRetryState } from "./authorizeretry.js";
 import { compressedES256PublicKey } from "./webauthnkey.js";
@@ -38,6 +39,151 @@ const SIGNED_CHALLENGES_STORE = "vault-signed-challenges-v1";
 const MAX_API_RESPONSE_BYTES = 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function clearNode(node) {
+  if (!node) return;
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function formatSats(value) {
+  const number = formatSatsNumber(value);
+  return number === "—" ? "—" : `${number} sats`;
+}
+
+function formatSatsNumber(value) {
+  try {
+    return BigInt(String(value)).toLocaleString("en-US");
+  } catch {
+    return "—";
+  }
+}
+
+function setMoney(target, value, fallback) {
+  const unit = $("wallet-unit");
+  if (!target) return;
+  if (value == null || value === "") {
+    target.textContent = fallback || "—";
+    if (unit) unit.hidden = true;
+    return;
+  }
+  target.textContent = formatSatsNumber(value);
+  if (unit) unit.hidden = false;
+}
+
+function appendAmount(root, value) {
+  const line = el("p", "amount");
+  line.append(el("span", null, formatSatsNumber(value)));
+  if (formatSatsNumber(value) !== "—") line.append(el("span", "amount-u", "sats"));
+  root.append(line);
+}
+
+function shorten(value, head = 10, tail = 8) {
+  const text = String(value || "");
+  if (!text) return "—";
+  if (text.length <= head + tail + 1) return text;
+  return `${text.slice(0, head)}…${text.slice(-tail)}`;
+}
+
+function appendRows(root, rows) {
+  for (const [label, value, kind] of rows) {
+    if (value == null || value === "") continue;
+    const row = el("div", "row");
+    row.append(
+      el("dt", "row-k", label),
+      el("dd", kind === "mono" ? "row-v mono" : "row-v", value),
+    );
+    root.append(row);
+  }
+}
+
+function renderWallet(st) {
+  const available = $("wallet-available");
+  const meta = $("wallet-meta");
+  const stats = $("wallet-stats");
+  const pill = $("network-pill");
+  if (!available || !meta || !stats) return;
+  clearNode(stats);
+  if (!st || typeof st !== "object") {
+    setMoney(available, null);
+    meta.textContent = "";
+    if (pill) pill.textContent = "Offline";
+    return;
+  }
+  if (st.enrolled) setMoney(available, st.periodRemaining);
+  else setMoney(available, null, "Not enrolled");
+  const network = String(st.network || "unknown");
+  meta.textContent = st.enrolled
+    ? `of ${formatSats(st.periodAllowance)} this period`
+    : "Create a passkey to open the wallet";
+  if (pill) pill.textContent = network;
+  appendRows(stats, [
+    ["Allowance", formatSats(st.periodAllowance)],
+    ["Spent", formatSats(st.periodSpent)],
+    ["Tx cap", formatSats(st.txCap)],
+    ["Fee cap", formatSats(st.absoluteFeeCap)],
+    ["Operational", st.operationalAddress || "—", "mono"],
+    ["Savings", st.savingsAddress || "", "mono"],
+  ]);
+}
+
+function renderReceipt(fields) {
+  const root = $("review-receipt");
+  if (!root) return;
+  clearNode(root);
+  if (!fields) return;
+  root.append(el("p", "kicker", "You're sending"));
+  appendAmount(root, fields.recipientAmount);
+  appendRows(root, [
+    ["To", shorten(fields.recipientScript, 14, 12), "mono"],
+    ["Change", formatSats(fields.changeAmount)],
+    ["Fee", formatSats(fields.fee)],
+    ["From", formatSats(fields.inputValue)],
+    ["Prevout", shorten(fields.prevout, 14, 10), "mono"],
+  ]);
+}
+
+function setOut(text) {
+  const out = $("out");
+  if (out) out.textContent = text;
+  renderActivity(text);
+}
+
+function renderActivity(text) {
+  const card = $("activity-card");
+  if (!card) return;
+  clearNode(card);
+  if (!text) return;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch {
+    return;
+  }
+  if (parsed.authorized && (parsed.published || parsed.expectedTxid)) {
+    card.append(el("p", "kicker ok", "Sent"));
+    appendAmount(card, reviewed?.intent?.recipientAmount);
+    appendRows(card, [
+      ["Status", "Confirmed"],
+      ["Txid", shorten(parsed.published?.txid || parsed.expectedTxid, 14, 12), "mono"],
+      ["Confirmations", String(parsed.published?.confirmations ?? "—")],
+      ["Challenge", shorten(parsed.challenge, 14, 10), "mono"],
+    ]);
+    return;
+  }
+  if (parsed.prevTxHex) {
+    card.append(el("p", "kicker", "Added"));
+    appendAmount(card, parsed.amount || 100000);
+    appendRows(card, [
+      ["Confirmations", String(parsed.confirmations ?? "—")],
+      ["vout", String(parsed.vout ?? "—")],
+    ]);
+  }
+}
 
 let reviewed = null;
 let busy = false;
@@ -166,24 +312,28 @@ function intentKey(intent) {
 async function refresh() {
   const st = await api("/v1/status");
   const demo = await demoInfo();
-  st.savingsExcludesRoutineCosigners = !!st.savingsExcludesRoutineCosigners;
-  $("status").textContent = JSON.stringify({
-    ...st,
-    savingsExcludesRoutineCosigners: st.savingsExcludesRoutineCosigners,
-    preflightChallengeTrust: "browser independently recomputes the witness-masked Arkade sighash and requires an exact preflight match",
-  }, null, 2);
-  if ($("savings-note")) {
-    $("savings-note").textContent = st.savingsAddress
-      ? (st.savingsExcludesRoutineCosigners
-        ? "Savings excludes PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner."
-        : "Savings routine-cosigner exclusion check failed.")
-      : "";
-  }
-  toggleDemo(demo);
   const rec = loadRec();
   if (rec?.phoneRoutineBip340Pub && st.phoneRoutineBip340Pub) assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
   if (rec?.phoneDirectP256) assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, st.phoneDirectP256);
   if (rec) reconcileSignerIdentity(rec, st);
+  const deposits = rec?.operationalAddress ? assertPinnedDepositOutputs(rec, st) : null;
+  if (deposits) {
+    st.operationalAddress = deposits.operationalAddress;
+    st.operationalScript = deposits.operationalScript;
+    st.savingsAddress = deposits.savingsAddress;
+  }
+  const view = {
+    ...st,
+    savingsExcludesRoutineCosigners: Boolean(deposits?.savingsAddress),
+  };
+  $("status").textContent = JSON.stringify(view, null, 2);
+  renderWallet(view);
+  if ($("savings-note")) {
+    $("savings-note").textContent = deposits?.savingsAddress
+      ? "Savings has no routine keys."
+      : "";
+  }
+  toggleDemo(demo);
   return st;
 }
 
@@ -227,7 +377,9 @@ async function prfFrom(cred) {
 }
 
 function showParsed(parsed) {
-  $("review").textContent = JSON.stringify(reviewFields(parsed), null, 2);
+  const fields = reviewFields(parsed);
+  $("review").textContent = JSON.stringify(fields, null, 2);
+  renderReceipt(fields);
 }
 
 async function enroll() {
@@ -242,7 +394,7 @@ async function enroll() {
     }
     if (loadRec()) {
       if ($("bootstrap-token")) $("bootstrap-token").value = "";
-      $("out").textContent = "enrollment recovered";
+      setOut("Already enrolled.");
       return;
     }
     const deployment = await refresh();
@@ -251,8 +403,8 @@ async function enroll() {
     const userId = crypto.getRandomValues(new Uint8Array(16));
     const cred = await navigator.credentials.create({
       publicKey: {
-        rp: { name: "2FA Vault", id: rpId },
-        user: { id: userId, name: "vault", displayName: "vault" },
+        rp: { name: "Arkade Vault", id: rpId },
+        user: { id: userId, name: "Arkade Vault", displayName: "Arkade Vault" },
         challenge,
         pubKeyCredParams: [{ type: "public-key", alg: -7 }],
         authenticatorSelection: { residentKey: "required", userVerification: "required" },
@@ -280,7 +432,7 @@ async function enroll() {
     if (bytesToHex(webauthnP256) === bytesToHex(derivedAuth.pub)) {
       throw new Error("direct-auth P-256 collided with WebAuthn credential P-256");
     }
-    phoneRoutineSecret = crypto.getRandomValues(new Uint8Array(32));
+    phoneRoutineSecret = randomPhoneRoutineSecret();
     const phoneRoutineBip340Pub = secp256k1.getPublicKey(phoneRoutineSecret, true);
     const derived = bytesToHex(phoneRoutineBip340Pub);
     const kek = await deriveKEK(prf);
@@ -310,9 +462,11 @@ async function enroll() {
     Object.assign(rec, reconcileSignerIdentity(null, st));
     rec.operationalAddress = st.operationalAddress || "";
     rec.operationalScript = st.operationalScript || "";
+    rec.savingsAddress = st.savingsAddress || "";
     stagePending(localStorage, rec);
     promotePending(localStorage);
-    $("out").textContent = "enrolled; fund the Operational address shown in status";
+    await refresh();
+    setOut("Enrolled. Fund the operational address.");
   } finally {
     zeroBytes(prf, scalar, phoneRoutineSecret);
   }
@@ -365,11 +519,13 @@ async function recoverPendingEnrollment(rec) {
       ...rec,
       operationalAddress: st.operationalAddress || "",
       operationalScript: st.operationalScript || "",
+      savingsAddress: st.savingsAddress || "",
       ...signerIdentity,
     };
     stagePending(localStorage, next);
     promotePending(localStorage);
-    $("out").textContent = "pending enrollment recovered after fresh user verification";
+    await refresh();
+    setOut("Enrollment recovered.");
   } finally {
     zeroBytes(prf, scalar, phoneRoutineSecret);
   }
@@ -573,12 +729,12 @@ async function finishAuthorized(completed) {
       published = confirmed;
     }
   }
-  $("out").textContent = JSON.stringify({
+  setOut(JSON.stringify({
     authorized: { replay },
     published,
     challenge: challengeHex,
     expectedTxid,
-  }, null, 2);
+  }, null, 2));
   rememberChallenge(challengeHex);
   authorizeRetry.clear();
   await refresh();
@@ -593,7 +749,7 @@ async function fundOperational() {
   $("vout").value = String(funded.vout);
   if (funded.sinkScript) $("dest").value = funded.sinkScript;
   if (!$("amount").value) $("amount").value = "20000";
-  $("out").textContent = JSON.stringify(funded, null, 2);
+  setOut(JSON.stringify(funded, null, 2));
   invalidateReviewedIntent();
 }
 
@@ -603,7 +759,7 @@ async function demoReject(kind) {
   try {
     if (kind === "over-budget") {
       await api("/v1/draft", { ...draftRequest(readIntent()), recipientAmount: 50001 });
-      $("out").textContent = "over-budget unexpectedly accepted";
+      setOut("over-budget unexpectedly accepted");
       return;
     }
     if (kind === "intent-changed") {
@@ -614,8 +770,20 @@ async function demoReject(kind) {
     }
     throw new Error("unknown rejection demo");
   } catch (err) {
-    $("out").textContent = err.message;
+    setOut(err.message);
   }
+}
+
+function randomPhoneRoutineSecret() {
+  if (secp256k1.utils && typeof secp256k1.utils.randomPrivateKey === "function") {
+    return secp256k1.utils.randomPrivateKey();
+  }
+  for (let i = 0; i < 256; i++) {
+    const scalar = crypto.getRandomValues(new Uint8Array(32));
+    if (secp256k1.utils.isValidPrivateKey(scalar)) return scalar;
+    zeroBytes(scalar);
+  }
+  throw new Error("phone routine scalar out of range");
 }
 
 function toUint8(value) {
@@ -659,7 +827,7 @@ function rememberChallenge(challenge) {
 }
 
 function handle(fn) {
-  runExclusive(fn).catch((e) => { $("out").textContent = e.message; });
+  runExclusive(fn).catch((e) => { setOut(e.message); });
 }
 
 $("btn-enroll").onclick = () => handle(enroll);
@@ -678,15 +846,16 @@ async function bootstrap() {
     try {
       const recovery = await recoverEnrollment(enrollIO());
       if (recovery.action === "pending-requires-user-presence") {
-        $("out").textContent = "pending enrollment found; click Create passkey + encrypted phoneRoutineSecret key to recover with user verification";
+        setOut("Pending enrollment. Click Create passkey to recover.");
       }
     } catch (e) {
-      $("out").textContent = e.message;
+      setOut(e.message);
     }
     try {
       await refresh();
     } catch (e) {
       $("status").textContent = e.message;
+      renderWallet(null);
     }
   } finally {
     setBusy(false);

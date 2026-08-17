@@ -230,6 +230,9 @@ func build(rec Record) (*Built, error) {
 	case Operational:
 		tweakedVaultCosigner = arkade.ComputeArkadeScriptPublicKey(rec.VaultCosignerBase, rec.AuthScriptHash)
 		tweakedArkadeCosigner = arkade.ComputeArkadeScriptPublicKey(rec.ArkadeCosignerBase, rec.AuthScriptHash)
+		if tweakedVaultCosigner == nil || tweakedArkadeCosigner == nil {
+			return nil, fmt.Errorf("arkade tweak is degenerate")
+		}
 		if err := requireIndependentXOnly(
 			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet, rec.RecoveryKey,
 			rec.VaultCosignerBase, rec.ArkadeCosignerBase,

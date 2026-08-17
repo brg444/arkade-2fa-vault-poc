@@ -69,6 +69,12 @@ func (r *Runtime) Close() error {
 		r.service.CredentialIntegrityKey = nil
 		zero(r.service.EnrollmentTokenHash)
 		r.service.EnrollmentTokenHash = nil
+		if ls, ok := r.service.VaultSigner.(provider.LocalSigner); ok && ls.Priv != nil {
+			raw := ls.Priv.Serialize()
+			zero(raw)
+			ls.Priv.Key = btcec.ModNScalar{}
+		}
+		r.service.VaultSigner = nil
 	}
 	if r.ledger == nil {
 		return nil
