@@ -60,11 +60,29 @@ func (l *Ledger) ReservePendingEnrollment(p PendingEnrollment) (*PendingEnrollme
 }
 
 func reservePendingEnrollmentTx(tx *sql.Tx, p PendingEnrollment) (*PendingEnrollment, error) {
+	inv, err := getInvite(tx, p.TokenHash)
+	if err != nil {
+		return nil, err
+	}
+	if inv == nil || inv.ConsumedVaultID != "" {
+		return nil, fmt.Errorf("invite not available")
+	}
+	if inv.ExpiresAt != "" && inv.ExpiresAt < p.CreatedAt {
+		return nil, fmt.Errorf("invite expired")
+	}
 	existing, err := getPendingByTokenHashTx(tx, p.TokenHash)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
+		if _, err := tx.Exec(
+			`UPDATE pending_enrollment SET challenge = ?, expires_at = ? WHERE token_hash = ?`,
+			p.Challenge, p.ExpiresAt, p.TokenHash,
+		); err != nil {
+			return nil, err
+		}
+		existing.Challenge = append([]byte(nil), p.Challenge...)
+		existing.ExpiresAt = p.ExpiresAt
 		return existing, nil
 	}
 	if _, err := tx.Exec(`
@@ -82,6 +100,29 @@ VALUES (?, ?, ?, ?, ?, ?)`,
 		ExpiresAt: p.ExpiresAt,
 		CreatedAt: p.CreatedAt,
 	}, nil
+}
+
+// GetPendingByHandle loads one in-flight enrollment. Missing rows return (nil, nil).
+func (l *Ledger) GetPendingByHandle(handle string) (*PendingEnrollment, error) {
+	if handle == "" {
+		return nil, fmt.Errorf("pending enrollment handle required")
+	}
+	if err := ensureMultiTenantSchema(l.db); err != nil {
+		return nil, err
+	}
+	var p PendingEnrollment
+	err := l.db.QueryRow(`
+SELECT handle, vault_id, token_hash, challenge, expires_at, created_at
+  FROM pending_enrollment WHERE handle = ?`, handle).Scan(
+		&p.Handle, &p.VaultID, &p.TokenHash, &p.Challenge, &p.ExpiresAt, &p.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 func getPendingByTokenHashTx(tx *sql.Tx, tokenHash []byte) (*PendingEnrollment, error) {

@@ -49,7 +49,10 @@ type Service struct {
 	// OpenEnrollment explicitly arms a first-come claim without an invite.
 	// Production still sets a short EnrollmentDeadline. The singleton insert
 	// permanently closes this mode after the first successful claimant.
-	OpenEnrollment            bool
+	OpenEnrollment bool
+	// MultiTenantEnrollment arms invite-scoped /v1/enroll/* and /v1/invite.
+	// Default false: those routes stay 404 until an explicit cutover.
+	MultiTenantEnrollment bool
 	PhoneRoutineBIP340        *btcec.PublicKey
 	ExternalOwnerWallet       *btcec.PublicKey
 	RecoveryKey               *btcec.PublicKey
@@ -940,7 +943,83 @@ func (s *Service) snapshot(vaultID string) enrolledSnapshot {
 	return enrolledSnapshot{}
 }
 
+func routeVaultID(vaultID string) string {
+	if vaultID == "" {
+		return fixture.VaultID
+	}
+	return vaultID
+}
+
+func (s *Service) resolveSpendVault(vaultID string) (string, enrolledSnapshot, error) {
+	id, snap, _, err := s.resolveSpendVaultRecord(vaultID)
+	return id, snap, err
+}
+
+func (s *Service) resolveSpendVaultRecord(vaultID string) (string, enrolledSnapshot, *policy.VaultRecord, error) {
+	id := routeVaultID(vaultID)
+	snap := s.snapshot(id)
+	if snap.Operational == nil {
+		return "", enrolledSnapshot{}, nil, fmt.Errorf("not enrolled")
+	}
+	if s.Ledger == nil || !s.Ledger.MultiTenantReady() {
+		if id != fixture.VaultID {
+			return "", enrolledSnapshot{}, nil, fmt.Errorf("not enrolled")
+		}
+		return id, snap, nil, nil
+	}
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return "", enrolledSnapshot{}, nil, err
+	}
+	defer zeroServiceBytes(key)
+	rec, _, err := s.Ledger.LoadVerifiedVault(id, key)
+	if err != nil {
+		return "", enrolledSnapshot{}, nil, err
+	}
+	if rec == nil && id != fixture.VaultID {
+		return "", enrolledSnapshot{}, nil, fmt.Errorf("not enrolled")
+	}
+	return id, snap, rec, nil
+}
+
+func (s *Service) vaultCosignerSigner(rec *policy.VaultRecord) (Signer, error) {
+	if rec == nil || rec.CosignerMode == "" || rec.CosignerMode == policy.CosignerModeLegacyDirectV0 {
+		return s.VaultSigner, nil
+	}
+	master, err := s.vaultCosignerMaster()
+	if err != nil {
+		return nil, err
+	}
+	if err := policy.VerifyVaultCosignerPub(master, *rec); err != nil {
+		return nil, err
+	}
+	child, err := policy.DeriveVaultCosignerScalar(master, rec.VaultID, rec.CosignerMode)
+	if err != nil {
+		return nil, err
+	}
+	return LocalSigner{Priv: child}, nil
+}
+
+func (s *Service) rejectCrossVaultCredential(vaultID string, credID []byte) error {
+	idx := s.published.Load()
+	if idx == nil || len(credID) == 0 {
+		return nil
+	}
+	mapped, ok := idx.byCred[hex.EncodeToString(credID)]
+	if ok && mapped != vaultID {
+		return fmt.Errorf("credential does not belong to this vault")
+	}
+	return nil
+}
+
 func (s *Service) Status(ctx context.Context) (Status, error) {
+	return s.statusFor(ctx, fixture.VaultID)
+}
+
+func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error) {
+	if vaultID == "" {
+		vaultID = fixture.VaultID
+	}
 	if err := s.attachLedgerIntegrity(); err != nil {
 		return Status{}, err
 	}
@@ -948,11 +1027,14 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if err := cfg.Validate(); err != nil {
 		return Status{}, fmt.Errorf("deployment: %w", err)
 	}
-	cred, err := s.loadVerifiedCredential()
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil {
 		return Status{}, err
 	}
-	spent, err := s.Ledger.SpentInPeriod(ctx, fixture.VaultID, s.Ledger.PeriodStart())
+	if cred == nil && vaultID != fixture.VaultID {
+		return Status{}, fmt.Errorf("not enrolled")
+	}
+	spent, err := s.Ledger.SpentInPeriod(ctx, vaultID, s.Ledger.PeriodStart())
 	if err != nil {
 		return Status{}, err
 	}
@@ -965,7 +1047,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		Network:              cfg.Network,
 		ClientOrigin:         cfg.ClientOrigin,
 		RPID:                 cfg.RPID,
-		VaultID:              fixture.VaultID,
+		VaultID:              vaultID,
 		TemplateVersion:      fixture.TemplateVersion,
 		PolicyVersion:        fixture.PolicyVersion,
 		OperationalCSVBlocks: cfg.OperationalCSVBlocks,
@@ -996,7 +1078,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			st.EnrollmentExpiresAt = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
 		}
 	}
-	snap := s.enrolled()
+	snap := s.snapshot(vaultID)
 	if cred == nil {
 		if s.ExternalOwnerWallet != nil {
 			st.ExternalOwnerWalletPub = hex.EncodeToString(s.ExternalOwnerWallet.SerializeCompressed())
@@ -1065,6 +1147,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 
 // DraftRequest builds an empty-witness routine PSBT the browser can bind.
 type DraftRequest struct {
+	VaultID         string `json:"vaultId,omitempty"`
 	PrevTxHex       string `json:"prevTxHex"`
 	Vout            uint32 `json:"vout"`
 	RecipientScript string `json:"recipientScript"`
@@ -1079,10 +1162,11 @@ func (s *Service) Draft(req DraftRequest) (string, error) {
 // DraftContext bounds transaction parsing, hashing, classification and tree
 // work under the same non-queueing verification budget as signing routes.
 func (s *Service) DraftContext(ctx context.Context, req DraftRequest) (string, error) {
-	op := s.enrolled().Operational
-	if op == nil {
-		return "", fmt.Errorf("not enrolled")
+	_, snap, err := s.resolveSpendVault(req.VaultID)
+	if err != nil {
+		return "", err
 	}
+	op := snap.Operational
 	release, err := s.acquireVerification(ctx)
 	if err != nil {
 		return "", err
@@ -1120,6 +1204,7 @@ func (s *Service) DraftContext(ctx context.Context, req DraftRequest) (string, e
 // BindRequest carries the off-chain WebAuthn assertion plus the compact
 // direct-auth signature. Only directSig is written into the packet witness.
 type BindRequest struct {
+	VaultID           string `json:"vaultId,omitempty"`
 	PSBT              string `json:"psbt"`
 	CredentialID      string `json:"credentialId"`
 	ClientDataJSON    string `json:"clientDataJSON"`
@@ -1135,10 +1220,11 @@ func (s *Service) Bind(req BindRequest) (string, error) {
 // BindContext verifies and binds a direct-auth witness under the shared
 // bounded crypto-verification budget.
 func (s *Service) BindContext(ctx context.Context, req BindRequest) (string, error) {
-	op := s.enrolled().Operational
-	if op == nil {
-		return "", fmt.Errorf("not enrolled")
+	vaultID, snap, err := s.resolveSpendVault(req.VaultID)
+	if err != nil {
+		return "", err
 	}
+	op := snap.Operational
 	release, err := s.acquireVerification(ctx)
 	if err != nil {
 		return "", err
@@ -1165,7 +1251,7 @@ func (s *Service) BindContext(ctx context.Context, req BindRequest) (string, err
 	if err != nil {
 		return "", err
 	}
-	cred, err := s.loadVerifiedCredential()
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil {
 		return "", err
 	}
@@ -1193,7 +1279,8 @@ func (s *Service) BindContext(ctx context.Context, req BindRequest) (string, err
 
 // PreflightRequest is a non-signing challenge request.
 type PreflightRequest struct {
-	PSBT string `json:"psbt"`
+	VaultID string `json:"vaultId,omitempty"`
+	PSBT    string `json:"psbt"`
 }
 
 type PreflightResponse struct {
@@ -1201,22 +1288,27 @@ type PreflightResponse struct {
 }
 
 func (s *Service) Preflight(rawPSBT string) (*PreflightResponse, error) {
-	return s.PreflightContext(context.Background(), rawPSBT)
+	return s.PreflightRequestContext(context.Background(), PreflightRequest{PSBT: rawPSBT})
 }
 
-// PreflightContext admits PSBT parsing and sighash computation only while a
-// bounded verification slot is available.
 func (s *Service) PreflightContext(ctx context.Context, rawPSBT string) (*PreflightResponse, error) {
-	op := s.enrolled().Operational
-	if op == nil {
-		return nil, fmt.Errorf("not enrolled")
+	return s.PreflightRequestContext(ctx, PreflightRequest{PSBT: rawPSBT})
+}
+
+// PreflightRequestContext admits PSBT parsing and sighash computation only while a
+// bounded verification slot is available.
+func (s *Service) PreflightRequestContext(ctx context.Context, req PreflightRequest) (*PreflightResponse, error) {
+	_, snap, err := s.resolveSpendVault(req.VaultID)
+	if err != nil {
+		return nil, err
 	}
+	op := snap.Operational
 	release, err := s.acquireVerification(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	ptx, _, err := parseAndVerifyPrevout(rawPSBT)
+	ptx, _, err := parseAndVerifyPrevout(req.PSBT)
 	if err != nil {
 		return nil, err
 	}
@@ -1232,6 +1324,7 @@ func (s *Service) PreflightContext(ctx context.Context, rawPSBT string) (*Prefli
 
 // AuthorizeRequest is the field-by-field signing request. No PRF fields.
 type AuthorizeRequest struct {
+	VaultID           string `json:"vaultId,omitempty"`
 	PSBT              string `json:"psbt"`
 	CredentialID      string `json:"credentialId"`
 	ClientDataJSON    string `json:"clientDataJSON"`
@@ -1243,11 +1336,12 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 	if err := s.attachLedgerIntegrity(); err != nil {
 		return "", false, err
 	}
-	op := s.enrolled().Operational
-	if op == nil {
-		return "", false, fmt.Errorf("not enrolled")
+	vaultID, snap, rec, err := s.resolveSpendVaultRecord(req.VaultID)
+	if err != nil {
+		return "", false, err
 	}
-	ptx, cl, challenge, err := s.verifyAuthorizeRequest(ctx, req, op)
+	op := snap.Operational
+	ptx, cl, challenge, err := s.verifyAuthorizeRequest(ctx, req, op, vaultID)
 	if err != nil {
 		return "", false, err
 	}
@@ -1265,8 +1359,12 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 		timeout = 15 * time.Second
 	}
 
+	vaultSigner, err := s.vaultCosignerSigner(rec)
+	if err != nil {
+		return "", false, err
+	}
 	return s.Ledger.IssueSequential(
-		ctx, fixture.VaultID, challenge, requestPSBT,
+		ctx, vaultID, challenge, requestPSBT,
 		cl.Recipient.Value, cl.Fee, fixture.PeriodAllowanceSats,
 		func(issueCtx context.Context, storedRequest string) (string, error) {
 			if err := issueCtx.Err(); err != nil {
@@ -1279,7 +1377,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 			signCtx, cancel := context.WithTimeout(issueCtx, timeout)
 			defer cancel()
 			return signExactStage(
-				signCtx, storedRequest, s.VaultSigner,
+				signCtx, storedRequest, vaultSigner,
 				schnorr.SerializePubKey(op.TweakedVaultCosigner), "VaultCosigner",
 			)
 		},
@@ -1319,7 +1417,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (signedPS
 	)
 }
 
-func (s *Service) verifyAuthorizeRequest(ctx context.Context, req AuthorizeRequest, op *vault.Built) (*psbt.Packet, *Classified, []byte, error) {
+func (s *Service) verifyAuthorizeRequest(ctx context.Context, req AuthorizeRequest, op *vault.Built, vaultID string) (*psbt.Packet, *Classified, []byte, error) {
 	release, err := s.acquireVerification(ctx)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1333,14 +1431,14 @@ func (s *Service) verifyAuthorizeRequest(ctx context.Context, req AuthorizeReque
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	challenge, err := s.verifyAuthorization(req, ptx, op)
+	challenge, err := s.verifyAuthorization(req, ptx, op, vaultID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return ptx, cl, challenge, nil
 }
 
-func (s *Service) verifyAuthorization(req AuthorizeRequest, ptx *psbt.Packet, op *vault.Built) ([]byte, error) {
+func (s *Service) verifyAuthorization(req AuthorizeRequest, ptx *psbt.Packet, op *vault.Built, vaultID string) ([]byte, error) {
 
 	assertion, err := decodeAssertion(req)
 	if err != nil {
@@ -1349,12 +1447,15 @@ func (s *Service) verifyAuthorization(req AuthorizeRequest, ptx *psbt.Packet, op
 	if err := rejectPRF(assertion.ClientDataJSON); err != nil {
 		return nil, err
 	}
-	cred, err := s.loadVerifiedCredential()
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil {
 		return nil, err
 	}
 	if cred == nil {
 		return nil, fmt.Errorf("not enrolled")
+	}
+	if err := s.rejectCrossVaultCredential(vaultID, cred.ID); err != nil {
+		return nil, err
 	}
 
 	challenge, err := vault.Challenge(ptx, op)
@@ -1477,19 +1578,51 @@ func (s *Service) loadVerifiedCredentialEnvelope(credentialID []byte) (*policy.C
 }
 
 func (s *Service) loadVerifiedCredential() (*policy.Credential, error) {
+	return s.loadVerifiedCredentialFor(fixture.VaultID)
+}
+
+func (s *Service) loadVerifiedCredentialFor(vaultID string) (*policy.Credential, error) {
 	key, err := s.credentialIntegrityKey()
 	if err != nil {
 		return nil, err
 	}
 	defer zeroServiceBytes(key)
-	cred, err := s.Ledger.GetCredential()
-	if err != nil || cred == nil {
-		return cred, err
+	vaultID = routeVaultID(vaultID)
+	if vaultID == fixture.VaultID {
+		cred, err := s.Ledger.GetCredential()
+		if err != nil || cred == nil {
+			return cred, err
+		}
+		if err := policy.VerifyCredentialIntegrity(cred, key); err != nil {
+			return nil, fmt.Errorf("authoritative credential integrity verification failed: %w; do not delete deployment data: stop the signer and restore a verified backup or use a reviewed migration", err)
+		}
+		return cred, nil
 	}
-	if err := policy.VerifyCredentialIntegrity(cred, key); err != nil {
-		return nil, fmt.Errorf("authoritative credential integrity verification failed: %w; do not delete deployment data: stop the signer and restore a verified backup or use a reviewed migration", err)
+	rec, vcred, err := s.Ledger.LoadVerifiedVault(vaultID, key)
+	if err != nil || rec == nil || vcred == nil {
+		return nil, err
 	}
-	return cred, nil
+	return credentialFromVault(rec, vcred), nil
+}
+
+func credentialFromVault(rec *policy.VaultRecord, cred *policy.VaultCredential) *policy.Credential {
+	if rec == nil || cred == nil {
+		return nil
+	}
+	return &policy.Credential{
+		ID:                  append([]byte(nil), cred.CredentialID...),
+		WebAuthnP256:        append([]byte(nil), cred.WebAuthnP256...),
+		PhoneDirectP256:     append([]byte(nil), rec.PhoneDirectP256...),
+		PhoneRoutineBIP340:  append([]byte(nil), rec.PhoneRoutineBIP340...),
+		ExternalOwnerWallet: append([]byte(nil), rec.ExternalOwnerWallet...),
+		RecoveryKey:         append([]byte(nil), rec.RecoveryKey...),
+		RPID:                rec.RPID,
+		Origin:              rec.Origin,
+		VaultID:             rec.VaultID,
+		Network:             rec.Network,
+		TemplateVersion:     rec.TemplateVersion,
+		PolicyVersion:       rec.PolicyVersion,
+	}
 }
 
 func zeroServiceBytes(raw []byte) {

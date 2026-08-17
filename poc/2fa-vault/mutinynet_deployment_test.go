@@ -132,9 +132,9 @@ func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 		"request_body {\n\t\tmax_size 1MB",
 		"Cache-Control \"no-store\"",
 		"request>headers>X-Vault-Enrollment-Token delete",
-		"method GET\n\t\tpath /v1/status /v1/tx",
-		"method POST\n\t\tpath /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish",
-		"method OPTIONS\n\t\tpath /v1/status /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx",
+		"method GET\n\t\tpath /v1/status /v1/tx /v1/invite",
+		"method POST\n\t\tpath /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/finish",
+		"method OPTIONS\n\t\tpath /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish",
 		"@any_v1 {\n\t\tpath /v1/*\n\t}\n\thandle @any_v1 {\n\t\trespond \"not found\" 404",
 	} {
 		if !strings.Contains(caddy, required) {

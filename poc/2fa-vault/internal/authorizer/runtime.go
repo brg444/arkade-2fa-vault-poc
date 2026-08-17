@@ -40,6 +40,7 @@ type Config struct {
 	EnrollmentTokenFile       string
 	EnrollmentWindow          time.Duration
 	OpenEnrollment            bool
+	MultiTenantEnrollment     bool
 	EsploraURL                string
 }
 
@@ -301,6 +302,7 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		ArkadeCosignerSigner:   arkadeSigner,
 		EnrollmentTokenHash:    enrollmentTokenHash,
 		OpenEnrollment:         cfg.OpenEnrollment,
+		MultiTenantEnrollment:  cfg.MultiTenantEnrollment,
 	}
 	if persisted == nil {
 		window := cfg.EnrollmentWindow

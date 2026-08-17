@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/arkade-os/emulator/pkg/arkade"
-	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/wire"
@@ -30,24 +29,32 @@ type PublishResult struct {
 // signed PSBT, never a client PSBT or raw transaction, then verifies and
 // broadcasts that exact spend.
 func (s *Service) Publish(ctx context.Context, challengeHex string) (*PublishResult, error) {
+	return s.PublishVault(ctx, "", challengeHex)
+}
+
+func (s *Service) PublishVault(ctx context.Context, vaultID, challengeHex string) (*PublishResult, error) {
 	if err := s.attachLedgerIntegrity(); err != nil {
 		return nil, err
 	}
-	raw, txid, err := s.preparePublication(ctx, challengeHex)
+	raw, txid, err := s.preparePublication(ctx, vaultID, challengeHex)
 	if err != nil {
 		return nil, err
 	}
-	return s.dispatchPublication(ctx, raw, txid)
+	return s.dispatchPublication(ctx, vaultID, raw, txid)
 }
 
 // PublicationStatus takes only the completed issuance challenge, rederives
 // the canonical txid from the stored PSBT, and looks that txid up. An
 // arbitrary txid is never accepted.
 func (s *Service) PublicationStatus(ctx context.Context, challengeHex string) (*PublishResult, error) {
+	return s.PublicationStatusVault(ctx, "", challengeHex)
+}
+
+func (s *Service) PublicationStatusVault(ctx context.Context, vaultID, challengeHex string) (*PublishResult, error) {
 	if err := s.attachLedgerIntegrity(); err != nil {
 		return nil, err
 	}
-	_, txid, err := s.preparePublication(ctx, challengeHex)
+	_, txid, err := s.preparePublication(ctx, vaultID, challengeHex)
 	if err != nil {
 		return nil, err
 	}
@@ -61,14 +68,15 @@ func (s *Service) PublicationStatus(ctx context.Context, challengeHex string) (*
 	if !found {
 		return nil, fmt.Errorf("unpublished")
 	}
-	return s.publishResult(ctx, txid, conf)
+	return s.publishResult(ctx, vaultID, txid, conf)
 }
 
-func (s *Service) preparePublication(ctx context.Context, challengeHex string) ([]byte, string, error) {
-	op := s.enrolled().Operational
-	if op == nil {
-		return nil, "", fmt.Errorf("not enrolled")
+func (s *Service) preparePublication(ctx context.Context, vaultID, challengeHex string) ([]byte, string, error) {
+	id, snap, err := s.resolveSpendVault(vaultID)
+	if err != nil {
+		return nil, "", err
 	}
+	op := snap.Operational
 	digest, err := decodeHex(challengeHex)
 	if err != nil || len(digest) != 32 {
 		return nil, "", fmt.Errorf("challenge")
@@ -76,7 +84,7 @@ func (s *Service) preparePublication(ctx context.Context, challengeHex string) (
 	if s.Ledger == nil {
 		return nil, "", fmt.Errorf("unknown or incomplete challenge")
 	}
-	stored, ok, err := s.Ledger.Completed(ctx, fixture.VaultID, digest)
+	stored, ok, err := s.Ledger.Completed(ctx, id, digest)
 	if err != nil {
 		return nil, "", err
 	}
@@ -149,7 +157,7 @@ func ptxDirectPub(op *vault.Built) ([]byte, error) {
 	return op.Record.PhoneDirectP256, nil
 }
 
-func (s *Service) dispatchPublication(ctx context.Context, raw []byte, txid string) (*PublishResult, error) {
+func (s *Service) dispatchPublication(ctx context.Context, vaultID string, raw []byte, txid string) (*PublishResult, error) {
 	if s.Broadcaster == nil {
 		return nil, fmt.Errorf("publisher not configured")
 	}
@@ -159,7 +167,7 @@ func (s *Service) dispatchPublication(ctx context.Context, raw []byte, txid stri
 	if conf, found, err := s.Broadcaster.Lookup(ctx, txid); err != nil {
 		return nil, err
 	} else if found {
-		return s.publishResult(ctx, txid, conf)
+		return s.publishResult(ctx, vaultID, txid, conf)
 	}
 	got, err := s.Broadcaster.Broadcast(ctx, raw)
 	if err != nil {
@@ -168,7 +176,7 @@ func (s *Service) dispatchPublication(ctx context.Context, raw []byte, txid stri
 			return nil, lookErr
 		}
 		if found {
-			return s.publishResult(ctx, txid, conf)
+			return s.publishResult(ctx, vaultID, txid, conf)
 		}
 		return nil, err
 	}
@@ -185,11 +193,11 @@ func (s *Service) dispatchPublication(ctx context.Context, raw []byte, txid stri
 	if !found {
 		return nil, fmt.Errorf("unpublished")
 	}
-	return s.publishResult(ctx, txid, conf)
+	return s.publishResult(ctx, vaultID, txid, conf)
 }
 
-func (s *Service) publishResult(ctx context.Context, txid string, conf int64) (*PublishResult, error) {
-	st, err := s.Status(ctx)
+func (s *Service) publishResult(ctx context.Context, vaultID, txid string, conf int64) (*PublishResult, error) {
+	st, err := s.statusFor(ctx, routeVaultID(vaultID))
 	if err != nil {
 		return nil, err
 	}

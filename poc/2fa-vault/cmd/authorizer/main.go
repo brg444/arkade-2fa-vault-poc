@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +60,7 @@ func main() {
 		ExternalOwnerWalletPubHex: *ownerHex,
 		RecoveryKeyPubHex:         *recoveryHex,
 		EnrollmentTokenFile:       *tokenFile,
+		MultiTenantEnrollment:     envTruthy("VAULT_MULTI_TENANT_ENROLLMENT"),
 		EsploraURL:                *esploraURL,
 	}
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), 40*time.Second)
@@ -109,4 +111,13 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envTruthy(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }

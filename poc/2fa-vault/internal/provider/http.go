@@ -72,14 +72,17 @@ func AuthorizerHandler(svc *Service) http.Handler {
 
 var authorizerRouteMethods = map[string]map[string]struct{}{
 	"/health":       {http.MethodGet: {}},
-	"/v1/status":    {http.MethodGet: {}, http.MethodOptions: {}},
-	"/v1/register":  {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/preflight": {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/draft":     {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/bind":      {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/authorize": {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/publish":   {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/tx":        {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/status":        {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/invite":        {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/enroll/start":  {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/enroll/finish": {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/register":      {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/preflight":     {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/draft":         {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/bind":          {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/authorize":     {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/publish":       {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/tx":            {http.MethodGet: {}, http.MethodOptions: {}},
 }
 
 func sortedMethods(methods map[string]struct{}) []string {
@@ -126,6 +129,28 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		st, err := svc.Status(r.Context())
 		writeJSON(w, st, err)
 	})
+	mux.HandleFunc("GET /v1/invite", func(w http.ResponseWriter, r *http.Request) {
+		view, err := svc.InviteStatus(r.Header.Get(EnrollmentTokenHeader))
+		writeJSON(w, view, err)
+	})
+	mux.HandleFunc("POST /v1/enroll/start", func(w http.ResponseWriter, r *http.Request) {
+		var req EnrollStartRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.StartEnrollment(r.Header.Get(EnrollmentTokenHeader))
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/enroll/finish", func(w http.ResponseWriter, r *http.Request) {
+		var req EnrollFinishRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.FinishEnrollment(r.Context(), r.Header.Get(EnrollmentTokenHeader), req)
+		writeJSON(w, out, err)
+	})
 	mux.HandleFunc("POST /v1/register", func(w http.ResponseWriter, r *http.Request) {
 		var req RegisterRequest
 		if err := decodeMutation(r, &req, origin); err != nil {
@@ -141,7 +166,7 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 			writeMutationError(w, err)
 			return
 		}
-		resp, err := svc.PreflightContext(r.Context(), req.PSBT)
+		resp, err := svc.PreflightRequestContext(r.Context(), req)
 		writeJSON(w, resp, err)
 	})
 	mux.HandleFunc("POST /v1/draft", func(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +198,7 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 	})
 	mux.HandleFunc("POST /v1/publish", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
+			VaultID   string `json:"vaultId"`
 			Challenge string `json:"challenge"`
 		}
 		if err := decodeMutation(r, &req, origin); err != nil {
@@ -181,13 +207,13 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		}
 		opCtx, cancel := context.WithTimeout(r.Context(), publishOperationTimeout)
 		defer cancel()
-		out, err := svc.Publish(opCtx, req.Challenge)
+		out, err := svc.PublishVault(opCtx, req.VaultID, req.Challenge)
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("GET /v1/tx", func(w http.ResponseWriter, r *http.Request) {
 		opCtx, cancel := context.WithTimeout(r.Context(), publishOperationTimeout)
 		defer cancel()
-		out, err := svc.PublicationStatus(opCtx, r.URL.Query().Get("challenge"))
+		out, err := svc.PublicationStatusVault(opCtx, r.URL.Query().Get("vaultId"), r.URL.Query().Get("challenge"))
 		writeJSON(w, out, err)
 	})
 }
@@ -244,7 +270,9 @@ func writeJSON(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		status := http.StatusBadRequest
-		if errors.Is(err, ErrVerificationBusy) {
+		if errors.Is(err, ErrEnrollmentClosed) {
+			status = http.StatusNotFound
+		} else if errors.Is(err, ErrVerificationBusy) {
 			status = http.StatusTooManyRequests
 			w.Header().Set("Retry-After", "1")
 		} else {

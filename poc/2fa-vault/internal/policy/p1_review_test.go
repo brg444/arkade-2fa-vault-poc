@@ -515,8 +515,8 @@ func TestPendingEnrollmentReplayReusesVaultIdentity(t *testing.T) {
 	if replay.VaultID != first.VaultID || replay.Handle != first.Handle {
 		t.Fatalf("replay allocated a new identity: first=%+v replay=%+v", first, replay)
 	}
-	if !bytes.Equal(replay.Challenge, first.Challenge) {
-		t.Fatal("replay replaced the original challenge")
+	if !bytes.Equal(replay.Challenge, []byte("challenge-2")) {
+		t.Fatal("replay did not refresh the pending challenge")
 	}
 	var n int
 	if err := led.db.QueryRow(`SELECT COUNT(*) FROM pending_enrollment`).Scan(&n); err != nil || n != 1 {

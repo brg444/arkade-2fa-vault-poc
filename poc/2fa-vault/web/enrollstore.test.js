@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  FIRST_VAULT_ID,
   STORE,
   STORE_PENDING,
   assertArkadeCosignerIdentity,
@@ -172,6 +173,17 @@ test("main enrollment records require the full v3 descriptor identity", () => {
     storage.setItem(STORE, JSON.stringify(broken));
     expect(() => loadMain(storage)).toThrow(/descriptor.*incomplete/);
   }
+});
+
+test("namespaced store does not share first-vault secrets with another vault", () => {
+  const storage = memoryStorage();
+  stagePending(storage, rec({ credId: "11" }), FIRST_VAULT_ID);
+  promotePending(storage, FIRST_VAULT_ID);
+  stagePending(storage, rec({ credId: "22" }), "tenant-b");
+  promotePending(storage, "tenant-b");
+  expect(loadMain(storage, FIRST_VAULT_ID).credId).toBe("11");
+  expect(loadMain(storage, "tenant-b").credId).toBe("22");
+  expect(loadMain(storage).credId).toBe("11");
 });
 
 test("pinned deposit outputs reject a substituted status address", () => {

@@ -98,8 +98,11 @@ func TestAuthorizerHTTPBoundaryHasNoGenericSigningOrStaticSurface(t *testing.T) 
 func TestAuthorizerRouteAllowlistIsExact(t *testing.T) {
 	expected := map[string][]string{
 		"/health":       {http.MethodGet},
-		"/v1/status":    {http.MethodGet, http.MethodOptions},
-		"/v1/register":  {http.MethodOptions, http.MethodPost},
+		"/v1/status":        {http.MethodGet, http.MethodOptions},
+		"/v1/invite":        {http.MethodGet, http.MethodOptions},
+		"/v1/enroll/start":  {http.MethodOptions, http.MethodPost},
+		"/v1/enroll/finish": {http.MethodOptions, http.MethodPost},
+		"/v1/register":      {http.MethodOptions, http.MethodPost},
 		"/v1/preflight": {http.MethodOptions, http.MethodPost},
 		"/v1/draft":     {http.MethodOptions, http.MethodPost},
 		"/v1/bind":      {http.MethodOptions, http.MethodPost},

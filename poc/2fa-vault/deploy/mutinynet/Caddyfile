@@ -37,7 +37,7 @@
 
 	@api_get {
 		method GET
-		path /v1/status /v1/tx
+		path /v1/status /v1/tx /v1/invite
 	}
 	handle @api_get {
 		reverse_proxy vault-authorizer:8788
@@ -45,7 +45,7 @@
 
 	@api_post {
 		method POST
-		path /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish
+		path /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/finish
 	}
 	handle @api_post {
 		reverse_proxy vault-authorizer:8788
@@ -53,14 +53,14 @@
 
 	@api_options {
 		method OPTIONS
-		path /v1/status /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx
+		path /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish
 	}
 	handle @api_options {
 		reverse_proxy vault-authorizer:8788
 	}
 
 	@known_v1 {
-		path /v1/status /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx
+		path /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish
 	}
 	handle @known_v1 {
 		respond "method not allowed" 405

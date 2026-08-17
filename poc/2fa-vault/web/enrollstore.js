@@ -2,38 +2,54 @@
 // trees and must never be reinterpreted as the ExternalOwnerWallet v3 policy.
 export const STORE = "arkade-vault-enrollment-v3";
 export const STORE_PENDING = "arkade-vault-enrollment-v3-pending";
+export const FIRST_VAULT_ID = "operational-vault-v1";
 
-export function loadMain(storage) {
-  const rec = readJSON(storage, STORE);
+export function mainStoreKey(vaultId) {
+  const id = vaultId || FIRST_VAULT_ID;
+  return id === FIRST_VAULT_ID ? STORE : `${STORE}:${id}`;
+}
+
+export function pendingStoreKey(vaultId) {
+  const id = vaultId || FIRST_VAULT_ID;
+  return id === FIRST_VAULT_ID ? STORE_PENDING : `${STORE_PENDING}:${id}`;
+}
+
+export function loadMain(storage, vaultId) {
+  const id = vaultId || FIRST_VAULT_ID;
+  const rec = readJSON(storage, mainStoreKey(id)) ||
+    (id === FIRST_VAULT_ID ? readJSON(storage, STORE) : null);
   if (rec) requireCompleteRecord(rec);
   return rec;
 }
 
-export function loadPending(storage) {
-  const rec = readJSON(storage, STORE_PENDING);
+export function loadPending(storage, vaultId) {
+  const id = vaultId || FIRST_VAULT_ID;
+  const rec = readJSON(storage, pendingStoreKey(id)) ||
+    (id === FIRST_VAULT_ID ? readJSON(storage, STORE_PENDING) : null);
   if (rec) requireRegistrationRecord(rec);
   return rec;
 }
 
-export function stagePending(storage, rec) {
+export function stagePending(storage, rec, vaultId) {
   requireRegistrationRecord(rec);
-  storage.setItem(STORE_PENDING, JSON.stringify(rec));
+  storage.setItem(pendingStoreKey(vaultId || rec?.vaultId), JSON.stringify(rec));
 }
 
-export function promotePending(storage) {
-  const pending = loadPending(storage);
+export function promotePending(storage, vaultId) {
+  const pending = loadPending(storage, vaultId);
   if (!pending) throw new Error("no pending enrollment");
   requireCompleteRecord(pending);
-  const main = loadMain(storage);
+  const id = vaultId || pending.vaultId;
+  const main = loadMain(storage, id);
   if (main) {
     if (!sameEnrollmentTuple(main, pending)) {
       throw new Error("pending enrollment does not match local record");
     }
-    storage.removeItem(STORE_PENDING);
+    storage.removeItem(pendingStoreKey(id));
     return main;
   }
-  storage.setItem(STORE, JSON.stringify(pending));
-  storage.removeItem(STORE_PENDING);
+  storage.setItem(mainStoreKey(id), JSON.stringify(pending));
+  storage.removeItem(pendingStoreKey(id));
   return pending;
 }
 

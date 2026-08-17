@@ -148,6 +148,14 @@ func ensureMultiTenantSchemaTx(tx *sql.Tx) error {
 	return nil
 }
 
+// MultiTenantReady reports whether the v4 tables exist on this ledger.
+func (l *Ledger) MultiTenantReady() bool {
+	if l == nil || l.db == nil {
+		return false
+	}
+	return v4TableExists(l.db)
+}
+
 func validateSchemaMeta(db *sql.DB) error {
 	ver, n, err := schemaMetaState(db)
 	if err != nil {
