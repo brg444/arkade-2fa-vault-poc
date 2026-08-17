@@ -154,9 +154,38 @@ func validateV3CoreSchema(db *sql.DB, path string) error {
 	return nil
 }
 
-// ensureIssuanceIntegrity rebuilds an empty pre-MAC issuance table. Any
-// unsealed row fails closed: we cannot invent a MAC for history we did not
-// write under this key.
+// MigrateIssuanceIntegrity is the v4→v5 step. It must run only after the
+// live record has been verified and a rollback snapshot exists. OpenLedger
+// never calls this. An empty pre-MAC issuance table may be rebuilt; any
+// unsealed row fails closed.
+func (l *Ledger) MigrateIssuanceIntegrity(integrityKey []byte) error {
+	if len(integrityKey) != 32 {
+		return fmt.Errorf("credential integrity key must be 32 bytes")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	zeroBytes(l.integrityKey)
+	l.integrityKey = append([]byte(nil), integrityKey...)
+	ver, n, err := schemaMetaState(l.db)
+	if err != nil && v4TableExists(l.db) {
+		return err
+	}
+	if v4TableExists(l.db) {
+		if err := checkSchemaVersionAt(ver, n, schemaVersionCurrent); err != nil {
+			return err
+		}
+	}
+	if err := ensureIssuanceIntegrity(l.db, "issuance"); err != nil {
+		return err
+	}
+	if v4TableExists(l.db) && n == 1 && ver == schemaVersionMultiTenant {
+		if _, err := l.db.Exec(`UPDATE schema_meta SET version = ? WHERE version = ?`, schemaVersionIssuanceMAC, schemaVersionMultiTenant); err != nil {
+			return fmt.Errorf("issuance mac schema version: %w", err)
+		}
+	}
+	return nil
+}
+
 func ensureIssuanceIntegrity(db *sql.DB, path string) error {
 	cols, err := tableColumns(db, "issuance")
 	if err != nil {
@@ -279,7 +308,7 @@ func migrateLegacySingletonTx(tx *sql.Tx, integrityKey []byte) error {
 	if n > 1 {
 		return fmt.Errorf("schema_meta must contain exactly one version row, have %d", n)
 	}
-	if n == 1 && ver > schemaVersionMultiTenant {
+	if n == 1 && ver > schemaVersionCurrent {
 		return fmt.Errorf("schema version %d is newer than this binary", ver)
 	}
 	legacy, err := getCredentialTx(tx)

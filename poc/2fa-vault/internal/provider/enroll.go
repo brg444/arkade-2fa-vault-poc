@@ -288,34 +288,48 @@ func randomBytes(n int) ([]byte, error) {
 
 const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v1"
 
-// EnrollmentPoPDigest is the BIP340 message owner and recovery sign to prove
-// they hold the tenant identity keys. It binds the assigned vault id so
-// pasting pubs from another tenant's status is not enough.
-func EnrollmentPoPDigest(vaultID string, owner, recovery *btcec.PublicKey) []byte {
+// EnrollmentPoPDigest is the BIP340 message owner and recovery sign. It binds
+// the whole client-controlled enrollment tuple. The server-derived HKDF
+// VaultCosigner child is intentionally excluded.
+func EnrollmentPoPDigest(vaultID string, req RegisterRequest) []byte {
 	h := sha256.New()
 	_, _ = h.Write([]byte(enrollmentPoPDomain))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(vaultID))
-	_, _ = h.Write([]byte{0})
-	if owner != nil {
-		_, _ = h.Write(schnorr.SerializePubKey(owner))
-	}
-	_, _ = h.Write([]byte{0})
-	if recovery != nil {
-		_, _ = h.Write(schnorr.SerializePubKey(recovery))
-	}
+	writePoPField(h, []byte(vaultID))
+	writePoPField(h, decodePoPHex(req.CredentialID))
+	writePoPField(h, decodePoPHex(req.WebAuthnP256))
+	writePoPField(h, decodePoPHex(req.PhoneDirectP256))
+	writePoPField(h, decodePoPHex(req.PhoneRoutineBIP340Pub))
+	writePoPField(h, decodePoPHex(req.ExternalOwnerWalletXOnly))
+	writePoPField(h, decodePoPHex(req.RecoveryKeyXOnly))
 	return h.Sum(nil)
 }
 
-func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, ownerProof, recoveryProof string) error {
+func writePoPField(h sha256Hash, field []byte) {
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(field)
+}
+
+type sha256Hash interface {
+	Write(p []byte) (int, error)
+}
+
+func decodePoPHex(encoded string) []byte {
+	raw, err := hex.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, req RegisterRequest) error {
 	if owner == nil || recovery == nil {
 		return fmt.Errorf("tenant owner and recovery pubs required")
 	}
-	digest := EnrollmentPoPDigest(vaultID, owner, recovery)
-	if err := verifySchnorrHex(owner, digest, ownerProof, "externalOwnerProof"); err != nil {
+	digest := EnrollmentPoPDigest(vaultID, req)
+	if err := verifySchnorrHex(owner, digest, req.ExternalOwnerProof, "externalOwnerProof"); err != nil {
 		return err
 	}
-	return verifySchnorrHex(recovery, digest, recoveryProof, "recoveryProof")
+	return verifySchnorrHex(recovery, digest, req.RecoveryProof, "recoveryProof")
 }
 
 func verifySchnorrHex(pub *btcec.PublicKey, digest []byte, encoded, name string) error {

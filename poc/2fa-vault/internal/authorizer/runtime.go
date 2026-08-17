@@ -147,6 +147,14 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		zero(credentialIntegrityKey)
 		return nil, fmt.Errorf("multi-tenant migration: %w", err)
 	}
+	if err := ledger.BackupSQLiteIfAbsent(cfg.DatabasePath + ".pre-v5"); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, fmt.Errorf("pre-v5 backup: %w", err)
+	}
+	if err := ledger.MigrateIssuanceIntegrity(credentialIntegrityKey); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, fmt.Errorf("issuance integrity migration: %w", err)
+	}
 
 	persisted, err := ledger.GetCredential()
 	if err != nil {

@@ -230,12 +230,15 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("POST /v1/passkey/binding", func(w http.ResponseWriter, r *http.Request) {
-		var req RecoveryBindingRequest
+		var req struct {
+			VaultID string `json:"vaultId"`
+			RecoveryBindingRequest
+		}
 		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return
 		}
-		out, err := svc.BuildRecoveryBindingFor(req.VaultID, req)
+		out, err := svc.BuildRecoveryBindingFor(req.VaultID, req.RecoveryBindingRequest)
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("POST /v1/passkey/install", func(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +251,7 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		writeJSON(w, map[string]any{"ok": err == nil}, err)
 	})
 	mux.HandleFunc("POST /v1/passkey/recover", func(w http.ResponseWriter, r *http.Request) {
-		var req SessionAssertionRequest
+		var req RecoverCredentialEnvelopeRequest
 		if err := decodeMutation(r, &req, origin); err != nil {
 			writeMutationError(w, err)
 			return

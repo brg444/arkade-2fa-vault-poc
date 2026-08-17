@@ -254,7 +254,7 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	if err != nil {
 		return err
 	}
-	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, parsed.recovery, req.ExternalOwnerProof, req.RecoveryProof); err != nil {
+	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, parsed.recovery, req); err != nil {
 		return err
 	}
 	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())

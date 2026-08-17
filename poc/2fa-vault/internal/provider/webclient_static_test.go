@@ -156,7 +156,7 @@ func TestReviewerDirectP256BrowserBundleIsVendoredAndPinned(t *testing.T) {
 		if len(artifact) == 0 {
 			t.Fatalf("vendored %s is empty", name)
 		}
-		pinned := regexp.MustCompile("`"+regexp.QuoteMeta(name)+"` \\| `([0-9a-f]{64})`").FindSubmatch(notice)
+		pinned := regexp.MustCompile("`" + regexp.QuoteMeta(name) + "` \\| `([0-9a-f]{64})`").FindSubmatch(notice)
 		if len(pinned) != 2 {
 			t.Fatalf("NOTICE.md does not pin the %s artifact SHA-256", name)
 		}

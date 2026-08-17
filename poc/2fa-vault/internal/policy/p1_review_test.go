@@ -176,7 +176,7 @@ func TestOpenLedgerRejectsNewerAndDuplicateSchemaMeta(t *testing.T) {
 	if _, err := led.db.Exec(`CREATE TABLE schema_meta (version INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := led.db.Exec(`INSERT INTO schema_meta (version) VALUES (5)`); err != nil {
+	if _, err := led.db.Exec(`INSERT INTO schema_meta (version) VALUES (6)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := led.Close(); err != nil {

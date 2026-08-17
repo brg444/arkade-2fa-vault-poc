@@ -187,9 +187,6 @@ func ensurePOCSchema(db *sql.DB, path string) error {
 	if err := validateV3CoreSchema(db, path); err != nil {
 		return err
 	}
-	if err := ensureIssuanceIntegrity(db, path); err != nil {
-		return err
-	}
 	return ensureCredentialEnvelopeSchema(db, path)
 }
 
@@ -783,21 +780,20 @@ func scanIssuance(row issuanceScanner) (IssuanceRecord, error) {
 }
 
 // Completed returns the stored signed PSBT for an exact digest, if any.
+// The full issuance row is authenticated before the receipt is reused.
 func (l *Ledger) Completed(ctx context.Context, vaultID string, digest []byte) (string, bool, error) {
-	var out sql.NullString
-	var state string
-	err := l.db.QueryRowContext(ctx,
-		`SELECT state, signed_psbt FROM issuance WHERE vault_id = ? AND arkade_sighash = ?`,
-		vaultID, digest,
-	).Scan(&state, &out)
+	if vaultID == "" {
+		return "", false, fmt.Errorf("vault id required")
+	}
+	rec, err := l.GetIssuance(ctx, vaultID, digest)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, err
 	}
-	if state == stateCompleted && out.Valid {
-		return out.String, true, nil
+	if rec.State == stateCompleted && rec.SignedPSBT != "" {
+		return rec.SignedPSBT, true, nil
 	}
 	return "", false, nil
 }

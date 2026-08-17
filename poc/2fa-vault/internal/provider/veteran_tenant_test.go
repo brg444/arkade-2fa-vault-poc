@@ -150,8 +150,8 @@ func TestVeteranRecoverDoesNotReturnOtherTenantEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, SessionAssertionRequest{
-		VaultID: tenantB, ChallengeID: issuedA.ChallengeID,
+	_, err = svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, tenantB, SessionAssertionRequest{
+		ChallengeID: issuedA.ChallengeID,
 	})
 	if err == nil {
 		t.Fatal("tenant B consumed tenant A's challenge")
@@ -267,12 +267,12 @@ func TestVeteranFinishRequiresDurablePending(t *testing.T) {
 	recovery, _ := btcec.NewPrivateKey()
 	ghost := *start
 	ghost.Handle = strings.Repeat("ab", 16)
-	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, &ghost, pass, []byte("no-pending"), withPoP(start.VaultID, owner, recovery, RegisterRequest{
+	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, &ghost, pass, []byte("no-pending"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
 		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
-	}))); err == nil {
+	}, owner, recovery)); err == nil {
 		t.Fatal("finish registered without a durable pending row")
 	}
 }

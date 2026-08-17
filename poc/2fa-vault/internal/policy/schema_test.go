@@ -134,15 +134,28 @@ func TestEmptyLegacyIssuanceMigratesToMAC(t *testing.T) {
 
 	led, err := OpenLedger(path, nil)
 	if err != nil {
-		t.Fatalf("empty legacy issuance should migrate: %v", err)
+		t.Fatalf("empty legacy issuance must open without mutation: %v", err)
 	}
 	t.Cleanup(func() { _ = led.Close() })
 	cols, err := tableColumns(led.db, "issuance")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !sameColumns(cols, issuanceColumnsLegacy) {
+		t.Fatalf("OpenLedger mutated issuance columns %v", cols)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.MigrateIssuanceIntegrity(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
+	cols, err = tableColumns(led.db, "issuance")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !sameColumns(cols, issuanceColumns) {
-		t.Fatalf("migrated issuance columns %v, want %v", cols, issuanceColumns)
+		t.Fatalf("v5 issuance columns %v, want %v", cols, issuanceColumns)
 	}
 }
 
@@ -162,8 +175,14 @@ func TestNonEmptyLegacyIssuanceFailsClosed(t *testing.T) {
 	}
 	_ = db.Close()
 
-	_, err = OpenLedger(path, nil)
-	if err == nil || !strings.Contains(err.Error(), "unsealed issuance") || !strings.Contains(err.Error(), "do not delete authoritative deployment data") {
+	led, err := OpenLedger(path, nil)
+	if err != nil {
+		t.Fatalf("OpenLedger must not rewrite unsealed issuance: %v", err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	if err := led.MigrateIssuanceIntegrity(testIntegrityKey()); err == nil ||
+		!strings.Contains(err.Error(), "unsealed issuance") ||
+		!strings.Contains(err.Error(), "do not delete authoritative deployment data") {
 		t.Fatalf("unsealed issuance rows were accepted: %v", err)
 	}
 }

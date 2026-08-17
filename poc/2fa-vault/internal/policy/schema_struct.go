@@ -150,16 +150,7 @@ func rejectUnsupportedSchemaVersion(q schemaQuerier) error {
 	if n == 0 {
 		return nil
 	}
-	if n != 1 {
-		return fmt.Errorf("incompatible vault database: schema_meta must contain exactly one version row, have %d", n)
-	}
-	if ver > schemaVersionMultiTenant {
-		return fmt.Errorf("incompatible vault database: schema version %d is newer than this binary (%d)", ver, schemaVersionMultiTenant)
-	}
-	if ver != schemaVersionMultiTenant {
-		return fmt.Errorf("incompatible vault database: schema_meta version %d, want %d", ver, schemaVersionMultiTenant)
-	}
-	return nil
+	return checkSchemaVersionAt(ver, n, schemaVersionCurrent)
 }
 
 func v4TableExists(q schemaQuerier) bool {

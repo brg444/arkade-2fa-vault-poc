@@ -64,7 +64,9 @@ func TestPasskeyEnvelopeInstallAndCrossDeviceRecover(t *testing.T) {
 	}
 
 	_, recoveryAssertion := passkeySessionAssertion(t, e, passkeyPurposeRecover)
-	recovered, err := e.svc.RecoverCredentialEnvelope(context.Background(), recoveryAssertion)
+	recovered, err := e.svc.RecoverCredentialEnvelope(context.Background(), RecoverCredentialEnvelopeRequest{
+		SessionAssertionRequest: recoveryAssertion,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +113,7 @@ func TestPasskeySessionRejectsADifferentCredential(t *testing.T) {
 	e := newEnv(t)
 	_, req := passkeySessionAssertion(t, e, passkeyPurposeInstall)
 	req.CredentialID = hex.EncodeToString(bytes.Repeat([]byte{0x99}, len(e.credID)))
-	_, err := e.svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, req)
+	_, err := e.svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, fixture.VaultID, req)
 	if err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Fatalf("wrong credential: %v", err)
 	}
@@ -124,7 +126,7 @@ func TestPasskeyChallengeIsPurposeBoundExpiringAndOneUse(t *testing.T) {
 	issued, req := passkeySessionAssertion(t, e, passkeyPurposeInstall)
 
 	wrong := req
-	if _, err := e.svc.RecoverCredentialEnvelope(context.Background(), wrong); err == nil {
+	if _, err := e.svc.RecoverCredentialEnvelope(context.Background(), RecoverCredentialEnvelopeRequest{SessionAssertionRequest: wrong}); err == nil {
 		t.Fatal("wrong-purpose challenge accepted")
 	}
 	if err := e.svc.InstallCredentialEnvelope(context.Background(), InstallCredentialEnvelopeRequest{
@@ -153,7 +155,7 @@ func TestPasskeyChallengeConcurrentReplayHasOneConsumer(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := e.svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, req)
+			_, err := e.svc.authenticatePasskeySession(context.Background(), passkeyPurposeInstall, fixture.VaultID, req)
 			results <- err
 		}()
 	}

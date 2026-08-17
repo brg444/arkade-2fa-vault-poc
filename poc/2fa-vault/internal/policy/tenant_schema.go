@@ -8,6 +8,8 @@ import (
 
 const (
 	schemaVersionMultiTenant = 4
+	schemaVersionIssuanceMAC = 5
+	schemaVersionCurrent     = schemaVersionIssuanceMAC
 	vaultRecordMACDomain     = "arkade-2fa-vault/vault-record/v4"
 	vaultCredentialMACDomain = "arkade-2fa-vault/vault-credential/v1"
 )
@@ -164,14 +166,23 @@ func validateSchemaMeta(db *sql.DB) error {
 	if n == 0 {
 		return nil
 	}
+	return checkSchemaVersionAt(ver, n, schemaVersionCurrent)
+}
+
+// checkSchemaVersionAt is the version gate used by this binary (max =
+// schemaVersionCurrent) and by the v4-binary rollback test (max = 4).
+func checkSchemaVersionAt(ver, n, max int) error {
+	if n == 0 {
+		return nil
+	}
 	if n != 1 {
 		return fmt.Errorf("incompatible vault database: schema_meta must contain exactly one version row, have %d", n)
 	}
-	if ver > schemaVersionMultiTenant {
-		return fmt.Errorf("incompatible vault database: schema version %d is newer than this binary (%d)", ver, schemaVersionMultiTenant)
+	if ver > max {
+		return fmt.Errorf("incompatible vault database: schema version %d is newer than this binary (%d)", ver, max)
 	}
-	if ver != schemaVersionMultiTenant {
-		return fmt.Errorf("incompatible vault database: schema_meta version %d, want %d", ver, schemaVersionMultiTenant)
+	if ver < schemaVersionMultiTenant {
+		return fmt.Errorf("incompatible vault database: schema_meta version %d, want %d..%d", ver, schemaVersionMultiTenant, max)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package policy
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,48 @@ func TestIssuanceMACRejectsForeignIntegrityKey(t *testing.T) {
 	other := bytes.Repeat([]byte{0x99}, 32)
 	if err := VerifyIssuance(&rec, other); err == nil {
 		t.Fatal("foreign integrity key verified issuance")
+	}
+}
+
+func TestCompletedRejectsTamperedSignedReceipt(t *testing.T) {
+	led := openTestLedger(t, nil)
+	ctx := context.Background()
+	d := digest(0xcc)
+	if _, _, err := led.Issue(ctx, "vault-a", d, 10, 1, 100, func(context.Context) (string, error) {
+		return "signed-receipt", nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := led.Completed(ctx, "vault-a", d)
+	if err != nil || !ok || got != "signed-receipt" {
+		t.Fatalf("completed = %q ok=%v err=%v", got, ok, err)
+	}
+	if _, err := led.db.Exec(`UPDATE issuance SET signed_psbt = ? WHERE vault_id = ?`, "forged", "vault-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := led.Completed(ctx, "vault-a", d); err == nil {
+		t.Fatal("Completed returned a receipt after SQLite-only mutation")
+	}
+}
+
+func TestV4BinaryRejectsV5IssuanceSchema(t *testing.T) {
+	if err := checkSchemaVersionAt(schemaVersionIssuanceMAC, 1, schemaVersionMultiTenant); err == nil ||
+		!strings.Contains(err.Error(), "newer than this binary") {
+		t.Fatalf("v4 binary accepted v5: %v", err)
+	}
+	led := openTestLedger(t, nil)
+	if err := led.MigrateLegacySingleton(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.MigrateIssuanceIntegrity(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
+	ver, err := schemaVersion(led.db)
+	if err != nil || ver != schemaVersionIssuanceMAC {
+		t.Fatalf("schema version = %d, %v", ver, err)
+	}
+	if err := checkSchemaVersionAt(ver, 1, schemaVersionMultiTenant); err == nil {
+		t.Fatal("v4 rollback gate accepted v5 schema_meta")
 	}
 }
 
