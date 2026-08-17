@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,22 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
 )
+
+func TestLoadVaultsSkipsRetiredTemplateOnlyInMultiTenant(t *testing.T) {
+	err := fmt.Errorf("stored template %q incompatible with runtime %q", "phone-direct-p256-routine-3of3-admin-2of2-v3", fixture.TemplateVersion)
+	if !incompatibleStoredVault(err) {
+		t.Fatal("template mismatch should be skippable")
+	}
+	if skipIncompatibleStoredVault(&Service{}, "tenant-a", err) {
+		t.Fatal("singleton authorizer must still fail closed on a retired template")
+	}
+	if !skipIncompatibleStoredVault(&Service{MultiTenantEnrollment: true}, "tenant-a", err) {
+		t.Fatal("multi-tenant boot should skip a leftover v3 vault")
+	}
+	if skipIncompatibleStoredVault(&Service{MultiTenantEnrollment: true}, "tenant-a", fmt.Errorf("integrity mac")) {
+		t.Fatal("integrity failures must still fail closed")
+	}
+}
 
 func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "mutinynet.sqlite")

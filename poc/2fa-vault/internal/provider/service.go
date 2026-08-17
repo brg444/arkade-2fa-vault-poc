@@ -506,7 +506,13 @@ func (s *Service) LoadVaults() error {
 		if cred == nil {
 			return nil
 		}
-		return s.publishStoredEnrollment(cred, true)
+		if err := s.publishStoredEnrollment(cred, true); err != nil {
+			if skipIncompatibleStoredVault(s, cred.VaultID, err) {
+				return nil
+			}
+			return err
+		}
+		return nil
 	}
 	key, err := s.credentialIntegrityKey()
 	if err != nil {
@@ -523,6 +529,9 @@ func (s *Service) LoadVaults() error {
 		}
 		cred := rec.ToCredential(*vcred)
 		if err := s.publishStoredEnrollment(&cred, true && id == fixture.VaultID); err != nil {
+			if skipIncompatibleStoredVault(s, id, err) {
+				continue
+			}
 			return err
 		}
 	}
@@ -725,6 +734,18 @@ func authorizationPolicyFromCredential(cred *policy.Credential) vault.Authorizat
 		AbsoluteFeeCeilingSats: cred.AbsoluteFeeCapSats,
 		FeerateCeilingSatPerV:  cred.FeerateCapSatPerV,
 	}
+}
+
+func skipIncompatibleStoredVault(s *Service, vaultID string, err error) bool {
+	if s == nil || !s.MultiTenantEnrollment || !incompatibleStoredVault(err) {
+		return false
+	}
+	log.Printf("skipping stored vault %s: %v", vaultID, err)
+	return true
+}
+
+func incompatibleStoredVault(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "incompatible with runtime")
 }
 
 func (s *Service) requireCompatible(cred *policy.Credential) error {
