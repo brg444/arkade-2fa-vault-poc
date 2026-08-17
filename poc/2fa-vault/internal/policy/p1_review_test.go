@@ -66,6 +66,8 @@ func TestBackupIsTakenBeforeV4MutationAndFailedMigrateRollsBack(t *testing.T) {
 
 func TestBackupRejectsUnverifiedLiveRecord(t *testing.T) {
 	led := openTestLedger(t, nil)
+	zeroBytes(led.integrityKey)
+	led.integrityKey = nil
 	want := validCredential(0x41)
 	if err := led.Enroll(want); err != nil {
 		t.Fatal(err)

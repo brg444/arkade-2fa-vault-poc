@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // ErrEnrollmentClosed is returned when multi-tenant enrollment is not armed.
@@ -281,6 +284,50 @@ func randomBytes(n int) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v1"
+
+// EnrollmentPoPDigest is the BIP340 message owner and recovery sign to prove
+// they hold the tenant identity keys. It binds the assigned vault id so
+// pasting pubs from another tenant's status is not enough.
+func EnrollmentPoPDigest(vaultID string, owner, recovery *btcec.PublicKey) []byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte(enrollmentPoPDomain))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(vaultID))
+	_, _ = h.Write([]byte{0})
+	if owner != nil {
+		_, _ = h.Write(schnorr.SerializePubKey(owner))
+	}
+	_, _ = h.Write([]byte{0})
+	if recovery != nil {
+		_, _ = h.Write(schnorr.SerializePubKey(recovery))
+	}
+	return h.Sum(nil)
+}
+
+func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, ownerProof, recoveryProof string) error {
+	if owner == nil || recovery == nil {
+		return fmt.Errorf("tenant owner and recovery pubs required")
+	}
+	digest := EnrollmentPoPDigest(vaultID, owner, recovery)
+	if err := verifySchnorrHex(owner, digest, ownerProof, "externalOwnerProof"); err != nil {
+		return err
+	}
+	return verifySchnorrHex(recovery, digest, recoveryProof, "recoveryProof")
+}
+
+func verifySchnorrHex(pub *btcec.PublicKey, digest []byte, encoded, name string) error {
+	raw, err := decodeHex(encoded)
+	if err != nil || len(raw) != 64 {
+		return fmt.Errorf("%s must be a 64-byte BIP340 signature", name)
+	}
+	sig, err := schnorr.ParseSignature(raw)
+	if err != nil || !sig.Verify(digest, pub) {
+		return fmt.Errorf("%s invalid", name)
+	}
+	return nil
 }
 
 func bytesEqualConst(a, b []byte) bool {

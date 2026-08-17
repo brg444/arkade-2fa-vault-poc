@@ -12,6 +12,8 @@ import (
 const (
 	CredentialEnvelopeVersion = 1
 	credentialEnvelopeDomain  = "arkade-2fa-vault/credential-envelope/v1"
+	vaultEnvelopeDomain       = "arkade-2fa-vault/vault-envelope/v4"
+	vaultEnvelopeMACSalt      = "arkade-2fa-vault/vault-envelope-mac/v4"
 	credentialEnvelopeNonce   = 12
 	credentialEnvelopeCipher  = 48
 	credentialEnvelopeBinding = 16 * 1024
@@ -74,6 +76,84 @@ func credentialEnvelopeMAC(envelope CredentialEnvelope, credentialID, key []byte
 	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(credentialEnvelopeDomain)))
 	payload = append(payload, credentialEnvelopeDomain...)
 	payload = binary.LittleEndian.AppendUint32(payload, envelope.Version)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(credentialID)))
+	payload = append(payload, credentialID...)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.Binding)))
+	payload = append(payload, envelope.Binding...)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.Nonce)))
+	payload = append(payload, envelope.Nonce...)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.Ciphertext)))
+	payload = append(payload, envelope.Ciphertext...)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.DirectSig)))
+	payload = append(payload, envelope.DirectSig...)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.PhoneSig)))
+	payload = append(payload, envelope.PhoneSig...)
+	defer zeroBytes(payload)
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(payload)
+	return mac.Sum(nil), nil
+}
+
+// DeriveVaultEnvelopeMACKey is per-vault. A's envelope key cannot verify B.
+func DeriveVaultEnvelopeMACKey(integrityKey []byte, vaultID string) ([]byte, error) {
+	if len(integrityKey) != sha256.Size {
+		return nil, fmt.Errorf("credential integrity key must be 32 bytes")
+	}
+	if vaultID == "" {
+		return nil, fmt.Errorf("vault id required")
+	}
+	mac := hmac.New(sha256.New, []byte(vaultEnvelopeMACSalt))
+	_, _ = mac.Write(integrityKey)
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(vaultID))
+	return mac.Sum(nil), nil
+}
+
+// SealVaultEnvelope authenticates a tenant recovery envelope. The first
+// vault keeps SealCredentialEnvelope (v3 domain, no vault id).
+func SealVaultEnvelope(envelope *CredentialEnvelope, vaultID string, credentialID, integrityKey []byte) error {
+	if envelope == nil {
+		return fmt.Errorf("credential envelope required")
+	}
+	mac, err := vaultEnvelopeMAC(*envelope, vaultID, credentialID, integrityKey)
+	if err != nil {
+		return err
+	}
+	envelope.IntegrityMAC = mac
+	return nil
+}
+
+// VerifyVaultEnvelope rejects a tenant envelope sealed under another vault.
+func VerifyVaultEnvelope(envelope *CredentialEnvelope, vaultID string, credentialID, integrityKey []byte) error {
+	if envelope == nil || len(envelope.IntegrityMAC) != sha256.Size {
+		return fmt.Errorf("credential envelope integrity MAC missing or malformed")
+	}
+	want, err := vaultEnvelopeMAC(*envelope, vaultID, credentialID, integrityKey)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(want)
+	if !hmac.Equal(envelope.IntegrityMAC, want) {
+		return fmt.Errorf("credential envelope integrity MAC mismatch")
+	}
+	return nil
+}
+
+func vaultEnvelopeMAC(envelope CredentialEnvelope, vaultID string, credentialID, integrityKey []byte) ([]byte, error) {
+	key, err := DeriveVaultEnvelopeMACKey(integrityKey, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(key)
+	if err := validateCredentialEnvelope(envelope); err != nil {
+		return nil, err
+	}
+	payload := make([]byte, 0, 8+len(vaultEnvelopeDomain)+len(vaultID)+len(credentialID)+len(envelope.Binding)+len(envelope.Nonce)+len(envelope.Ciphertext)+len(envelope.DirectSig)+len(envelope.PhoneSig))
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(vaultEnvelopeDomain)))
+	payload = append(payload, vaultEnvelopeDomain...)
+	payload = binary.LittleEndian.AppendUint32(payload, envelope.Version)
+	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(vaultID)))
+	payload = append(payload, vaultID...)
 	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(credentialID)))
 	payload = append(payload, credentialID...)
 	payload = binary.LittleEndian.AppendUint32(payload, uint32(len(envelope.Binding)))

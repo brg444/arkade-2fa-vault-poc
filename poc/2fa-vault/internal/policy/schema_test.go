@@ -116,3 +116,54 @@ func TestOpenLedgerRejectsIssuanceColumnsWithoutStagedStateConstraints(t *testin
 		t.Fatalf("same-column issuance table without state constraint was accepted: %v", err)
 	}
 }
+
+func TestEmptyLegacyIssuanceMigratesToMAC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty-legacy-issuance.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(createPOCSchema, "  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32),\n", "", 1)
+	if legacy == createPOCSchema {
+		t.Fatal("failed to strip issuance MAC column from createPOCSchema")
+	}
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	led, err := OpenLedger(path, nil)
+	if err != nil {
+		t.Fatalf("empty legacy issuance should migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	cols, err := tableColumns(led.db, "issuance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameColumns(cols, issuanceColumns) {
+		t.Fatalf("migrated issuance columns %v, want %v", cols, issuanceColumns)
+	}
+}
+
+func TestNonEmptyLegacyIssuanceFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unsealed-issuance.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Replace(createPOCSchema, "  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32),\n", "", 1)
+	if _, err := db.Exec(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO issuance (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, request_psbt, created_at, updated_at)
+		VALUES ('vault-a', ?, '2026-08-15', 1, 0, 'reserved', 'psbt', '2026-08-15T00:00:00Z', '2026-08-15T00:00:00Z')`, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_, err = OpenLedger(path, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsealed issuance") || !strings.Contains(err.Error(), "do not delete authoritative deployment data") {
+		t.Fatalf("unsealed issuance rows were accepted: %v", err)
+	}
+}

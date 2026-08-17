@@ -77,14 +77,14 @@ func TestTwoTenantsHaveIsolatedDescriptorsCapsAndLoaders(t *testing.T) {
 	passB, _ := webauthn.NewP256()
 	dirB, _ := webauthn.NewP256()
 	const tenantB = "tenant-b"
-	if err := svc.CreateTenantVault(tenantB, token, RegisterRequest{
+	if err := svc.CreateTenantVault(tenantB, token, withPoP(tenantB, ownerB, recB, RegisterRequest{
 		CredentialID:             hex.EncodeToString([]byte("cred-b")),
 		WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(passB)),
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
 		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
-	}); err != nil {
+	})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -224,14 +224,14 @@ func TestRemoteSignerExpectedKeyIsPerCallNotSharedState(t *testing.T) {
 	passB, _ := webauthn.NewP256()
 	dirB, _ := webauthn.NewP256()
 	const tenantB = "tenant-remote-b"
-	if err := svc.CreateTenantVault(tenantB, token, RegisterRequest{
+	if err := svc.CreateTenantVault(tenantB, token, withPoP(tenantB, ownerB, recB, RegisterRequest{
 		CredentialID:             hex.EncodeToString([]byte("cred-b")),
 		WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(passB)),
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
 		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
-	}); err != nil {
+	})); err != nil {
 		t.Fatal(err)
 	}
 	child, err := policy.DeriveVaultCosignerScalar(master, tenantB, policy.CosignerModeHKDFSHA256V1)

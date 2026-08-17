@@ -51,6 +51,9 @@ func openTestLedger(t *testing.T, clock Clock) *Ledger {
 			t.Errorf("close ledger: %v", err)
 		}
 	})
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatalf("issuance integrity key: %v", err)
+	}
 	return led
 }
 
@@ -373,37 +376,42 @@ func TestConcurrentFirstEnrollmentHasOneAtomicDurableWinner(t *testing.T) {
 	assertCredentialEqual(t, reopened, candidates[winner])
 }
 
-func TestPeriodStartAndAllowanceRolloverAtUTCMidnight(t *testing.T) {
+func TestUTCMidnightDoesNotRefillRollingAllowance(t *testing.T) {
 	utcPlusEight := time.FixedZone("UTC+8", 8*60*60)
 	clock := newManualClock(time.Date(2026, 8, 16, 7, 59, 59, 0, utcPlusEight))
 	led := openTestLedger(t, clock.Now)
 	ctx := context.Background()
 
 	if got, want := led.PeriodStart(), "2026-08-15"; got != want {
-		t.Fatalf("period before rollover = %q, want %q", got, want)
+		t.Fatalf("period label before UTC midnight = %q, want %q", got, want)
 	}
 	if _, _, err := led.Issue(ctx, "vault-a", digest(0x01), 90, 3, 100,
-		func(context.Context) (string, error) { return "signed-day-one", nil }); err != nil {
-		t.Fatalf("day-one issue: %v", err)
+		func(context.Context) (string, error) { return "signed-before-midnight", nil }); err != nil {
+		t.Fatalf("pre-midnight issue: %v", err)
 	}
 
 	clock.Set(time.Date(2026, 8, 16, 8, 0, 0, 0, utcPlusEight))
 	if got, want := led.PeriodStart(), "2026-08-16"; got != want {
-		t.Fatalf("period after rollover = %q, want %q", got, want)
+		t.Fatalf("period label after UTC midnight = %q, want %q", got, want)
 	}
 	if _, _, err := led.Issue(ctx, "vault-a", digest(0x02), 90, 3, 100,
-		func(context.Context) (string, error) { return "signed-day-two", nil }); err != nil {
-		t.Fatalf("new UTC period did not reset allowance: %v", err)
+		func(context.Context) (string, error) { return "must-not-refill", nil }); err == nil {
+		t.Fatal("UTC midnight refilled the rolling 24h allowance")
+	} else if !strings.Contains(err.Error(), "allowance") {
+		t.Fatalf("post-midnight issue: %v", err)
+	}
+	spent, err := led.SpentInPeriod(ctx, "vault-a", led.PeriodStart())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spent != 93 {
+		t.Fatalf("spent after midnight = %d, want 93", spent)
 	}
 
-	for period, want := range map[string]int64{"2026-08-15": 93, "2026-08-16": 93} {
-		got, err := led.SpentInPeriod(ctx, "vault-a", period)
-		if err != nil {
-			t.Fatalf("spent in %s: %v", period, err)
-		}
-		if got != want {
-			t.Fatalf("spent in %s = %d, want %d", period, got, want)
-		}
+	clock.Set(time.Date(2026, 8, 17, 8, 0, 0, 0, utcPlusEight))
+	if _, _, err := led.Issue(ctx, "vault-a", digest(0x03), 90, 3, 100,
+		func(context.Context) (string, error) { return "signed-after-window", nil }); err != nil {
+		t.Fatalf("issue after rolling 24h: %v", err)
 	}
 }
 
@@ -509,6 +517,9 @@ func TestConcurrentLedgerHandlesCannotInterleaveBudgetCheckAndReservation(t *tes
 		led, err := OpenLedger(path, clock.Now)
 		if err != nil {
 			t.Fatalf("open ledger handle %d: %v", i, err)
+		}
+		if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+			t.Fatalf("integrity key handle %d: %v", i, err)
 		}
 		ledgers[i] = led
 		t.Cleanup(func() {
@@ -719,6 +730,9 @@ func TestExactIdempotentRetryReturnsPersistedOutputWithoutResigning(t *testing.T
 	if err != nil {
 		t.Fatalf("open ledger: %v", err)
 	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	d := digest(0x50)
 	var signerCalls atomic.Int32
@@ -738,6 +752,9 @@ func TestExactIdempotentRetryReturnsPersistedOutputWithoutResigning(t *testing.T
 	led, err = OpenLedger(path, clock.Now)
 	if err != nil {
 		t.Fatalf("reopen ledger: %v", err)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		if err := led.Close(); err != nil {
@@ -813,13 +830,22 @@ func TestReservedIssuanceCountsAgainstAllowanceAndCannotBeReissued(t *testing.T)
 	led := openTestLedger(t, clock.Now)
 	ctx := context.Background()
 	reservedDigest := digest(0x70)
+	now := clock.Now().UTC().Format(time.RFC3339)
+	rec := IssuanceRecord{
+		VaultID: "vault-a", Digest: reservedDigest, PeriodStart: led.PeriodStart(),
+		Recipient: 60, Fee: 1, State: stateReserved,
+		RequestPSBT: "legacy-external-signer:" + fmt.Sprintf("%x", reservedDigest),
+		CreatedAt:   now, UpdatedAt: now,
+	}
+	if err := SealIssuance(&rec, testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
 	_, err := led.db.Exec(
 		`INSERT INTO issuance
-		 (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, request_psbt, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"vault-a", reservedDigest, led.PeriodStart(), 60, 1, stateReserved,
-		"legacy-external-signer:"+fmt.Sprintf("%x", reservedDigest),
-		clock.Now().UTC().Format(time.RFC3339), clock.Now().UTC().Format(time.RFC3339),
+		 (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, request_psbt, created_at, updated_at, integrity_mac)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.VaultID, rec.Digest, rec.PeriodStart, rec.Recipient, rec.Fee, rec.State,
+		rec.RequestPSBT, rec.CreatedAt, rec.UpdatedAt, rec.IntegrityMAC,
 	)
 	if err != nil {
 		t.Fatalf("seed reserved issuance: %v", err)
@@ -860,6 +886,9 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 	clock := newManualClock(time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC))
 	led, err := OpenLedger(path, clock.Now)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -924,6 +953,9 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 
 	reopened, err := OpenLedger(path, clock.Now)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
@@ -1061,7 +1093,11 @@ func TestIssueRejectsInvalidLedgerInputsBeforeCallingSigner(t *testing.T) {
 			if got := signerCalls.Load(); got != 0 {
 				t.Fatalf("signer called %d times for invalid input", got)
 			}
-			spent, err := led.SpentInPeriod(context.Background(), test.vaultID, led.PeriodStart())
+			lookupVault := test.vaultID
+			if lookupVault == "" {
+				lookupVault = "vault-a"
+			}
+			spent, err := led.SpentInPeriod(context.Background(), lookupVault, led.PeriodStart())
 			if err != nil {
 				t.Fatalf("spent lookup: %v", err)
 			}

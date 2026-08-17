@@ -122,6 +122,11 @@ type RegisterRequest struct {
 	// deployment. A configured deployment may precommit the same identities.
 	ExternalOwnerWalletXOnly string `json:"externalOwnerWalletXOnly,omitempty"`
 	RecoveryKeyXOnly         string `json:"recoveryKeyXOnly,omitempty"`
+	// Optional tenant identity. Extra fields must not 400 under
+	// DisallowUnknownFields; new enrollments should send them.
+	VaultID            string `json:"vaultId,omitempty"`
+	ExternalOwnerProof string `json:"externalOwnerProof,omitempty"`
+	RecoveryProof      string `json:"recoveryProof,omitempty"`
 }
 
 type parsedRegisterRequest struct {
@@ -129,6 +134,7 @@ type parsedRegisterRequest struct {
 	phoneRoutine                      *btcec.PublicKey
 	externalOwner                     *btcec.PublicKey
 	recovery                          *btcec.PublicKey
+	vaultID                           string
 }
 
 func (s *Service) Register(req RegisterRequest) error {
@@ -246,6 +252,9 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	}
 	parsed, err := s.parseRegisterRequestIndependent(req)
 	if err != nil {
+		return err
+	}
+	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, parsed.recovery, req.ExternalOwnerProof, req.RecoveryProof); err != nil {
 		return err
 	}
 	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())
@@ -453,6 +462,7 @@ func (s *Service) parseRegisterRequestWithKeys(
 	if err != nil {
 		return parsed, err
 	}
+	parsed.vaultID = req.VaultID
 	return parsed, nil
 }
 
@@ -463,7 +473,8 @@ func sameEnrollmentTuple(c *policy.Credential, parsed parsedRegisterRequest) boo
 		bytes.Equal(c.PhoneDirectP256, parsed.phoneDirectP256) &&
 		bytes.Equal(c.PhoneRoutineBIP340, parsed.phoneRoutine.SerializeCompressed()) &&
 		bytes.Equal(c.ExternalOwnerWallet, parsed.externalOwner.SerializeCompressed()) &&
-		bytes.Equal(c.RecoveryKey, parsed.recovery.SerializeCompressed())
+		bytes.Equal(c.RecoveryKey, parsed.recovery.SerializeCompressed()) &&
+		(parsed.vaultID == "" || parsed.vaultID == c.VaultID)
 }
 
 // LoadVaults rebuilds trees from the persisted enrollment descriptor.
@@ -852,6 +863,20 @@ func knownFixtureXOnly(xonly []byte) bool {
 	return false
 }
 
+// PublicStatus is the unauthenticated authorizer identity. It is not a
+// tenant descriptor and must not be treated as enrolled.
+type PublicStatus struct {
+	Network              string `json:"network"`
+	ClientOrigin         string `json:"clientOrigin"`
+	RPID                 string `json:"rpId"`
+	TemplateVersion      string `json:"templateVersion"`
+	PolicyVersion        string `json:"policyVersion"`
+	OperationalCSVBlocks uint32 `json:"operationalCsvBlocks"`
+	SavingsCSVBlocks     uint32 `json:"savingsCsvBlocks"`
+	EnrollmentMode       string `json:"enrollmentMode"`
+	EnrollmentExpiresAt  string `json:"enrollmentExpiresAt,omitempty"`
+}
+
 // Status is the UI snapshot.
 type Status struct {
 	Enrolled                        bool   `json:"enrolled"`
@@ -1021,13 +1046,58 @@ func (s *Service) rejectCrossVaultCredential(vaultID string, credID []byte) erro
 	return nil
 }
 
+// Status is the first-vault snapshot used by in-process tests. HTTP never
+// calls this for an unauthenticated dump; see PublicStatus and StatusFor.
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	return s.statusFor(ctx, fixture.VaultID)
 }
 
+// StatusFor returns one tenant the caller already named. An empty id is
+// rejected so spend/status cannot fall through to the first vault.
+func (s *Service) StatusFor(ctx context.Context, vaultID string) (Status, error) {
+	if strings.TrimSpace(vaultID) == "" {
+		return Status{}, fmt.Errorf("vault id required")
+	}
+	return s.statusFor(ctx, vaultID)
+}
+
+// PublicStatus is the unauthenticated GET /v1/status body. It never includes
+// a vault id, addresses, pubs, or remaining allowance.
+func (s *Service) PublicStatus() (PublicStatus, error) {
+	cfg := s.runtimeConfig()
+	if err := cfg.Validate(); err != nil {
+		return PublicStatus{}, fmt.Errorf("deployment: %w", err)
+	}
+	st := PublicStatus{
+		Network:              cfg.Network,
+		ClientOrigin:         cfg.ClientOrigin,
+		RPID:                 cfg.RPID,
+		TemplateVersion:      fixture.TemplateVersion,
+		PolicyVersion:        fixture.PolicyVersion,
+		OperationalCSVBlocks: cfg.OperationalCSVBlocks,
+		SavingsCSVBlocks:     cfg.SavingsCSVBlocks,
+	}
+	switch {
+	case cfg.Network == deployment.NetworkRegtest:
+		st.EnrollmentMode = "open"
+	case s.EnrollmentDeadline.IsZero() || !s.currentEnrollmentTime().Before(s.EnrollmentDeadline):
+		st.EnrollmentMode = "expired"
+	case s.OpenEnrollment:
+		st.EnrollmentMode = "open"
+	case len(s.EnrollmentTokenHash) == sha256.Size:
+		st.EnrollmentMode = "token"
+	default:
+		st.EnrollmentMode = "unavailable"
+	}
+	if !s.EnrollmentDeadline.IsZero() {
+		st.EnrollmentExpiresAt = s.EnrollmentDeadline.UTC().Format(time.RFC3339)
+	}
+	return st, nil
+}
+
 func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error) {
 	if vaultID == "" {
-		vaultID = fixture.VaultID
+		return Status{}, fmt.Errorf("vault id required")
 	}
 	if err := s.attachLedgerIntegrity(); err != nil {
 		return Status{}, err
@@ -1587,7 +1657,11 @@ func (s *Service) loadVerifiedEnvelopeFor(vaultID string, credentialID []byte) (
 			return nil, err
 		}
 		if envelope != nil {
-			if err := policy.VerifyCredentialEnvelope(envelope, credentialID, key); err != nil {
+			if vaultID == fixture.VaultID {
+				if err := policy.VerifyCredentialEnvelope(envelope, credentialID, key); err != nil {
+					return nil, fmt.Errorf("authoritative credential envelope integrity verification failed: %w; restore a verified backup or use a reviewed migration", err)
+				}
+			} else if err := policy.VerifyVaultEnvelope(envelope, vaultID, credentialID, key); err != nil {
 				return nil, fmt.Errorf("authoritative credential envelope integrity verification failed: %w; restore a verified backup or use a reviewed migration", err)
 			}
 			return envelope, nil
@@ -1634,27 +1708,8 @@ func (s *Service) loadVerifiedCredentialFor(vaultID string) (*policy.Credential,
 	if err != nil || rec == nil || vcred == nil {
 		return nil, err
 	}
-	return credentialFromVault(rec, vcred), nil
-}
-
-func credentialFromVault(rec *policy.VaultRecord, cred *policy.VaultCredential) *policy.Credential {
-	if rec == nil || cred == nil {
-		return nil
-	}
-	return &policy.Credential{
-		ID:                  append([]byte(nil), cred.CredentialID...),
-		WebAuthnP256:        append([]byte(nil), cred.WebAuthnP256...),
-		PhoneDirectP256:     append([]byte(nil), rec.PhoneDirectP256...),
-		PhoneRoutineBIP340:  append([]byte(nil), rec.PhoneRoutineBIP340...),
-		ExternalOwnerWallet: append([]byte(nil), rec.ExternalOwnerWallet...),
-		RecoveryKey:         append([]byte(nil), rec.RecoveryKey...),
-		RPID:                rec.RPID,
-		Origin:              rec.Origin,
-		VaultID:             rec.VaultID,
-		Network:             rec.Network,
-		TemplateVersion:     rec.TemplateVersion,
-		PolicyVersion:       rec.PolicyVersion,
-	}
+	out := rec.ToCredential(*vcred)
+	return &out, nil
 }
 
 func zeroServiceBytes(raw []byte) {

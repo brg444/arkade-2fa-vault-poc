@@ -12,6 +12,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -19,15 +20,16 @@ import (
 )
 
 const (
-	passkeyPurposeRecover = "recover"
-	passkeyPurposeInstall = "install-envelope"
-	passkeyChallengeTTL   = 2 * time.Minute
-	maxPasskeyChallenges  = 64
-	recoveryBindingDomain = "arkade-2fa-vault/recovery-binding/v1"
-	passkeyProofDomain    = "arkade-2fa-vault/passkey-proof/v1"
+	passkeyPurposeRecover        = "recover"
+	passkeyPurposeInstall        = "install-envelope"
+	passkeyChallengeTTL          = 2 * time.Minute
+	maxPasskeyChallengesPerVault = 16
+	recoveryBindingDomain        = "arkade-2fa-vault/recovery-binding/v1"
+	passkeyProofDomain           = "arkade-2fa-vault/passkey-proof/v1"
 )
 
 type passkeyChallenge struct {
+	VaultID   string
 	Purpose   string
 	Challenge []byte
 	ExpiresAt time.Time
@@ -35,6 +37,7 @@ type passkeyChallenge struct {
 
 type PasskeyChallengeRequest struct {
 	Purpose string `json:"purpose"`
+	VaultID string `json:"vaultId,omitempty"`
 }
 
 type PasskeyChallengeResponse struct {
@@ -49,6 +52,7 @@ type PasskeyChallengeResponse struct {
 // the API. userHandle is deliberately omitted: this singleton RP binds the
 // exact returned raw credential ID to its one stored ES256 public key.
 type SessionAssertionRequest struct {
+	VaultID           string `json:"vaultId,omitempty"`
 	ChallengeID       string `json:"challengeId"`
 	CredentialID      string `json:"credentialId"`
 	ClientDataJSON    string `json:"clientDataJSON"`
@@ -58,6 +62,7 @@ type SessionAssertionRequest struct {
 }
 
 type RecoveryBindingRequest struct {
+	VaultID            string `json:"vaultId,omitempty"`
 	EnvelopeNonce      string `json:"envelopeNonce"`
 	EnvelopeCiphertext string `json:"envelopeCiphertext"`
 }
@@ -131,14 +136,30 @@ func (s *Service) sessionNow() time.Time {
 	return time.Now()
 }
 
+func passkeyChallengeKey(vaultID, challengeID string) string {
+	return vaultID + "\x00" + challengeID
+}
+
+func routePasskeyVaultID(vaultID string) string {
+	if vaultID == "" {
+		return fixture.VaultID
+	}
+	return vaultID
+}
+
 func (s *Service) IssuePasskeyChallenge(ctx context.Context, purpose string) (*PasskeyChallengeResponse, error) {
+	return s.IssuePasskeyChallengeFor(ctx, fixture.VaultID, purpose)
+}
+
+func (s *Service) IssuePasskeyChallengeFor(ctx context.Context, vaultID, purpose string) (*PasskeyChallengeResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if purpose != passkeyPurposeRecover && purpose != passkeyPurposeInstall {
 		return nil, fmt.Errorf("invalid passkey challenge purpose")
 	}
-	cred, err := s.loadVerifiedCredential()
+	vaultID = routePasskeyVaultID(vaultID)
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +167,7 @@ func (s *Service) IssuePasskeyChallenge(ctx context.Context, purpose string) (*P
 		return nil, fmt.Errorf("not enrolled")
 	}
 	if purpose == passkeyPurposeRecover {
-		envelope, err := s.loadVerifiedCredentialEnvelope(cred.ID)
+		envelope, err := s.loadVerifiedEnvelopeFor(vaultID, cred.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -169,16 +190,21 @@ func (s *Service) IssuePasskeyChallenge(ctx context.Context, purpose string) (*P
 	if s.sessionChallenges == nil {
 		s.sessionChallenges = make(map[string]passkeyChallenge)
 	}
+	pendingForVault := 0
 	for key, pending := range s.sessionChallenges {
 		if !now.Before(pending.ExpiresAt) {
 			delete(s.sessionChallenges, key)
+			continue
+		}
+		if pending.VaultID == vaultID {
+			pendingForVault++
 		}
 	}
-	if len(s.sessionChallenges) >= maxPasskeyChallenges {
+	if pendingForVault >= maxPasskeyChallengesPerVault {
 		return nil, ErrVerificationBusy
 	}
-	s.sessionChallenges[id] = passkeyChallenge{
-		Purpose: purpose, Challenge: append([]byte(nil), challenge...), ExpiresAt: now.Add(passkeyChallengeTTL),
+	s.sessionChallenges[passkeyChallengeKey(vaultID, id)] = passkeyChallenge{
+		VaultID: vaultID, Purpose: purpose, Challenge: append([]byte(nil), challenge...), ExpiresAt: now.Add(passkeyChallengeTTL),
 	}
 	return &PasskeyChallengeResponse{
 		ChallengeID: id, Challenge: hex.EncodeToString(challenge),
@@ -187,7 +213,7 @@ func (s *Service) IssuePasskeyChallenge(ctx context.Context, purpose string) (*P
 	}, nil
 }
 
-func (s *Service) consumePasskeyChallenge(id, purpose string) ([]byte, error) {
+func (s *Service) consumePasskeyChallenge(vaultID, id, purpose string) ([]byte, error) {
 	if len(id) != 22 {
 		return nil, fmt.Errorf("passkey authentication failed")
 	}
@@ -197,9 +223,10 @@ func (s *Service) consumePasskeyChallenge(id, purpose string) ([]byte, error) {
 	}
 	s.sessionMu.Lock()
 	defer s.sessionMu.Unlock()
-	pending, ok := s.sessionChallenges[id]
-	delete(s.sessionChallenges, id)
-	if !ok || pending.Purpose != purpose || !s.sessionNow().Before(pending.ExpiresAt) {
+	key := passkeyChallengeKey(vaultID, id)
+	pending, ok := s.sessionChallenges[key]
+	delete(s.sessionChallenges, key)
+	if !ok || pending.VaultID != vaultID || pending.Purpose != purpose || !s.sessionNow().Before(pending.ExpiresAt) {
 		return nil, fmt.Errorf("passkey authentication failed")
 	}
 	return append([]byte(nil), pending.Challenge...), nil
@@ -211,11 +238,12 @@ func (s *Service) authenticatePasskeySession(ctx context.Context, purpose string
 		return nil, err
 	}
 	defer release()
-	challenge, err := s.consumePasskeyChallenge(req.ChallengeID, purpose)
+	vaultID := routePasskeyVaultID(req.VaultID)
+	challenge, err := s.consumePasskeyChallenge(vaultID, req.ChallengeID, purpose)
 	if err != nil {
 		return nil, failPasskeyAuth("challenge", err)
 	}
-	cred, err := s.loadVerifiedCredential()
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil || cred == nil {
 		if err == nil {
 			err = fmt.Errorf("not enrolled")
@@ -288,7 +316,12 @@ func passkeySessionProofDigest(purpose string, challenge, credentialID []byte) [
 }
 
 func (s *Service) BuildRecoveryBinding(req RecoveryBindingRequest) (*RecoveryBindingResponse, error) {
-	cred, err := s.loadVerifiedCredential()
+	return s.BuildRecoveryBindingFor(req.VaultID, req)
+}
+
+func (s *Service) BuildRecoveryBindingFor(vaultID string, req RecoveryBindingRequest) (*RecoveryBindingResponse, error) {
+	vaultID = routePasskeyVaultID(firstNonEmpty(vaultID, req.VaultID))
+	cred, err := s.loadVerifiedCredentialFor(vaultID)
 	if err != nil {
 		return nil, err
 	}
@@ -395,6 +428,13 @@ func (s *Service) InstallCredentialEnvelope(ctx context.Context, req InstallCred
 		Version: policy.CredentialEnvelopeVersion, Binding: expectedBinding,
 		Nonce: nonce, Ciphertext: ciphertext, DirectSig: directSig, PhoneSig: phoneSigRaw,
 	}
+	vaultID := routePasskeyVaultID(firstNonEmpty(req.SessionAssertionRequest.VaultID, req.RecoveryBindingRequest.VaultID, cred.VaultID))
+	if vaultID != fixture.VaultID {
+		if err := s.sealVaultEnvelope(&envelope, vaultID, cred.ID); err != nil {
+			return err
+		}
+		return s.Ledger.StoreVaultEnvelopeIfAbsent(vaultID, envelope)
+	}
 	if err := s.sealCredentialEnvelope(&envelope, cred.ID); err != nil {
 		return err
 	}
@@ -406,7 +446,8 @@ func (s *Service) RecoverCredentialEnvelope(ctx context.Context, req SessionAsse
 	if err != nil {
 		return nil, err
 	}
-	envelope, err := s.loadVerifiedCredentialEnvelope(cred.ID)
+	vaultID := routePasskeyVaultID(firstNonEmpty(req.VaultID, cred.VaultID))
+	envelope, err := s.loadVerifiedEnvelopeFor(vaultID, cred.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +459,27 @@ func (s *Service) RecoverCredentialEnvelope(ctx context.Context, req SessionAsse
 		EnvelopeNonce: hex.EncodeToString(envelope.Nonce), EnvelopeCiphertext: hex.EncodeToString(envelope.Ciphertext),
 		BindingDirectSig: hex.EncodeToString(envelope.DirectSig), BindingPhoneSig: hex.EncodeToString(envelope.PhoneSig),
 	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (s *Service) sealVaultEnvelope(envelope *policy.CredentialEnvelope, vaultID string, credentialID []byte) error {
+	key, err := s.credentialIntegrityKey()
+	if err != nil {
+		return err
+	}
+	defer zeroServiceBytes(key)
+	if err := policy.SealVaultEnvelope(envelope, vaultID, credentialID, key); err != nil {
+		return fmt.Errorf("seal credential envelope: %w", err)
+	}
+	return nil
 }
 
 func decodeFixedHex(encoded string, size int, name string) ([]byte, error) {

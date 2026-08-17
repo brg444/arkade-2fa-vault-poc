@@ -129,7 +129,9 @@ func validateV3CoreSchema(db *sql.DB, path string) error {
 	if err != nil {
 		return fmt.Errorf("incompatible vault database %s: %w", path, err)
 	}
-	if !sameColumns(cols, issuanceColumns) {
+	legacy := sameColumns(cols, issuanceColumnsLegacy)
+	sealed := sameColumns(cols, issuanceColumns)
+	if !legacy && !sealed {
 		return fmt.Errorf("incompatible vault database %s: issuance columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, issuanceColumns)
 	}
 	if err := requireSchemaFragments(db, "issuance", []string{
@@ -142,8 +144,76 @@ func validateV3CoreSchema(db *sql.DB, path string) error {
 	}); err != nil {
 		return fmt.Errorf("incompatible vault database %s: issuance constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
 	}
+	if sealed {
+		if err := requireSchemaFragments(db, "issuance", []string{
+			"integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32)",
+		}); err != nil {
+			return fmt.Errorf("incompatible vault database %s: issuance constraints: %w; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, err)
+		}
+	}
 	return nil
 }
+
+// ensureIssuanceIntegrity rebuilds an empty pre-MAC issuance table. Any
+// unsealed row fails closed: we cannot invent a MAC for history we did not
+// write under this key.
+func ensureIssuanceIntegrity(db *sql.DB, path string) error {
+	cols, err := tableColumns(db, "issuance")
+	if err != nil {
+		return fmt.Errorf("incompatible vault database %s: %w", path, err)
+	}
+	if sameColumns(cols, issuanceColumns) {
+		return nil
+	}
+	if !sameColumns(cols, issuanceColumnsLegacy) {
+		return fmt.Errorf("incompatible vault database %s: issuance columns %v, want %v; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path, cols, issuanceColumns)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issuance`).Scan(&n); err != nil {
+		return err
+	}
+	if n != 0 {
+		return fmt.Errorf("incompatible vault database %s: unsealed issuance rows exist; do not delete authoritative deployment data: stop the signer and restore a verified compatible backup or use a reviewed migration", path)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DROP TABLE issuance`); err != nil {
+		return fmt.Errorf("issuance mac migrate: %w", err)
+	}
+	if _, err := tx.Exec(createSealedIssuanceTable); err != nil {
+		return fmt.Errorf("issuance mac migrate: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return validateV3CoreSchema(db, path)
+}
+
+const createSealedIssuanceTable = `
+CREATE TABLE issuance (
+  vault_id TEXT NOT NULL,
+  arkade_sighash BLOB NOT NULL,
+  period_start TEXT NOT NULL,
+  recipient_amount INTEGER NOT NULL,
+  fee INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('reserved', 'vault_signed', 'completed')),
+  request_psbt TEXT NOT NULL CHECK (length(request_psbt) > 0),
+  vault_psbt TEXT,
+  signed_psbt TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32),
+  CHECK (
+    (state = 'reserved' AND vault_psbt IS NULL AND signed_psbt IS NULL) OR
+    (state = 'vault_signed' AND vault_psbt IS NOT NULL AND signed_psbt IS NULL) OR
+    (state = 'completed' AND vault_psbt IS NOT NULL AND signed_psbt IS NOT NULL)
+  ),
+  PRIMARY KEY (vault_id, arkade_sighash)
+);
+`
 
 func validateCredentialEnvelopeSchema(db *sql.DB, path string) error {
 	cols, err := tableColumns(db, "credential_envelope")

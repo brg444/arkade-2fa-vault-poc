@@ -71,18 +71,22 @@ func AuthorizerHandler(svc *Service) http.Handler {
 }
 
 var authorizerRouteMethods = map[string]map[string]struct{}{
-	"/health":       {http.MethodGet: {}},
-	"/v1/status":        {http.MethodGet: {}, http.MethodOptions: {}},
-	"/v1/invite":        {http.MethodGet: {}, http.MethodOptions: {}},
-	"/v1/enroll/start":  {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/enroll/finish": {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/register":      {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/preflight":     {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/draft":         {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/bind":          {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/authorize":     {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/publish":       {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/tx":            {http.MethodGet: {}, http.MethodOptions: {}},
+	"/health":               {http.MethodGet: {}},
+	"/v1/status":            {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/invite":            {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/enroll/start":      {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/enroll/finish":     {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/register":          {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/preflight":         {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/draft":             {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/bind":              {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/authorize":         {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/publish":           {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/tx":                {http.MethodGet: {}, http.MethodOptions: {}},
+	"/v1/passkey/challenge": {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/passkey/binding":   {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/passkey/install":   {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/passkey/recover":   {http.MethodPost: {}, http.MethodOptions: {}},
 }
 
 func sortedMethods(methods map[string]struct{}) []string {
@@ -126,7 +130,13 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, r *http.Request) {
-		st, err := svc.Status(r.Context())
+		vaultID := strings.TrimSpace(r.URL.Query().Get("vault"))
+		if vaultID == "" {
+			st, err := svc.PublicStatus()
+			writeJSON(w, st, err)
+			return
+		}
+		st, err := svc.StatusFor(r.Context(), vaultID)
 		writeJSON(w, st, err)
 	})
 	mux.HandleFunc("GET /v1/invite", func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +218,42 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		opCtx, cancel := context.WithTimeout(r.Context(), publishOperationTimeout)
 		defer cancel()
 		out, err := svc.PublishVault(opCtx, req.VaultID, req.Challenge)
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/passkey/challenge", func(w http.ResponseWriter, r *http.Request) {
+		var req PasskeyChallengeRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.IssuePasskeyChallengeFor(r.Context(), req.VaultID, req.Purpose)
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/passkey/binding", func(w http.ResponseWriter, r *http.Request) {
+		var req RecoveryBindingRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.BuildRecoveryBindingFor(req.VaultID, req)
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/passkey/install", func(w http.ResponseWriter, r *http.Request) {
+		var req InstallCredentialEnvelopeRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		err := svc.InstallCredentialEnvelope(r.Context(), req)
+		writeJSON(w, map[string]any{"ok": err == nil}, err)
+	})
+	mux.HandleFunc("POST /v1/passkey/recover", func(w http.ResponseWriter, r *http.Request) {
+		var req SessionAssertionRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		out, err := svc.RecoverCredentialEnvelope(r.Context(), req)
 		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("GET /v1/tx", func(w http.ResponseWriter, r *http.Request) {

@@ -488,6 +488,44 @@ func (l *Ledger) GetVaultEnvelope(vaultID string) (*CredentialEnvelope, error) {
 	return getVaultEnvelope(l.db, vaultID)
 }
 
+// StoreVaultEnvelopeIfAbsent writes one tenant envelope. Exact retries are
+// idempotent; a different envelope cannot replace the first one.
+func (l *Ledger) StoreVaultEnvelopeIfAbsent(vaultID string, envelope CredentialEnvelope) error {
+	if vaultID == "" {
+		return fmt.Errorf("vault id required")
+	}
+	if err := validateCredentialEnvelope(envelope); err != nil {
+		return err
+	}
+	if len(envelope.IntegrityMAC) != sha256.Size {
+		return fmt.Errorf("credential envelope integrity MAC must be 32 bytes")
+	}
+	if !v4TableExists(l.db) {
+		return fmt.Errorf("multi-tenant schema is not ready")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	existing, err := getVaultEnvelopeTx(tx, vaultID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if envelopesEqual(*existing, envelope) {
+			return tx.Commit()
+		}
+		return fmt.Errorf("credential envelope locked")
+	}
+	if err := insertVaultEnvelopeTx(tx, vaultID, envelope); err != nil {
+		return fmt.Errorf("credential envelope locked or failed: %w", err)
+	}
+	return tx.Commit()
+}
+
 func envelopesEqual(a, b CredentialEnvelope) bool {
 	return a.Version == b.Version && a.Binding == b.Binding &&
 		bytes.Equal(a.Nonce, b.Nonce) && bytes.Equal(a.Ciphertext, b.Ciphertext) &&
