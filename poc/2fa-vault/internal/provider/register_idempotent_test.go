@@ -43,7 +43,7 @@ func TestConcurrentExactRegisterAndStatusKeepRuntimeKeysImmutable(t *testing.T) 
 					errs <- err
 					return
 				}
-				if status.RecoveryKeyPub == "" || status.VaultCosignerBasePub == "" || status.OperationalAddr == "" {
+				if status.ExternalOwnerWalletPub == "" || status.VaultCosignerBasePub == "" || status.OperationalAddr == "" {
 					errs <- fmt.Errorf("partial status during idempotent registration: %+v", status)
 					return
 				}
@@ -121,6 +121,7 @@ func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 		t.Fatal(err)
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,6 @@ func newRegisterableService(t *testing.T) (*Service, RegisterRequest) {
 	svc := &Service{
 		Ledger:              led,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    prov.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: prov},
@@ -179,6 +179,7 @@ func TestRegisterSameTupleDifferentRuntimeRaceDoesNotPublishLoser(t *testing.T) 
 		runSameTupleRuntimeRace(t, true, false)
 	})
 	t.Run("different offline", func(t *testing.T) {
+		t.Skip("v4 trees no longer commit a recovery key, so offline runtime identity is not a race axis")
 		runSameTupleRuntimeRace(t, false, true)
 	})
 }
@@ -217,6 +218,7 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 		t.Fatal(err)
 	}
 	offlineB := offlineA
+	_ = offlineB
 	if differentOffline {
 		offlineB, err = btcec.NewPrivateKey()
 		if err != nil {
@@ -253,7 +255,6 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 		{svc: &Service{
 			Ledger:              ledgers[0],
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         offlineA.PubKey(),
 			VaultCosignerPub:    provA.PubKey(),
 			ArkadeCosignerPub:   arkadeKey.PubKey(),
 			VaultSigner:         LocalSigner{Priv: provA},
@@ -264,7 +265,6 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 		{svc: &Service{
 			Ledger:              ledgers[1],
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         offlineB.PubKey(),
 			VaultCosignerPub:    provB.PubKey(),
 			ArkadeCosignerPub:   arkadeKey.PubKey(),
 			VaultSigner:         LocalSigner{Priv: provB},
@@ -309,16 +309,14 @@ func runSameTupleRuntimeRace(t *testing.T, differentProvider, differentOffline b
 		t.Fatalf("persisted enrollment: %v", err)
 	}
 	wantProv := handles[winner].svc.VaultCosignerPub.SerializeCompressed()
-	wantOff := handles[winner].svc.RecoveryKey.SerializeCompressed()
-	if !bytes.Equal(persisted.VaultCosignerBase, wantProv) || !bytes.Equal(persisted.RecoveryKey, wantOff) {
+	if !bytes.Equal(persisted.VaultCosignerBase, wantProv) {
 		t.Fatal("persisted descriptor is not the winner's runtime keys")
 	}
 	if handles[winner].svc.Operational == nil ||
 		handles[winner].svc.Operational.Address != persisted.OperationalAddress {
 		t.Fatal("winner did not publish the persisted operational vault")
 	}
-	if bytes.Equal(lost.VaultCosignerPub.SerializeCompressed(), persisted.VaultCosignerBase) &&
-		bytes.Equal(lost.RecoveryKey.SerializeCompressed(), persisted.RecoveryKey) {
+	if bytes.Equal(lost.VaultCosignerPub.SerializeCompressed(), persisted.VaultCosignerBase) {
 		t.Fatal("test setup failed: loser runtime matches persisted descriptor")
 	}
 }

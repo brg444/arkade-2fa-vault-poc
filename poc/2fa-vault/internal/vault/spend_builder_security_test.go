@@ -115,14 +115,14 @@ func TestRecoverySpendUsesOfflineCSVLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSequence, err := arklib.BIP68Sequence(f.operational.Record.CSV)
+	wantSequence, err := arklib.BIP68Sequence(f.operational.Record.HardwareCSV)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if packet.UnsignedTx.TxIn[0].Sequence != wantSequence {
 		t.Fatalf("recovery sequence = %d, want %d", packet.UnsignedTx.TxIn[0].Sequence, wantSequence)
 	}
-	assertSecurityBuilderLeaf(t, packet, f.operational.Leaves.Recovery)
+	assertSecurityBuilderLeaf(t, packet, f.operational.Leaves.HardwareCSV)
 	assertSecurityNoEmulatorPacket(t, packet)
 }
 

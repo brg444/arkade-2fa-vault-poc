@@ -28,6 +28,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	arkadeKey, _ := btcec.NewPrivateKey()
 	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
+	_ = offline
 	hot, _ := btcec.NewPrivateKey()
 	passkey, _ := webauthn.NewP256()
 	direct, _ := webauthn.NewP256()
@@ -44,7 +45,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	}
 	svc := &Service{
 		Ledger: ledger, Deployment: cfg, CredentialIntegrityKey: integrityKey,
-		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(),
+		ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey(),
 		ArkadeCosignerPub: arkadeKey.PubKey(), ArkadeCosignerOrigin: deployment.MutinynetArkadeCosignerOrigin,
 		ArkadeCosignerVersion: deployment.MutinynetArkadeCosignerVersion,
 		VaultSigner:           LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey},
@@ -66,8 +67,10 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	if status.Network != deployment.NetworkMutinynet || status.ClientOrigin != cfg.ClientOrigin || status.RPID != cfg.RPID || !strings.HasPrefix(status.OperationalAddr, "tb1p") {
 		t.Fatalf("mutinynet status: %+v", status)
 	}
+	if status.RecoveryKeyPub != "" {
+		t.Fatalf("v4 status leaked recoveryKeyPub: %+v", status)
+	}
 	if status.ExternalOwnerWalletPub != hex.EncodeToString(externalOwner.PubKey().SerializeCompressed()) ||
-		status.RecoveryKeyPub != hex.EncodeToString(offline.PubKey().SerializeCompressed()) ||
 		status.VaultCosignerBasePub != hex.EncodeToString(providerKey.PubKey().SerializeCompressed()) ||
 		status.ArkadeCosignerBasePub != hex.EncodeToString(arkadeKey.PubKey().SerializeCompressed()) ||
 		status.OperationalCSVBlocks != cfg.OperationalCSVBlocks ||
@@ -96,7 +99,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	t.Cleanup(func() { _ = reopened.Close() })
 	restart := &Service{
 		Ledger: reopened, Deployment: cfg, CredentialIntegrityKey: integrityKey,
-		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
 		ArkadeCosignerOrigin: deployment.MutinynetArkadeCosignerOrigin,
 		// The outbound transport separately accepted this exact release version.
 		// A reviewed server version change must not strand an unchanged or
@@ -118,7 +121,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	changed.SavingsCSVBlocks++
 	wrong := &Service{
 		Ledger: reopened, Deployment: changed, CredentialIntegrityKey: integrityKey,
-		ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
 		ArkadeCosignerOrigin:  deployment.MutinynetArkadeCosignerOrigin,
 		ArkadeCosignerVersion: deployment.MutinynetArkadeCosignerVersion,
 	}

@@ -19,20 +19,22 @@ func TestRecoveryKeyRequiredOnAdminAndRecoveryPaths(t *testing.T) {
 	op := f.operational
 	sv := f.savings
 
-	if !leafContainsSecurityKey(op.Leaves.Admin, f.recovery.PubKey()) {
-		t.Fatal("Operational admin leaf does not require the RecoveryKey")
+	if !leafContainsSecurityKey(op.Leaves.Admin, f.phoneRoutine.PubKey()) ||
+		!leafContainsSecurityKey(op.Leaves.Admin, f.externalOwner.PubKey()) {
+		t.Fatal("Operational admin leaf must be phone + hardware")
 	}
-	if !leafContainsSecurityKey(op.Leaves.Recovery, f.recovery.PubKey()) {
-		t.Fatal("Operational recovery leaf does not require the RecoveryKey")
+	if !leafContainsSecurityKey(op.Leaves.PhoneCSV, f.phoneRoutine.PubKey()) {
+		t.Fatal("Operational phone CSV leaf does not require the phone key")
 	}
-	if !leafContainsSecurityKey(sv.Leaves.Admin, f.recovery.PubKey()) {
-		t.Fatal("Savings admin leaf does not require the RecoveryKey")
+	if !leafContainsSecurityKey(op.Leaves.HardwareCSV, f.externalOwner.PubKey()) {
+		t.Fatal("Operational hardware CSV leaf does not require hardware")
 	}
-	if !leafContainsSecurityKey(sv.Leaves.Recovery, f.recovery.PubKey()) {
-		t.Fatal("Savings recovery leaf does not require the RecoveryKey")
+	if !leafContainsSecurityKey(sv.Leaves.Admin, f.phoneRoutine.PubKey()) ||
+		!leafContainsSecurityKey(sv.Leaves.Admin, f.externalOwner.PubKey()) {
+		t.Fatal("Savings admin leaf must be phone + hardware")
 	}
-	if leafContainsSecurityKey(op.Leaves.Routine, f.recovery.PubKey()) {
-		t.Fatal("routine leaf unexpectedly contains the RecoveryKey")
+	if leafContainsSecurityKey(op.Leaves.Routine, f.externalOwner.PubKey()) {
+		t.Fatal("routine leaf unexpectedly contains hardware")
 	}
 	if err := sv.AssertNoRoutineCosigners(f.vaultCosigner.PubKey(), op.TweakedVaultCosigner, f.arkadeCosigner.PubKey(), op.TweakedArkadeCosigner); err != nil {
 		t.Fatal(err)
@@ -97,12 +99,14 @@ func TestVaultClosuresHaveExpectedKeysAndDelays(t *testing.T) {
 	savings := f.savings
 
 	assertSecurityMultisigKeys(t, op.Leaves.Routine, f.phoneRoutine.PubKey(), op.TweakedVaultCosigner, op.TweakedArkadeCosigner)
-	assertSecurityMultisigKeys(t, op.Leaves.Admin, f.externalOwner.PubKey(), f.recovery.PubKey())
-	assertSecurityCSVKeyAndDelay(t, op.Leaves.Recovery, f.recovery.PubKey(), op.Record.CSV.Value)
-	assertSecurityMultisigKeys(t, savings.Leaves.Admin, f.externalOwner.PubKey(), f.recovery.PubKey())
-	assertSecurityCSVKeyAndDelay(t, savings.Leaves.Recovery, f.recovery.PubKey(), savings.Record.CSV.Value)
-	if savings.Record.CSV.Value <= op.Record.CSV.Value {
-		t.Fatalf("Savings delay %d must exceed Operational delay %d", savings.Record.CSV.Value, op.Record.CSV.Value)
+	assertSecurityMultisigKeys(t, op.Leaves.Admin, f.phoneRoutine.PubKey(), f.externalOwner.PubKey())
+	assertSecurityCSVKeyAndDelay(t, op.Leaves.PhoneCSV, f.phoneRoutine.PubKey(), op.Record.CSV.Value)
+	assertSecurityCSVKeyAndDelay(t, op.Leaves.HardwareCSV, f.externalOwner.PubKey(), op.Record.HardwareCSV.Value)
+	assertSecurityMultisigKeys(t, savings.Leaves.Admin, f.phoneRoutine.PubKey(), f.externalOwner.PubKey())
+	assertSecurityCSVKeyAndDelay(t, savings.Leaves.PhoneCSV, f.phoneRoutine.PubKey(), savings.Record.CSV.Value)
+	assertSecurityCSVKeyAndDelay(t, savings.Leaves.HardwareCSV, f.externalOwner.PubKey(), savings.Record.HardwareCSV.Value)
+	if savings.Record.HardwareCSV.Value <= op.Record.CSV.Value {
+		t.Fatalf("hardware delay %d must exceed device delay %d", savings.Record.HardwareCSV.Value, op.Record.CSV.Value)
 	}
 }
 
@@ -111,7 +115,7 @@ func TestEveryVaultLeafCommitsToItsCanonicalOutput(t *testing.T) {
 
 	f := newSecurityVaultFixture(t)
 	for _, built := range []*Built{f.operational, f.savings} {
-		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.Recovery} {
+		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.PhoneCSV, built.Leaves.HardwareCSV} {
 			if leaf == nil {
 				continue
 			}
@@ -133,7 +137,7 @@ func TestEveryVaultPathUsesTheDocumentedNUMSInternalKey(t *testing.T) {
 	f := newSecurityVaultFixture(t)
 	want := schnorr.SerializePubKey(arkscript.UnspendableKey())
 	for _, built := range []*Built{f.operational, f.savings} {
-		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.Recovery} {
+		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.PhoneCSV, built.Leaves.HardwareCSV} {
 			if leaf == nil {
 				continue
 			}
@@ -152,11 +156,11 @@ func TestVaultTreeHasNoUndocumentedScriptPaths(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
-	if got := len(f.operational.Tree.Closures); got != 3 {
-		t.Fatalf("Operational closure count = %d, want routine + admin + recovery", got)
+	if got := len(f.operational.Tree.Closures); got != 4 {
+		t.Fatalf("Operational closure count = %d, want routine + admin + phone CSV + hardware CSV", got)
 	}
-	if got := len(f.savings.Tree.Closures); got != 2 {
-		t.Fatalf("Savings closure count = %d, want admin + recovery", got)
+	if got := len(f.savings.Tree.Closures); got != 3 {
+		t.Fatalf("Savings closure count = %d, want admin + phone CSV + hardware CSV", got)
 	}
 }
 

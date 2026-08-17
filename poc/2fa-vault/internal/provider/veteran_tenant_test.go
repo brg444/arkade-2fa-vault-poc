@@ -97,6 +97,7 @@ func TestVeteranPublicStatusDoesNotLeakTenant(t *testing.T) {
 	svc, _, _, tenantB := twoTenantEnv(t)
 	h := AuthorizerHandler(svc)
 	rec := httptest.NewRecorder()
+	_ = rec
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	req.Header.Set("Origin", fixture.Origin)
 	h.ServeHTTP(rec, req)
@@ -205,6 +206,7 @@ func TestVeteranSQLiteCreatedAtMutationFailsIssuanceMAC(t *testing.T) {
 func TestVeteranLegacyFirstVaultStaysLegacyDirectV0(t *testing.T) {
 	svc, led, key, _ := twoTenantEnv(t)
 	rec, _, err := led.LoadVerifiedVault(fixture.VaultID, key)
+	_ = rec
 	if err != nil || rec == nil {
 		t.Fatal(err)
 	}
@@ -237,6 +239,7 @@ func TestVeteranFixturePubsCannotRegisterMutinynetTenant(t *testing.T) {
 	}
 	owner, _ := btcec.NewPrivateKey()
 	rec, _ := btcec.NewPrivateKey()
+	_ = rec
 	hot, _ := btcec.NewPrivateKey()
 	pass, _ := webauthn.NewP256()
 	direct, _ := webauthn.NewP256()
@@ -247,7 +250,6 @@ func TestVeteranFixturePubsCannotRegisterMutinynetTenant(t *testing.T) {
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: fx,
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(rec.PubKey())),
 	})
 	if err := svc.CreateTenantVault("tenant-g2g", bytes.Repeat([]byte{0x7a}, 32), req); err == nil {
 		t.Fatal("G/2G registered a Mutinynet tenant")
@@ -265,13 +267,13 @@ func TestVeteranFinishRequiresDurablePending(t *testing.T) {
 	hot, _ := btcec.NewPrivateKey()
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
+	_ = recovery
 	ghost := *start
 	ghost.Handle = strings.Repeat("ab", 16)
 	if _, err := svc.FinishEnrollment(context.Background(), token, attestedFinish(t, svc, &ghost, pass, []byte("no-pending"), RegisterRequest{
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
 	}, owner, recovery)); err == nil {
 		t.Fatal("finish registered without a durable pending row")
 	}
@@ -297,13 +299,13 @@ func twoTenantEnvClock(t *testing.T, clock func() time.Time) (*Service, *policy.
 	arkade, _ := btcec.NewPrivateKey()
 	ownerA, _ := btcec.NewPrivateKey()
 	recA, _ := btcec.NewPrivateKey()
+	_ = recA
 	hotA, _ := btcec.NewPrivateKey()
 	passA, _ := webauthn.NewP256()
 	dirA, _ := webauthn.NewP256()
 	svc := &Service{
 		Ledger:               led,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},
@@ -334,6 +336,7 @@ func twoTenantEnvClock(t *testing.T, clock func() time.Time) (*Service, *policy.
 	}
 	ownerB, _ := btcec.NewPrivateKey()
 	recB, _ := btcec.NewPrivateKey()
+	_ = recB
 	hotB, _ := btcec.NewPrivateKey()
 	passB, _ := webauthn.NewP256()
 	dirB, _ := webauthn.NewP256()
@@ -344,7 +347,6 @@ func twoTenantEnvClock(t *testing.T, clock func() time.Time) (*Service, *policy.
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
 	})); err != nil {
 		t.Fatal(err)
 	}

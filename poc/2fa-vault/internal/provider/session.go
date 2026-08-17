@@ -103,7 +103,6 @@ type recoveryBinding struct {
 	PhoneDirectP256            string `json:"phoneDirectP256"`
 	PhoneRoutineBIP340Pub      string `json:"phoneRoutineBip340Pub"`
 	ExternalOwnerWalletPub     string `json:"externalOwnerWalletPub"`
-	RecoveryKeyPub             string `json:"recoveryKeyPub"`
 	VaultCosignerBasePub       string `json:"vaultCosignerBasePub"`
 	TweakedVaultCosignerXOnly  string `json:"tweakedVaultCosignerXOnly"`
 	ArkadeCosignerBasePub      string `json:"arkadeCosignerBasePub"`
@@ -356,7 +355,7 @@ func canonicalRecoveryBinding(cred *policy.Credential, nonce, ciphertext []byte)
 		Version:      1,
 		CredentialID: hex.EncodeToString(cred.ID), WebAuthnP256: hex.EncodeToString(cred.WebAuthnP256),
 		PhoneDirectP256: hex.EncodeToString(cred.PhoneDirectP256), PhoneRoutineBIP340Pub: hex.EncodeToString(cred.PhoneRoutineBIP340),
-		ExternalOwnerWalletPub: hex.EncodeToString(cred.ExternalOwnerWallet), RecoveryKeyPub: hex.EncodeToString(cred.RecoveryKey),
+		ExternalOwnerWalletPub: hex.EncodeToString(cred.ExternalOwnerWallet),
 		VaultCosignerBasePub:       hex.EncodeToString(cred.VaultCosignerBase),
 		TweakedVaultCosignerXOnly:  hex.EncodeToString(cred.TweakedVaultCosigner[1:]),
 		ArkadeCosignerBasePub:      hex.EncodeToString(cred.ArkadeCosignerBase),

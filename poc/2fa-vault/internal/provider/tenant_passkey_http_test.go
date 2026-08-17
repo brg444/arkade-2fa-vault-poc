@@ -30,13 +30,13 @@ func TestHTTPTenantBInstallRecoverDoesNotTouchA(t *testing.T) {
 	arkade, _ := btcec.NewPrivateKey()
 	ownerA, _ := btcec.NewPrivateKey()
 	recA, _ := btcec.NewPrivateKey()
+	_ = recA
 	hotA, _ := btcec.NewPrivateKey()
 	passA, _ := webauthn.NewP256()
 	dirA, _ := webauthn.NewP256()
 	svc := &Service{
 		Ledger:               led,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},
@@ -70,6 +70,7 @@ func TestHTTPTenantBInstallRecoverDoesNotTouchA(t *testing.T) {
 	}
 	ownerB, _ := btcec.NewPrivateKey()
 	recB, _ := btcec.NewPrivateKey()
+	_ = recB
 	hotB, _ := btcec.NewPrivateKey()
 	passB, _ := webauthn.NewP256()
 	dirB, _ := webauthn.NewP256()
@@ -81,7 +82,6 @@ func TestHTTPTenantBInstallRecoverDoesNotTouchA(t *testing.T) {
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,6 @@ func TestHTTPTenantBInstallRecoverDoesNotTouchA(t *testing.T) {
 	restarted := &Service{
 		Ledger:               reopened,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},

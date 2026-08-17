@@ -22,6 +22,7 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 	t.Cleanup(func() { _ = ledger.Close() })
 	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
+	_ = offline
 	providerKey, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
 	hot, _ := btcec.NewPrivateKey()
@@ -33,7 +34,7 @@ func TestFirstEnrollmentRequiresBootstrapAndTokenCannotReplaceEnrollment(t *test
 		t.Fatal(err)
 	}
 	svc := &Service{
-		Ledger: ledger, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
+		Ledger: ledger, ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey(), ArkadeCosignerPub: arkadeKey.PubKey(),
 		VaultSigner: LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey}, EnrollmentTokenHash: digestRaw,
 		EnrollmentDeadline: time.Now().Add(time.Hour),
 	}

@@ -451,10 +451,10 @@ func executeFinalizedInput(ptx *psbt.Packet) error {
 	return eng.Execute()
 }
 
-// FinalizeAdmin builds the Bitcoin witness from the ExternalOwnerWallet and
-// RecoveryKey admin signatures.
+// FinalizeAdmin builds the Bitcoin witness from the PhoneRoutineBIP340 and
+// ExternalOwnerWallet admin signatures.
 func FinalizeAdmin(ptx *psbt.Packet, vault *Built) error {
-	if vault == nil || vault.Leaves.Admin == nil || vault.Record.ExternalOwnerWallet == nil || vault.Record.RecoveryKey == nil {
+	if vault == nil || vault.Leaves.Admin == nil || vault.Record.ExternalOwnerWallet == nil || vault.Record.PhoneRoutineBIP340 == nil {
 		return fmt.Errorf("admin finalize inputs")
 	}
 	prevTx, err := RequireVerifiedPrevout(ptx)
@@ -467,7 +467,7 @@ func FinalizeAdmin(ptx *psbt.Packet, vault *Built) error {
 	}
 	if err := verifyExactLeafPartials(
 		ptx, vault.Leaves.Admin,
-		vault.Record.ExternalOwnerWallet, vault.Record.RecoveryKey,
+		vault.Record.PhoneRoutineBIP340, vault.Record.ExternalOwnerWallet,
 	); err != nil {
 		return err
 	}
@@ -550,7 +550,7 @@ func ExtractFinalizedTx(ptx *psbt.Packet) (*wire.MsgTx, error) {
 	return tx, nil
 }
 
-// AdminSpend builds an ExternalOwnerWallet+RecoveryKey full sweep or policy
+// AdminSpend builds a PhoneRoutine+ExternalOwnerWallet full sweep or policy
 // migration with no emulator packet. The optional recursive change is an
 // explicit admin decision and is never exposed through routine HTTP routes.
 func AdminSpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, destAmt, fee int64, sequence uint32) (*psbt.Packet, error) {
@@ -602,9 +602,17 @@ func AdminSpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, des
 	return ptx, nil
 }
 
-// RecoverySpend builds a CSV+RecoveryKey spend.
+// RecoverySpend builds a delayed single-key spend. v4 uses the hardware CSV
+// leaf (lost device). A v3 Recovery leaf is still accepted if present.
 func RecoverySpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, destAmt, fee int64) (*psbt.Packet, error) {
-	if v == nil || v.Leaves.Recovery == nil {
+	if v == nil {
+		return nil, fmt.Errorf("recovery leaf required")
+	}
+	leaf := v.Leaves.HardwareCSV
+	if leaf == nil {
+		leaf = v.Leaves.Recovery
+	}
+	if leaf == nil {
 		return nil, fmt.Errorf("recovery leaf required")
 	}
 	if len(dest) == 0 {
@@ -617,7 +625,11 @@ func RecoverySpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, 
 	if err != nil {
 		return nil, err
 	}
-	seq, err := arklib.BIP68Sequence(v.Record.CSV)
+	lock := v.Record.HardwareCSV
+	if lock.Value == 0 {
+		lock = v.Record.CSV
+	}
+	seq, err := arklib.BIP68Sequence(lock)
 	if err != nil {
 		return nil, err
 	}
@@ -638,8 +650,8 @@ func RecoverySpend(v *Built, prevTx *wire.MsgTx, op wire.OutPoint, dest []byte, 
 	ptx.Inputs[0].WitnessUtxo = &wire.TxOut{Value: prev.Value, PkScript: prev.PkScript}
 	ptx.Inputs[0].SighashType = txscript.SigHashDefault
 	ptx.Inputs[0].TaprootLeafScript = []*psbt.TaprootTapLeafScript{{
-		ControlBlock: v.Leaves.Recovery.ControlBlock,
-		Script:       v.Leaves.Recovery.Script,
+		ControlBlock: leaf.ControlBlock,
+		Script:       leaf.Script,
 		LeafVersion:  txscript.BaseLeafVersion,
 	}}
 	return ptx, nil

@@ -24,7 +24,6 @@ type adminFixture struct {
 	vault      *vault.Built
 	phone      *btcec.PrivateKey
 	owner      *btcec.PrivateKey
-	recovery   *btcec.PrivateKey
 	vaultKey   *btcec.PrivateKey
 	arkade     *btcec.PrivateKey
 	prev       *wire.MsgTx
@@ -39,7 +38,7 @@ func TestBuildAndFinalizeAdminHandoffRequiresExactExternalOwnerAndRecovery(t *te
 	}
 	if len(packet.Inputs[0].TaprootLeafScript) != 1 ||
 		!bytes.Equal(packet.Inputs[0].TaprootLeafScript[0].Script, f.vault.Leaves.Admin.Script) {
-		t.Fatal("handoff PSBT does not expose the exact v3 admin leaf")
+		t.Fatal("handoff PSBT does not expose the exact v4 admin leaf")
 	}
 	if _, err := vault.RequireVerifiedPrevout(packet); err != nil {
 		t.Fatalf("handoff PSBT omitted verified previous transaction: %v", err)
@@ -49,9 +48,9 @@ func TestBuildAndFinalizeAdminHandoffRequiresExactExternalOwnerAndRecovery(t *te
 	if err := vault.FinalizeAdmin(packet, f.vault); err == nil {
 		t.Fatal("one-of-two admin signature finalized")
 	}
-	addAdminSig(t, packet, f.vault, f.recovery)
+	addAdminSig(t, packet, f.vault, f.phone)
 	if err := vault.FinalizeAdmin(packet, f.vault); err != nil {
-		t.Fatalf("exact ExternalOwnerWallet+RecoveryKey signatures: %v", err)
+		t.Fatalf("exact phone+hardware signatures: %v", err)
 	}
 	if err := vault.ExecuteFinalizedAdmin(packet, f.vault); err != nil {
 		t.Fatalf("final admin witness does not execute: %v", err)
@@ -109,7 +108,7 @@ func TestAdminHandoffRejectsRoutineRoleSubstitutionAndPrevoutMutation(t *testing
 			}
 			key := signer.key(&f)
 			addSigForPub(t, packet, f.vault.Leaves.Admin, key, key.PubKey())
-			addAdminSig(t, packet, f.vault, f.recovery)
+			addAdminSig(t, packet, f.vault, f.phone)
 			if err := vault.FinalizeAdmin(packet, f.vault); err == nil {
 				t.Fatalf("%s substituted for ExternalOwnerWallet", signer.name)
 			}
@@ -123,7 +122,7 @@ func TestAdminHandoffRejectsRoutineRoleSubstitutionAndPrevoutMutation(t *testing
 	}
 	packet.Inputs[0].WitnessUtxo.Value--
 	addAdminSig(t, packet, f.vault, f.owner)
-	addAdminSig(t, packet, f.vault, f.recovery)
+	addAdminSig(t, packet, f.vault, f.phone)
 	if err := vault.FinalizeAdmin(packet, f.vault); err == nil || !strings.Contains(err.Error(), "witness utxo does not match prevout") {
 		t.Fatalf("mutated prevout accepted: %v", err)
 	}
@@ -143,7 +142,7 @@ func TestAdminHandoffCLIUsesFilesOnlyAndFailsClosedOnDescriptorVersion(t *testin
 		t.Fatal(err)
 	}
 	addAdminSig(t, packet, f.vault, f.owner)
-	addAdminSig(t, packet, f.vault, f.recovery)
+	addAdminSig(t, packet, f.vault, f.phone)
 	signed, err := packet.B64Encode()
 	if err != nil {
 		t.Fatal(err)
@@ -188,14 +187,14 @@ func newAdminFixture(t *testing.T) adminFixture {
 		return priv
 	}
 	f := adminFixture{
-		phone: key(7), owner: key(8), recovery: key(9), vaultKey: key(10), arkade: key(11),
+		phone: key(7), owner: key(8), vaultKey: key(10), arkade: key(11),
 	}
 	direct := elliptic.MarshalCompressed(elliptic.P256(), elliptic.P256().Params().Gx, elliptic.P256().Params().Gy)
 	op, err := vault.NewOperationalWithPolicy(vault.OperationalKeys{
 		PhoneRoutineBIP340: f.phone.PubKey(), PhoneDirectP256: direct,
-		ExternalOwnerWallet: f.owner.PubKey(), RecoveryKey: f.recovery.PubKey(),
-		VaultCosignerBase: f.vaultKey.PubKey(), ArkadeCosignerBase: f.arkade.PubKey(),
-	}, "regtest", fixture.OperationalCSV(), vault.AuthorizationPolicy{
+		ExternalOwnerWallet: f.owner.PubKey(),
+		VaultCosignerBase:   f.vaultKey.PubKey(), ArkadeCosignerBase: f.arkade.PubKey(),
+	}, "regtest", fixture.OperationalCSV(), fixture.SavingsCSV(), vault.AuthorizationPolicy{
 		RecipientDustSats: fixture.DustSats, RecipientCapSats: fixture.TxRecipientCapSats,
 		AbsoluteFeeCeilingSats: fixture.AbsoluteFeeCeiling, FeerateCeilingSatPerV: fixture.FeerateCeilingSatPerV,
 	})
@@ -203,7 +202,7 @@ func newAdminFixture(t *testing.T) adminFixture {
 		t.Fatal(err)
 	}
 	savings, err := vault.NewSavingsWithPolicy(
-		f.owner.PubKey(), f.recovery.PubKey(), "regtest", fixture.SavingsCSV(),
+		f.phone.PubKey(), f.owner.PubKey(), "regtest", fixture.OperationalCSV(), fixture.SavingsCSV(),
 		f.vaultKey.PubKey(), op.TweakedVaultCosigner, f.arkade.PubKey(), op.TweakedArkadeCosigner,
 	)
 	if err != nil {
@@ -215,7 +214,6 @@ func newAdminFixture(t *testing.T) adminFixture {
 		VaultID: fixture.VaultID, TemplateVersion: fixture.TemplateVersion, PolicyVersion: fixture.PolicyVersion,
 		OperationalCSVBlocks: fixture.OperationalCSVBlocks, SavingsCSVBlocks: fixture.SavingsCSVBlocks,
 		ExternalOwnerWalletPub: hex.EncodeToString(f.owner.PubKey().SerializeCompressed()),
-		RecoveryKeyPub:         hex.EncodeToString(f.recovery.PubKey().SerializeCompressed()),
 		VaultCosignerBasePub:   hex.EncodeToString(f.vaultKey.PubKey().SerializeCompressed()),
 		ArkadeCosignerBasePub:  hex.EncodeToString(f.arkade.PubKey().SerializeCompressed()),
 		OperationalAddress:     op.Address, OperationalScript: hex.EncodeToString(op.PkScript),

@@ -30,6 +30,7 @@ func newEnv(t *testing.T) *env {
 	hot, _ := btcec.NewPrivateKey()
 	externalOwner, _ := btcec.NewPrivateKey()
 	offline, _ := btcec.NewPrivateKey()
+	_ = offline
 	prov, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
 	p256, err := webauthn.NewP256()
@@ -49,7 +50,6 @@ func newEnv(t *testing.T) *env {
 		Ledger:              led,
 		PhoneRoutineBIP340:  hot.PubKey(),
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    prov.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: prov},
@@ -200,6 +200,7 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,6 @@ func TestRegisterRejectsReusedWebAuthnKeyAsDirectAuth(t *testing.T) {
 	svc := &Service{
 		Ledger:              led,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    prov.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: prov},
@@ -256,6 +256,7 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +284,6 @@ func TestRegisterUsesBrowserHotWhenServiceHotIsNil(t *testing.T) {
 	svc := &Service{
 		Ledger:              led,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    prov.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: prov},

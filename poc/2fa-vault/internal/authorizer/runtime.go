@@ -211,10 +211,12 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 			zero(credentialIntegrityKey)
 			return nil, fmt.Errorf("stored ExternalOwnerWallet is invalid")
 		}
-		recovery, err = btcec.ParsePubKey(persisted.RecoveryKey)
-		if err != nil || !bytes.Equal(recovery.SerializeCompressed(), persisted.RecoveryKey) {
-			zero(credentialIntegrityKey)
-			return nil, fmt.Errorf("stored RecoveryKey is invalid")
+		if len(persisted.RecoveryKey) > 0 {
+			recovery, err = btcec.ParsePubKey(persisted.RecoveryKey)
+			if err != nil || !bytes.Equal(recovery.SerializeCompressed(), persisted.RecoveryKey) {
+				zero(credentialIntegrityKey)
+				return nil, fmt.Errorf("stored RecoveryKey is invalid")
+			}
 		}
 		if cfg.ExternalOwnerWalletPubHex != "" {
 			configured, parseErr := parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
@@ -223,33 +225,12 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 				return nil, fmt.Errorf("configured ExternalOwnerWallet does not match the persisted vault")
 			}
 		}
-		if cfg.RecoveryKeyPubHex != "" {
-			configured, parseErr := parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
-			if parseErr != nil || !sameXOnly(configured, recovery) {
-				zero(credentialIntegrityKey)
-				return nil, fmt.Errorf("configured RecoveryKey does not match the persisted vault")
-			}
-		}
 		allowActiveDeprecated = true
-	} else {
-		// A portable deployment deliberately leaves both keys unset so the
-		// first enrollee chooses their x-only identities in the first enrollment.
-		// Legacy/operator-pinned deployments may still precommit both.
-		if (cfg.ExternalOwnerWalletPubHex == "") != (cfg.RecoveryKeyPubHex == "") {
+	} else if cfg.ExternalOwnerWalletPubHex != "" {
+		externalOwner, err = parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
+		if err != nil {
 			zero(credentialIntegrityKey)
-			return nil, fmt.Errorf("fresh deployment must configure both ExternalOwnerWallet and RecoveryKey or neither")
-		}
-		if cfg.ExternalOwnerWalletPubHex != "" {
-			externalOwner, err = parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
-			if err != nil {
-				zero(credentialIntegrityKey)
-				return nil, err
-			}
-			recovery, err = parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
-			if err != nil {
-				zero(credentialIntegrityKey)
-				return nil, err
-			}
+			return nil, err
 		}
 	}
 	roles := map[string]*btcec.PublicKey{
@@ -258,7 +239,6 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 	}
 	if externalOwner != nil {
 		roles["ExternalOwnerWallet"] = externalOwner
-		roles["RecoveryKey"] = recovery
 	}
 	if err := requirePairwiseIndependent(roles); err != nil {
 		zero(credentialIntegrityKey)
@@ -307,7 +287,6 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		Deployment:             cfg.Deployment,
 		CredentialIntegrityKey: credentialIntegrityKey,
 		ExternalOwnerWallet:    externalOwner,
-		RecoveryKey:            recovery,
 		VaultCosignerPub:       vaultCosignerKey.PubKey(),
 		ArkadeCosignerPub:      arkadeIdentity.BasePub,
 		ArkadeCosignerOrigin:   arkadeIdentity.Origin,

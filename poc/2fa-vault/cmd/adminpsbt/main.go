@@ -1,6 +1,6 @@
-// Command adminpsbt is a file-only reference handoff for the v3
-// ExternalOwnerWallet+RecoveryKey admin path. It never opens a listener and
-// never reads or produces private key material.
+// Command adminpsbt is a file-only reference handoff for the v4
+// PhoneRoutineBIP340+ExternalOwnerWallet admin path. It never opens a listener
+// and never reads or produces private key material.
 package main
 
 import (
@@ -36,7 +36,7 @@ type descriptor struct {
 	OperationalCSVBlocks            uint32 `json:"operationalCsvBlocks"`
 	SavingsCSVBlocks                uint32 `json:"savingsCsvBlocks"`
 	ExternalOwnerWalletPub          string `json:"externalOwnerWalletPub"`
-	RecoveryKeyPub                  string `json:"recoveryKeyPub"`
+	RecoveryKeyPub                  string `json:"recoveryKeyPub,omitempty"`
 	VaultCosignerBasePub            string `json:"vaultCosignerBasePub"`
 	ArkadeCosignerBasePub           string `json:"arkadeCosignerBasePub"`
 	ArkadeCosignerOrigin            string `json:"arkadeCosignerOrigin"`
@@ -120,7 +120,7 @@ func run(mode, descriptorPath, requestPath, psbtPath, outPath, txOutPath string)
 			return err
 		}
 		if err := vault.FinalizeAdmin(packet, built); err != nil {
-			return fmt.Errorf("verify ExternalOwnerWallet+RecoveryKey signatures: %w", err)
+			return fmt.Errorf("verify phone+hardware admin signatures: %w", err)
 		}
 		if err := vault.ExecuteFinalizedAdmin(packet, built); err != nil {
 			return fmt.Errorf("execute finalized admin witness: %w", err)
@@ -204,7 +204,10 @@ func (d descriptor) buildVault() (*vault.Built, error) {
 		return nil, fmt.Errorf("descriptor is not the enrolled %s vault", fixture.VaultID)
 	}
 	if d.TemplateVersion != fixture.TemplateVersion || d.PolicyVersion != fixture.PolicyVersion {
-		return nil, fmt.Errorf("only exact v3 template and policy are supported")
+		return nil, fmt.Errorf("only exact v4 template and policy are supported")
+	}
+	if strings.TrimSpace(d.RecoveryKeyPub) != "" {
+		return nil, fmt.Errorf("recoveryKeyPub is retired")
 	}
 	if d.TxCap != fixture.TxRecipientCapSats || d.PeriodAllowance != fixture.PeriodAllowanceSats ||
 		d.AbsoluteFeeCap != fixture.AbsoluteFeeCeiling || d.FeerateCapSatPerV != fixture.FeerateCeilingSatPerV {
@@ -225,10 +228,6 @@ func (d descriptor) buildVault() (*vault.Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	recoveryKey, err := strictCompressedPub(d.RecoveryKeyPub, "RecoveryKey")
-	if err != nil {
-		return nil, err
-	}
 	vaultCosigner, err := strictCompressedPub(d.VaultCosignerBasePub, "VaultCosigner")
 	if err != nil {
 		return nil, err
@@ -246,9 +245,9 @@ func (d descriptor) buildVault() (*vault.Built, error) {
 	}
 	op, err := vault.NewOperationalWithPolicy(vault.OperationalKeys{
 		PhoneRoutineBIP340: phoneRoutine, PhoneDirectP256: direct,
-		ExternalOwnerWallet: externalOwner, RecoveryKey: recoveryKey,
-		VaultCosignerBase: vaultCosigner, ArkadeCosignerBase: arkadeCosigner,
-	}, d.Network, arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: d.OperationalCSVBlocks}, vault.AuthorizationPolicy{
+		ExternalOwnerWallet: externalOwner,
+		VaultCosignerBase:   vaultCosigner, ArkadeCosignerBase: arkadeCosigner,
+	}, d.Network, arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: d.OperationalCSVBlocks}, arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: d.SavingsCSVBlocks}, vault.AuthorizationPolicy{
 		RecipientDustSats: fixture.DustSats, RecipientCapSats: fixture.TxRecipientCapSats,
 		AbsoluteFeeCeilingSats: fixture.AbsoluteFeeCeiling, FeerateCeilingSatPerV: fixture.FeerateCeilingSatPerV,
 	})
@@ -263,7 +262,8 @@ func (d descriptor) buildVault() (*vault.Built, error) {
 		return nil, fmt.Errorf("materialized routine cosigner tweaks do not match status")
 	}
 	savings, err := vault.NewSavingsWithPolicy(
-		externalOwner, recoveryKey, d.Network,
+		phoneRoutine, externalOwner, d.Network,
+		arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: d.OperationalCSVBlocks},
 		arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: d.SavingsCSVBlocks},
 		vaultCosigner, op.TweakedVaultCosigner, arkadeCosigner, op.TweakedArkadeCosigner,
 	)

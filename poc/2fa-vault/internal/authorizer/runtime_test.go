@@ -166,6 +166,7 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoveryKey, err := btcec.NewPrivateKey()
+	_ = recoveryKey
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,6 +313,7 @@ func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *te
 	runtime.service.EnrollmentNow = nil
 	owner, _ := btcec.NewPrivateKey()
 	recovery, _ := btcec.NewPrivateKey()
+	_ = recovery
 	phone, _ := btcec.NewPrivateKey()
 	passkey, _ := webauthn.NewP256()
 	direct, _ := webauthn.NewP256()
@@ -321,7 +323,6 @@ func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *te
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(phone.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
 	}
 	if err := runtime.service.RegisterWithBootstrap(req, ""); err != nil {
 		t.Fatal(err)
@@ -331,8 +332,7 @@ func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *te
 		t.Fatal(err)
 	}
 	if !status.Enrolled || status.EnrollmentMode != "closed" || status.PasskeyLoginAvailable ||
-		status.ExternalOwnerWalletPub[2:] != req.ExternalOwnerWalletXOnly ||
-		status.RecoveryKeyPub[2:] != req.RecoveryKeyXOnly {
+		status.ExternalOwnerWalletPub[2:] != req.ExternalOwnerWalletXOnly {
 		t.Fatalf("portable enrollment status = %+v", status)
 	}
 	if err := runtime.Close(); err != nil {

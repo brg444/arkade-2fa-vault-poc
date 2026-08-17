@@ -44,11 +44,12 @@ func testKeys(t *testing.T) (phoneRoutine, externalOwner, recovery, vaultCosigne
 
 func TestTreesAndSavingsExclusion(t *testing.T) {
 	phoneRoutine, externalOwner, recovery, vaultCosigner, arkadeCosigner, phoneDirect := testKeys(t)
-	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+	_ = recovery
+	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if op.Leaves.Routine == nil || op.Leaves.Admin == nil || op.Leaves.Recovery == nil {
+	if op.Leaves.Routine == nil || op.Leaves.Admin == nil || op.Leaves.PhoneCSV == nil || op.Leaves.HardwareCSV == nil {
 		t.Fatal("operational leaves")
 	}
 	if !op.ContainsTweakedVaultCosigner() {
@@ -58,7 +59,7 @@ func TestTreesAndSavingsExclusion(t *testing.T) {
 		t.Fatal("operational must contain tweaked arkadeCosigner emulator")
 	}
 
-	sv, err := NewSavings(externalOwner.PubKey(), recovery.PubKey(), vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
+	sv, err := NewSavings(phoneRoutine.PubKey(), externalOwner.PubKey(), vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,20 +85,21 @@ func TestTreesAndSavingsExclusion(t *testing.T) {
 
 func TestMutinynetTreeUsesPinnedCustomSignetParamsAndExplicitDelays(t *testing.T) {
 	phoneRoutine, externalOwner, recovery, vaultCosigner, arkadeCosigner, phoneDirect := testKeys(t)
+	_ = recovery
 	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: 288}
 	savingsCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: 4032}
-	op, err := NewOperationalWithPolicy(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect}, "mutinynet", opCSV, fixtureAuthorizationPolicy())
+	op, err := NewOperationalWithPolicy(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect}, "mutinynet", opCSV, savingsCSV, fixtureAuthorizationPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(op.Address, "tb1p") || op.Record.Network != "mutinynet" || op.Record.CSV != opCSV {
 		t.Fatalf("mutinynet operational descriptor: address=%s network=%s csv=%+v", op.Address, op.Record.Network, op.Record.CSV)
 	}
-	sv, err := NewSavingsWithPolicy(externalOwner.PubKey(), recovery.PubKey(), "mutinynet", savingsCSV, vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
+	sv, err := NewSavingsWithPolicy(phoneRoutine.PubKey(), externalOwner.PubKey(), "mutinynet", opCSV, savingsCSV, vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(sv.Address, "tb1p") || sv.Record.Network != "mutinynet" || sv.Record.CSV != savingsCSV {
+	if !strings.HasPrefix(sv.Address, "tb1p") || sv.Record.Network != "mutinynet" || sv.Record.HardwareCSV != savingsCSV {
 		t.Fatalf("mutinynet savings descriptor: address=%s network=%s csv=%+v", sv.Address, sv.Record.Network, sv.Record.CSV)
 	}
 }
@@ -115,11 +117,11 @@ func TestVaultRolesAreDistinctByXOnlyIdentity(t *testing.T) {
 			return err
 		}},
 		{name: "vaultCosigner equals phoneRoutine", build: func() error {
-			_, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: negatedHot, ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+			_, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: negatedHot, ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 			return err
 		}},
-		{name: "vaultCosigner equals recovery", build: func() error {
-			_, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: negatedOffline, ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+		{name: "vaultCosigner equals hardware", build: func() error {
+			_, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: negateTestPub(t, externalOwner.PubKey()), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 			return err
 		}},
 	} {
@@ -151,7 +153,7 @@ func TestAuthorizationScriptExecutesOnCurrentTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: webauthn.CompressedP256(direct)})
+	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: webauthn.CompressedP256(direct)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +188,8 @@ func TestAuthorizationScriptExecutesOnCurrentTransaction(t *testing.T) {
 
 func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
 	phoneRoutine, externalOwner, recovery, vaultCosigner, arkadeCosigner, phoneDirect := testKeys(t)
-	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+	_ = recovery
+	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +207,7 @@ func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
 	if _, err := NewFromRecord(op.Record); err != nil {
 		t.Fatalf("operational record: %v", err)
 	}
-	sv, err := NewSavings(externalOwner.PubKey(), recovery.PubKey(), vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
+	sv, err := NewSavings(phoneRoutine.PubKey(), externalOwner.PubKey(), vaultCosigner.PubKey(), op.TweakedVaultCosigner, arkadeCosigner.PubKey(), op.TweakedArkadeCosigner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +218,8 @@ func TestNewFromRecordRejectsInvalidKind(t *testing.T) {
 
 func TestNewFromRecordDirectP256IsCanonical(t *testing.T) {
 	phoneRoutine, externalOwner, recovery, vaultCosigner, arkadeCosigner, phoneDirect := testKeys(t)
-	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+	_ = recovery
+	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +299,7 @@ func TestNewFromRecordDirectP256IsCanonical(t *testing.T) {
 
 func TestAdminSpendRejectsNegativeChange(t *testing.T) {
 	phoneRoutine, externalOwner, recovery, vaultCosigner, arkadeCosigner, phoneDirect := testKeys(t)
-	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: recovery.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
+	op, err := NewOperational(OperationalKeys{PhoneRoutineBIP340: phoneRoutine.PubKey(), ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerBase: vaultCosigner.PubKey(), ArkadeCosignerBase: arkadeCosigner.PubKey(), PhoneDirectP256: phoneDirect})
 	if err != nil {
 		t.Fatal(err)
 	}

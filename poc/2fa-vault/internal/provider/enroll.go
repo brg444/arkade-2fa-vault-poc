@@ -180,13 +180,13 @@ func (s *Service) previewTenantDescriptor(vaultID string, req RegisterRequest) (
 	if err != nil {
 		return nil, err
 	}
-	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())
+	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
 	if err != nil {
 		return nil, err
 	}
 	cred := descriptorFromTrees(
 		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
+		parsed.phoneRoutine, parsed.externalOwner,
 		child.PubKey(), s.ArkadeCosignerPub,
 		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
 	)
@@ -272,8 +272,8 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 	if err != nil || !bytesEqualConst(created.WebAuthnP256, postedP256) {
 		return nil, fmt.Errorf("webauthn p256 does not match authenticator")
 	}
-	if req.ExternalOwnerWalletXOnly == "" || req.RecoveryKeyXOnly == "" {
-		return nil, fmt.Errorf("tenant owner and recovery pubs required")
+	if req.ExternalOwnerWalletXOnly == "" {
+		return nil, fmt.Errorf("tenant owner pub required")
 	}
 	if s.afterLoadPending != nil {
 		s.afterLoadPending()
@@ -322,8 +322,7 @@ func (s *Service) acceptDuplicateFinish(vaultID string, req RegisterRequest) (*S
 		!bytesEqualConst(cred.WebAuthnP256, parsed.webauthnP256) ||
 		!bytesEqualConst(rec.PhoneDirectP256, parsed.phoneDirectP256) ||
 		!bytesEqualConst(rec.PhoneRoutineBIP340, parsed.phoneRoutine.SerializeCompressed()) ||
-		!bytesEqualConst(rec.ExternalOwnerWallet, parsed.externalOwner.SerializeCompressed()) ||
-		!bytesEqualConst(rec.RecoveryKey, parsed.recovery.SerializeCompressed()) {
+		!bytesEqualConst(rec.ExternalOwnerWallet, parsed.externalOwner.SerializeCompressed()) {
 		return nil, false
 	}
 	st, err := s.statusFor(context.Background(), vaultID)
@@ -353,12 +352,10 @@ func randomBytes(n int) ([]byte, error) {
 	return out, nil
 }
 
-const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v2"
+const enrollmentPoPDomain = "arkade-2fa-vault/enrollment-pop/v3"
 
-// EnrollmentPoPDigest is the BIP340 message owner and recovery sign. It binds
-// the client enrollment tuple and the hashed v3 public descriptor that
-// ProposeEnrollment returned. The HKDF VaultCosigner child is included only
-// through that descriptor hash.
+// EnrollmentPoPDigest binds the client enrollment tuple and the hashed v4
+// public descriptor. There is no recovery key.
 func EnrollmentPoPDigest(vaultID string, req RegisterRequest) []byte {
 	h := sha256.New()
 	_, _ = h.Write([]byte(enrollmentPoPDomain))
@@ -368,7 +365,6 @@ func EnrollmentPoPDigest(vaultID string, req RegisterRequest) []byte {
 	writePoPField(h, decodePoPHex(req.PhoneDirectP256))
 	writePoPField(h, decodePoPHex(req.PhoneRoutineBIP340Pub))
 	writePoPField(h, decodePoPHex(req.ExternalOwnerWalletXOnly))
-	writePoPField(h, decodePoPHex(req.RecoveryKeyXOnly))
 	writePoPField(h, decodePoPHex(req.DescriptorHash))
 	return h.Sum(nil)
 }
@@ -390,23 +386,18 @@ func decodePoPHex(encoded string) []byte {
 	return raw
 }
 
-func verifyEnrollmentPoP(vaultID string, owner, recovery *btcec.PublicKey, req RegisterRequest) error {
-	if owner == nil || recovery == nil {
-		return fmt.Errorf("tenant owner and recovery pubs required")
+func verifyEnrollmentPoP(vaultID string, owner *btcec.PublicKey, req RegisterRequest) error {
+	if owner == nil {
+		return fmt.Errorf("tenant owner pub required")
 	}
 	if strings.TrimSpace(req.ExternalOwnerProof) == "" && strings.TrimSpace(req.RecoveryProof) == "" {
-		// Pubs are treated as declared ownership. A Schnorr paste is not a
-		// committing transaction and is not required to finish enroll.
 		return nil
 	}
 	if req.DescriptorHash == "" {
 		return fmt.Errorf("enrollment descriptor hash required")
 	}
 	digest := EnrollmentPoPDigest(vaultID, req)
-	if err := verifySchnorrHex(owner, digest, req.ExternalOwnerProof, "externalOwnerProof"); err != nil {
-		return err
-	}
-	return verifySchnorrHex(recovery, digest, req.RecoveryProof, "recoveryProof")
+	return verifySchnorrHex(owner, digest, req.ExternalOwnerProof, "externalOwnerProof")
 }
 
 func verifySchnorrHex(pub *btcec.PublicKey, digest []byte, encoded, name string) error {

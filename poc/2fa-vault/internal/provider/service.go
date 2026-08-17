@@ -192,13 +192,13 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 	if err != nil {
 		return err
 	}
-	op, sv, err := s.makeTrees(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery)
+	op, sv, err := s.makeTrees(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner)
 	if err != nil {
 		return err
 	}
 	descriptor := descriptorFromTrees(
 		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
+		parsed.phoneRoutine, parsed.externalOwner,
 		s.VaultCosignerPub, s.ArkadeCosignerPub,
 		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
 	)
@@ -240,8 +240,8 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	if vaultID == "" || vaultID == fixture.VaultID {
 		return fmt.Errorf("tenant vault id required")
 	}
-	if req.ExternalOwnerWalletXOnly == "" || req.RecoveryKeyXOnly == "" {
-		return fmt.Errorf("tenant owner and recovery pubs required")
+	if req.ExternalOwnerWalletXOnly == "" {
+		return fmt.Errorf("tenant owner pub required")
 	}
 	master, err := s.vaultCosignerMaster()
 	if err != nil {
@@ -262,16 +262,16 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	if req.DescriptorHash == "" || req.DescriptorHash != proposed.DescriptorHash {
 		return fmt.Errorf("enrollment descriptor hash does not match the proposed vault")
 	}
-	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, parsed.recovery, req); err != nil {
+	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, req); err != nil {
 		return err
 	}
-	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, parsed.recovery, child.PubKey())
+	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
 	if err != nil {
 		return err
 	}
 	descriptor := descriptorFromTrees(
 		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-		parsed.phoneRoutine, parsed.externalOwner, parsed.recovery,
+		parsed.phoneRoutine, parsed.externalOwner,
 		child.PubKey(), s.ArkadeCosignerPub,
 		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
 	)
@@ -451,37 +451,34 @@ func (s *Service) parseRegisterRequestWithKeys(
 	if err != nil {
 		return parsed, err
 	}
-	var existingOwner, existingRecovery *btcec.PublicKey
+	var existingOwner *btcec.PublicKey
 	if existing != nil {
 		existingOwner, err = btcec.ParsePubKey(existing.ExternalOwnerWallet)
 		if err != nil {
 			return parsed, fmt.Errorf("stored ExternalOwnerWallet: %w", err)
-		}
-		existingRecovery, err = btcec.ParsePubKey(existing.RecoveryKey)
-		if err != nil {
-			return parsed, fmt.Errorf("stored RecoveryKey: %w", err)
 		}
 	}
 	parsed.externalOwner, err = s.parseOnboardingKey("externalOwnerWalletXOnly", req.ExternalOwnerWalletXOnly, ownerFallback, existingOwner)
 	if err != nil {
 		return parsed, err
 	}
-	parsed.recovery, err = s.parseOnboardingKey("recoveryKeyXOnly", req.RecoveryKeyXOnly, recoveryFallback, existingRecovery)
-	if err != nil {
-		return parsed, err
+	if strings.TrimSpace(req.RecoveryKeyXOnly) != "" {
+		return parsed, fmt.Errorf("recoveryKeyXOnly is retired")
+	}
+	if strings.TrimSpace(req.RecoveryProof) != "" {
+		return parsed, fmt.Errorf("recoveryProof is retired")
 	}
 	parsed.vaultID = req.VaultID
 	return parsed, nil
 }
 
 func sameEnrollmentTuple(c *policy.Credential, parsed parsedRegisterRequest) bool {
-	return c != nil && parsed.phoneRoutine != nil && parsed.externalOwner != nil && parsed.recovery != nil &&
+	return c != nil && parsed.phoneRoutine != nil && parsed.externalOwner != nil &&
 		bytes.Equal(c.ID, parsed.id) &&
 		bytes.Equal(c.WebAuthnP256, parsed.webauthnP256) &&
 		bytes.Equal(c.PhoneDirectP256, parsed.phoneDirectP256) &&
 		bytes.Equal(c.PhoneRoutineBIP340, parsed.phoneRoutine.SerializeCompressed()) &&
 		bytes.Equal(c.ExternalOwnerWallet, parsed.externalOwner.SerializeCompressed()) &&
-		bytes.Equal(c.RecoveryKey, parsed.recovery.SerializeCompressed()) &&
 		(parsed.vaultID == "" || parsed.vaultID == c.VaultID)
 }
 
@@ -571,9 +568,11 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored ExternalOwnerWallet: %w", err)
 	}
-	recovery, err = btcec.ParsePubKey(cred.RecoveryKey)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored RecoveryKey: %w", err)
+	if len(cred.RecoveryKey) > 0 {
+		recovery, err = btcec.ParsePubKey(cred.RecoveryKey)
+		if err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("stored RecoveryKey: %w", err)
+		}
 	}
 	vaultBase, err = btcec.ParsePubKey(cred.VaultCosignerBase)
 	if err != nil {
@@ -590,10 +589,10 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 		PhoneRoutineBIP340:  phoneRoutine,
 		PhoneDirectP256:     cred.PhoneDirectP256,
 		ExternalOwnerWallet: externalOwner,
-		RecoveryKey:         recovery,
 		VaultCosignerBase:   vaultBase,
 		ArkadeCosignerBase:  arkadeBase,
 		CSV:                 opCSV,
+		HardwareCSV:         svCSV,
 		AuthorizationPolicy: authorizationPolicyFromCredential(cred),
 		Network:             cred.Network,
 	})
@@ -602,9 +601,10 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 	}
 	sv, err = vault.NewFromRecord(vault.Record{
 		Kind:                vault.Savings,
+		PhoneRoutineBIP340:  phoneRoutine,
 		ExternalOwnerWallet: externalOwner,
-		RecoveryKey:         recovery,
-		CSV:                 svCSV,
+		CSV:                 opCSV,
+		HardwareCSV:         svCSV,
 		Network:             cred.Network,
 	})
 	if err != nil {
@@ -628,12 +628,12 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 	return phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase, op, sv, nil
 }
 
-func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner, recovery *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
-	return s.makeTreesWithCosigner(phoneRoutine, phoneDirectP256, externalOwner, recovery, s.VaultCosignerPub)
+func (s *Service) makeTrees(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
+	return s.makeTreesWithCosigner(phoneRoutine, phoneDirectP256, externalOwner, s.VaultCosignerPub)
 }
 
-func (s *Service) makeTreesWithCosigner(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner, recovery, vaultCosigner *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
-	if phoneRoutine == nil || externalOwner == nil || recovery == nil || vaultCosigner == nil || s.ArkadeCosignerPub == nil {
+func (s *Service) makeTreesWithCosigner(phoneRoutine *btcec.PublicKey, phoneDirectP256 []byte, externalOwner, vaultCosigner *btcec.PublicKey) (*vault.Built, *vault.Built, error) {
+	if phoneRoutine == nil || externalOwner == nil || vaultCosigner == nil || s.ArkadeCosignerPub == nil {
 		return nil, nil, fmt.Errorf("vault keys not configured")
 	}
 	cfg := s.runtimeConfig()
@@ -643,15 +643,14 @@ func (s *Service) makeTreesWithCosigner(phoneRoutine *btcec.PublicKey, phoneDire
 		PhoneRoutineBIP340:  phoneRoutine,
 		PhoneDirectP256:     phoneDirectP256,
 		ExternalOwnerWallet: externalOwner,
-		RecoveryKey:         recovery,
 		VaultCosignerBase:   vaultCosigner,
 		ArkadeCosignerBase:  s.ArkadeCosignerPub,
-	}, cfg.Network, opCSV, configuredAuthorizationPolicy())
+	}, cfg.Network, opCSV, svCSV, configuredAuthorizationPolicy())
 	if err != nil {
 		return nil, nil, err
 	}
 	sv, err := vault.NewSavingsWithPolicy(
-		externalOwner, recovery, cfg.Network, svCSV,
+		phoneRoutine, externalOwner, cfg.Network, opCSV, svCSV,
 		vaultCosigner, op.TweakedVaultCosigner, s.ArkadeCosignerPub, op.TweakedArkadeCosigner,
 	)
 	if err != nil {
@@ -662,7 +661,7 @@ func (s *Service) makeTreesWithCosigner(phoneRoutine *btcec.PublicKey, phoneDire
 
 func descriptorFromTrees(
 	cfg deployment.Config, id, webauthnP256, phoneDirectP256 []byte,
-	phoneRoutine, externalOwner, recovery, vaultBase, arkadeBase *btcec.PublicKey,
+	phoneRoutine, externalOwner, vaultBase, arkadeBase *btcec.PublicKey,
 	arkadeOrigin, arkadeVersion string, op, sv *vault.Built,
 ) policy.Credential {
 	opCSV := arklib.RelativeLocktime{Type: arklib.LocktimeTypeBlock, Value: cfg.OperationalCSVBlocks}
@@ -673,9 +672,9 @@ func descriptorFromTrees(
 		PhoneDirectP256:       append([]byte(nil), phoneDirectP256...),
 		PhoneRoutineBIP340:    phoneRoutine.SerializeCompressed(),
 		ExternalOwnerWallet:   externalOwner.SerializeCompressed(),
+		RecoveryKey:           retiredRecoveryPlaceholder(),
 		RPID:                  cfg.RPID,
 		Origin:                cfg.ClientOrigin,
-		RecoveryKey:           recovery.SerializeCompressed(),
 		VaultCosignerBase:     vaultBase.SerializeCompressed(),
 		TweakedVaultCosigner:  op.TweakedVaultCosigner.SerializeCompressed(),
 		ArkadeCosignerBase:    arkadeBase.SerializeCompressed(),
@@ -700,6 +699,14 @@ func descriptorFromTrees(
 		AbsoluteFeeCapSats:    fixture.AbsoluteFeeCeiling,
 		FeerateCapSatPerV:     fixture.FeerateCeilingSatPerV,
 	}
+}
+
+func retiredRecoveryPlaceholder() []byte {
+	raw, err := hex.DecodeString(fixture.RecoveryKeyPubHex)
+	if err != nil {
+		return []byte{0}
+	}
+	return raw
 }
 
 func configuredAuthorizationPolicy() vault.AuthorizationPolicy {
@@ -770,9 +777,7 @@ func (s *Service) requireCompatible(cred *policy.Credential) error {
 		if s.ExternalOwnerWallet != nil && !sameCompressed(s.ExternalOwnerWallet, cred.ExternalOwnerWallet) {
 			return fmt.Errorf("runtime ExternalOwnerWallet does not match enrolled vault")
 		}
-		if s.RecoveryKey != nil && !sameCompressed(s.RecoveryKey, cred.RecoveryKey) {
-			return fmt.Errorf("runtime RecoveryKey does not match enrolled vault")
-		}
+		// v4 does not commit RecoveryKey. Ignore leftover column bytes.
 		if err := requireSignerCompatible("VaultCosigner", s.VaultCosignerPub, s.DeprecatedVaultCosigners, cred.VaultCosignerBase); err != nil {
 			return err
 		}
@@ -1169,9 +1174,6 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 		if s.ExternalOwnerWallet != nil {
 			st.ExternalOwnerWalletPub = hex.EncodeToString(s.ExternalOwnerWallet.SerializeCompressed())
 		}
-		if s.RecoveryKey != nil {
-			st.RecoveryKeyPub = hex.EncodeToString(s.RecoveryKey.SerializeCompressed())
-		}
 		if s.VaultCosignerPub != nil {
 			st.VaultCosignerBasePub = hex.EncodeToString(s.VaultCosignerPub.SerializeCompressed())
 		}
@@ -1183,7 +1185,6 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 		// Report the persisted descriptor inputs, not merely mutable runtime
 		// fields. LoadVaults/Register already require these to match runtime.
 		st.ExternalOwnerWalletPub = hex.EncodeToString(cred.ExternalOwnerWallet)
-		st.RecoveryKeyPub = hex.EncodeToString(cred.RecoveryKey)
 		st.VaultCosignerBasePub = hex.EncodeToString(cred.VaultCosignerBase)
 		st.ArkadeCosignerBasePub = hex.EncodeToString(cred.ArkadeCosignerBase)
 		st.ArkadeCosignerOrigin = cred.ArkadeCosignerOrigin

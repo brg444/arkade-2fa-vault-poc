@@ -51,7 +51,6 @@ func main() {
 		Ledger:              led,
 		PhoneRoutineBIP340:  phoneRoutine.PubKey(),
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         recoveryKey.PubKey(),
 	}
 
 	if *unsafeLocal {

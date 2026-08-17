@@ -33,6 +33,7 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 	enrolled := &Service{
 		Ledger:              ledger,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    providerKey.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: providerKey},
@@ -81,6 +81,7 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 	}
 
 	otherOffline, err := btcec.NewPrivateKey()
+	_ = otherOffline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = restart.Close() })
-		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey()}
+		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey()}
 		if err := svc.LoadVaults(); err == nil || !strings.Contains(err.Error(), "credential integrity") {
 			t.Fatalf("live credential substitution was not rejected before publish: %v", err)
 		}
@@ -133,7 +134,7 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = restart.Close() })
-		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), RecoveryKey: offline.PubKey(), VaultCosignerPub: providerKey.PubKey()}
+		svc := &Service{Ledger: restart, ExternalOwnerWallet: externalOwner.PubKey(), VaultCosignerPub: providerKey.PubKey()}
 		if err := svc.LoadVaults(); err == nil || !strings.Contains(err.Error(), "credential integrity") {
 			t.Fatalf("derived descriptor corruption was not rejected before rebuild: %v", err)
 		}
@@ -150,7 +151,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:              restart,
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         offline.PubKey(),
 			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
@@ -169,7 +169,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:              restart,
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         offline.PubKey(),
 			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
@@ -178,6 +177,7 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 	})
 
 	t.Run("offline mismatch refused", func(t *testing.T) {
+		t.Skip("v4 does not commit a recovery key; offline identity is not part of the descriptor")
 		restart, err := policy.OpenLedger(dbPath, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -186,7 +186,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:              restart,
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         otherOffline.PubKey(),
 			VaultCosignerPub:    providerKey.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
@@ -203,7 +202,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:              restart,
 			ExternalOwnerWallet: externalOwner.PubKey(),
-			RecoveryKey:         offline.PubKey(),
 			VaultCosignerPub:    rotated.PubKey(),
 		}
 		if err := svc.LoadVaults(); err == nil {
@@ -221,7 +219,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:                   restart,
 			ExternalOwnerWallet:      externalOwner.PubKey(),
-			RecoveryKey:              offline.PubKey(),
 			VaultCosignerPub:         rotated.PubKey(),
 			DeprecatedVaultCosigners: []*btcec.PublicKey{providerKey.PubKey()},
 			VaultSigner:              remote,
@@ -254,7 +251,6 @@ func TestLoadVaultsRebuildsFromStoredDescriptorNotRuntimeKeys(t *testing.T) {
 		svc := &Service{
 			Ledger:                    restart,
 			ExternalOwnerWallet:       externalOwner.PubKey(),
-			RecoveryKey:               offline.PubKey(),
 			VaultCosignerPub:          providerKey.PubKey(),
 			ArkadeCosignerPub:         rotatedArkade.PubKey(),
 			DeprecatedArkadeCosigners: []*btcec.PublicKey{arkadeKey.PubKey()},

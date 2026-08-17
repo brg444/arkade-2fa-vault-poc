@@ -90,10 +90,6 @@ func buildFinalizedCollaborative(t *testing.T, prev *wire.MsgTx) (*wire.MsgTx, d
 	if err != nil {
 		t.Fatal(err)
 	}
-	offline, err := btcec.NewPrivateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
 	externalOwner, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +121,6 @@ func buildFinalizedCollaborative(t *testing.T, prev *wire.MsgTx) (*wire.MsgTx, d
 		PhoneRoutineBIP340:  hot.PubKey(),
 		PhoneDirectP256:     webauthn.CompressedP256(directP256),
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerBase:   providerKey.PubKey(),
 		ArkadeCosignerBase:  arkadeKey.PubKey(),
 	})
@@ -319,10 +314,6 @@ func broadcastAgainstRegtest(t *testing.T, measured onchainSizes) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	offline, err := btcec.NewPrivateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
 	externalOwner, err := btcec.NewPrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -343,7 +334,6 @@ func broadcastAgainstRegtest(t *testing.T, measured onchainSizes) {
 		PhoneRoutineBIP340:  hot.PubKey(),
 		PhoneDirectP256:     webauthn.CompressedP256(p256),
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerBase:   providerKey.PubKey(),
 		ArkadeCosignerBase:  arkadeKey.PubKey(),
 	})

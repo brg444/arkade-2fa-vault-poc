@@ -1,5 +1,5 @@
-// Package fixture pins the v3 Phone/VaultCosigner/ArkadeCosigner routine
-// policy and the separate ExternalOwnerWallet/RecoveryKey admin policy.
+// Package fixture pins the v4 Phone/VaultCosigner/ArkadeCosigner routine
+// policy and the PhoneRoutine+ExternalOwnerWallet admin policy.
 package fixture
 
 import (
@@ -14,9 +14,9 @@ const (
 	RPID   = "localhost"
 	Origin = "http://localhost:8787"
 
-	// OperationalCSVBlocks is short so recovery tests can mine past it.
+	// OperationalCSVBlocks is the device-only delay (lost hardware).
 	OperationalCSVBlocks uint32 = 6
-	// SavingsCSVBlocks is the longer RecoveryKey-only delay.
+	// SavingsCSVBlocks is the hardware-only delay (lost device).
 	SavingsCSVBlocks uint32 = 144
 
 	TxRecipientCapSats  int64 = 50_000
@@ -51,7 +51,7 @@ const (
 
 	// TemplateVersion / PolicyVersion / Network are persisted at enrollment.
 	// A restart with different values must refuse to rebuild the trees.
-	TemplateVersion = "phone-direct-p256-routine-3of3-admin-2of2-v3"
+	TemplateVersion = "phone-direct-p256-routine-3of3-admin-phone-hww-v4"
 	PolicyVersion   = "mandatory-change-tx50k-day100k-fee5k-feerate10-onchain-v3"
 	Network         = "regtest"
 )

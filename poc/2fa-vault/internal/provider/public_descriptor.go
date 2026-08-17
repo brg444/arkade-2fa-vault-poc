@@ -11,9 +11,9 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 )
 
-const publicDescriptorSchema = "arkade-vault/v3"
+const publicDescriptorSchema = "arkade-vault/v4"
 
-// PublicVaultDescriptor is the client v3 hashed descriptor JSON.
+// PublicVaultDescriptor is the client v4 hashed descriptor JSON.
 type PublicVaultDescriptor struct {
 	Schema          string               `json:"schema"`
 	Network         string               `json:"network"`
@@ -32,7 +32,6 @@ type publicVaultKeys struct {
 	PhoneRoutineBip340    string `json:"phoneRoutineBip340"`
 	PhoneDirectP256       string `json:"phoneDirectP256"`
 	ExternalOwnerWallet   string `json:"externalOwnerWallet"`
-	RecoveryKey           string `json:"recoveryKey"`
 	VaultCosignerBase     string `json:"vaultCosignerBase"`
 	TweakedVaultCosigner  string `json:"tweakedVaultCosigner"`
 	ArkadeCosignerBase    string `json:"arkadeCosignerBase"`
@@ -89,7 +88,6 @@ func publicDescriptorFromCredential(c policy.Credential) (PublicVaultDescriptor,
 			PhoneRoutineBip340:    hex.EncodeToString(c.PhoneRoutineBIP340),
 			PhoneDirectP256:       hex.EncodeToString(c.PhoneDirectP256),
 			ExternalOwnerWallet:   hex.EncodeToString(c.ExternalOwnerWallet),
-			RecoveryKey:           hex.EncodeToString(c.RecoveryKey),
 			VaultCosignerBase:     hex.EncodeToString(c.VaultCosignerBase),
 			TweakedVaultCosigner:  xOnlyHex(c.TweakedVaultCosigner),
 			ArkadeCosignerBase:    hex.EncodeToString(c.ArkadeCosignerBase),
@@ -154,7 +152,6 @@ func hashPublicDescriptor(d PublicVaultDescriptor) (string, error) {
 		{d.Keys.PhoneRoutineBip340, "phoneRoutineBip340", 33},
 		{d.Keys.PhoneDirectP256, "phoneDirectP256", 33},
 		{d.Keys.ExternalOwnerWallet, "externalOwnerWallet", 33},
-		{d.Keys.RecoveryKey, "recoveryKey", 33},
 		{d.Keys.VaultCosignerBase, "vaultCosignerBase", 33},
 		{d.Keys.TweakedVaultCosigner, "tweakedVaultCosigner", 32},
 		{d.Keys.ArkadeCosignerBase, "arkadeCosignerBase", 33},

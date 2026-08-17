@@ -209,7 +209,6 @@ func TestAuthorizationScriptRejectsLegacyWebAuthnWireWitness(t *testing.T) {
 	op, err := NewOperational(OperationalKeys{
 		PhoneRoutineBIP340:  f.phoneRoutine.PubKey(),
 		ExternalOwnerWallet: f.externalOwner.PubKey(),
-		RecoveryKey:         f.recovery.PubKey(),
 		VaultCosignerBase:   f.vaultCosigner.PubKey(),
 		ArkadeCosignerBase:  f.arkadeCosigner.PubKey(),
 		PhoneDirectP256:     webauthn.CompressedP256(directKey),

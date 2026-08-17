@@ -34,13 +34,13 @@ func TestTwoTenantsHaveIsolatedDescriptorsCapsAndLoaders(t *testing.T) {
 	arkade, _ := btcec.NewPrivateKey()
 	ownerA, _ := btcec.NewPrivateKey()
 	recA, _ := btcec.NewPrivateKey()
+	_ = recA
 	hotA, _ := btcec.NewPrivateKey()
 	passA, _ := webauthn.NewP256()
 	dirA, _ := webauthn.NewP256()
 	svc := &Service{
 		Ledger:               led,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},
@@ -83,7 +83,6 @@ func TestTwoTenantsHaveIsolatedDescriptorsCapsAndLoaders(t *testing.T) {
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +148,6 @@ func TestTwoTenantsHaveIsolatedDescriptorsCapsAndLoaders(t *testing.T) {
 	restarted := &Service{
 		Ledger:               reopened,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},
@@ -183,13 +181,13 @@ func TestRemoteSignerExpectedKeyIsPerCallNotSharedState(t *testing.T) {
 	arkade, _ := btcec.NewPrivateKey()
 	ownerA, _ := btcec.NewPrivateKey()
 	recA, _ := btcec.NewPrivateKey()
+	_ = recA
 	hotA, _ := btcec.NewPrivateKey()
 	passA, _ := webauthn.NewP256()
 	dirA, _ := webauthn.NewP256()
 	svc := &Service{
 		Ledger:               led,
 		ExternalOwnerWallet:  ownerA.PubKey(),
-		RecoveryKey:          recA.PubKey(),
 		VaultCosignerPub:     master.PubKey(),
 		ArkadeCosignerPub:    arkade.PubKey(),
 		VaultSigner:          LocalSigner{Priv: master},
@@ -230,7 +228,6 @@ func TestRemoteSignerExpectedKeyIsPerCallNotSharedState(t *testing.T) {
 		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(dirB)),
 		PhoneRoutineBIP340Pub:    hex.EncodeToString(hotB.PubKey().SerializeCompressed()),
 		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(ownerB.PubKey())),
-		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recB.PubKey())),
 	})); err != nil {
 		t.Fatal(err)
 	}

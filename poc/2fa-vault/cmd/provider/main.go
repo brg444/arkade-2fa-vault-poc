@@ -71,6 +71,7 @@ func main() {
 		log.Fatal("VAULT_RECOVERY_KEY_PUB / -recovery-key is required (compressed pubkey only)")
 	}
 	recoveryKey, err := parseCompressedPub(*recoveryHex, "RecoveryKey public key")
+	_ = recoveryKey
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -84,7 +85,6 @@ func main() {
 	svc := &provider.Service{
 		Ledger:              led,
 		ExternalOwnerWallet: externalOwner,
-		RecoveryKey:         recoveryKey,
 		Deployment:          runtime,
 	}
 	if *phoneRoutineHex != "" {

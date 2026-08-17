@@ -124,6 +124,7 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 		t.Cleanup(func() { _ = ledger.Close() })
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,6 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 			svc: &Service{
 				Ledger:              ledgers[i],
 				ExternalOwnerWallet: externalOwner.PubKey(),
-				RecoveryKey:         offline.PubKey(),
 				VaultCosignerPub:    providerKey.PubKey(),
 				ArkadeCosignerPub:   arkadeKey.PubKey(),
 				VaultSigner:         LocalSigner{Priv: providerKey},
@@ -244,7 +244,6 @@ func TestProviderBoundaryConcurrentFirstRegistrationPersistsOneVault(t *testing.
 	restarted := &Service{
 		Ledger:              restartLedger,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    providerKey.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: providerKey},
@@ -279,6 +278,7 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	offline, err := btcec.NewPrivateKey()
+	_ = offline
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,6 @@ func TestProviderBoundaryConcurrentEnrollmentAndEndpointReads(t *testing.T) {
 	svc := &Service{
 		Ledger:              ledger,
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         offline.PubKey(),
 		VaultCosignerPub:    providerKey.PubKey(),
 		ArkadeCosignerPub:   arkadeKey.PubKey(),
 		VaultSigner:         LocalSigner{Priv: providerKey},
@@ -418,7 +417,6 @@ func newBoundaryEnv(t *testing.T) *boundaryEnv {
 	service := &Service{
 		Ledger:               ledger,
 		ExternalOwnerWallet:  externalOwnerPriv.PubKey(),
-		RecoveryKey:          recoveryPriv.PubKey(),
 		VaultCosignerPub:     providerPriv.PubKey(),
 		ArkadeCosignerPub:    arkadePriv.PubKey(),
 		VaultSigner:          counting,

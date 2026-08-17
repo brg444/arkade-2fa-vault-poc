@@ -30,10 +30,11 @@ type Record struct {
 	PhoneRoutineBIP340  *btcec.PublicKey
 	PhoneDirectP256     []byte
 	ExternalOwnerWallet *btcec.PublicKey
-	RecoveryKey         *btcec.PublicKey
+	RecoveryKey         *btcec.PublicKey // unused on v4 trees; kept for v3 rebuilds
 	VaultCosignerBase   *btcec.PublicKey
 	ArkadeCosignerBase  *btcec.PublicKey
-	CSV                 arklib.RelativeLocktime
+	CSV                 arklib.RelativeLocktime // device-only delay (6)
+	HardwareCSV         arklib.RelativeLocktime // hardware-only delay (144)
 	AuthorizationPolicy AuthorizationPolicy
 	AuthScript          []byte
 	AuthScriptHash      []byte
@@ -54,9 +55,11 @@ type Built struct {
 
 // Leaves holds decoded leaf scripts and control blocks.
 type Leaves struct {
-	Routine  *Leaf // Operational only
-	Admin    *Leaf
-	Recovery *Leaf
+	Routine     *Leaf // Operational only
+	Admin       *Leaf
+	PhoneCSV    *Leaf // CSV + PhoneRoutineBIP340
+	HardwareCSV *Leaf // CSV + ExternalOwnerWallet
+	Recovery    *Leaf // v3 only
 }
 
 // Leaf is one tapscript path.
@@ -75,14 +78,13 @@ type OperationalKeys struct {
 	PhoneRoutineBIP340  *btcec.PublicKey
 	PhoneDirectP256     []byte
 	ExternalOwnerWallet *btcec.PublicKey
-	RecoveryKey         *btcec.PublicKey
 	VaultCosignerBase   *btcec.PublicKey
 	ArkadeCosignerBase  *btcec.PublicKey
 }
 
 // NewOperational builds the Operational tree: the PhoneRoutineBIP340 signer
-// plus both independently tweaked routine cosigners, the two-key external
-// admin path, and the delayed RecoveryKey path.
+// plus both independently tweaked routine cosigners, the phone+hardware
+// admin path, CSV+phone, and CSV+hardware.
 func NewOperational(keys OperationalKeys) (*Built, error) {
 	return NewOperationalForNetwork(keys, fixture.Network)
 }
@@ -90,12 +92,13 @@ func NewOperational(keys OperationalKeys) (*Built, error) {
 // NewOperationalForNetwork builds the same code-pinned Operational template
 // using the address encoding of an explicitly supported deployment network.
 func NewOperationalForNetwork(keys OperationalKeys, network string) (*Built, error) {
-	return NewOperationalWithPolicy(keys, network, fixture.OperationalCSV(), fixtureAuthorizationPolicy())
+	return NewOperationalWithPolicy(keys, network, fixture.OperationalCSV(), fixture.SavingsCSV(), fixtureAuthorizationPolicy())
 }
 
-// NewOperationalWithPolicy makes the deployment CSV delay and every
-// transaction-local script limit explicit.
-func NewOperationalWithPolicy(keys OperationalKeys, network string, csv arklib.RelativeLocktime, policy AuthorizationPolicy) (*Built, error) {
+// NewOperationalWithPolicy makes both CSV delays and every transaction-local
+// script limit explicit. phoneCSV is the device-only path; hardwareCSV is the
+// hardware-only path.
+func NewOperationalWithPolicy(keys OperationalKeys, network string, phoneCSV, hardwareCSV arklib.RelativeLocktime, policy AuthorizationPolicy) (*Built, error) {
 	auth, err := AuthorizationScript(keys.PhoneDirectP256, policy)
 	if err != nil {
 		return nil, err
@@ -105,10 +108,10 @@ func NewOperationalWithPolicy(keys OperationalKeys, network string, csv arklib.R
 		PhoneRoutineBIP340:  keys.PhoneRoutineBIP340,
 		PhoneDirectP256:     append([]byte(nil), keys.PhoneDirectP256...),
 		ExternalOwnerWallet: keys.ExternalOwnerWallet,
-		RecoveryKey:         keys.RecoveryKey,
 		VaultCosignerBase:   keys.VaultCosignerBase,
 		ArkadeCosignerBase:  keys.ArkadeCosignerBase,
-		CSV:                 csv,
+		CSV:                 phoneCSV,
+		HardwareCSV:         hardwareCSV,
 		AuthorizationPolicy: policy,
 		AuthScript:          auth,
 		AuthScriptHash:      arkade.ArkadeScriptHash(auth),
@@ -126,24 +129,25 @@ func fixtureAuthorizationPolicy() AuthorizationPolicy {
 	}
 }
 
-// NewSavings builds the Savings tree: ExternalOwnerWallet+RecoveryKey and a
-// long CSV+RecoveryKey. Neither routine cosigner appears.
-func NewSavings(externalOwner, recovery *btcec.PublicKey, forbidden ...*btcec.PublicKey) (*Built, error) {
-	return NewSavingsForNetwork(externalOwner, recovery, fixture.Network, forbidden...)
+// NewSavings builds the Savings tree: phone+hardware admin, CSV+phone, and
+// CSV+hardware. Neither routine cosigner appears.
+func NewSavings(phoneRoutine, externalOwner *btcec.PublicKey, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsForNetwork(phoneRoutine, externalOwner, fixture.Network, forbidden...)
 }
 
-// NewSavingsForNetwork builds the ExternalOwnerWallet/RecoveryKey Savings template for network.
-func NewSavingsForNetwork(externalOwner, recovery *btcec.PublicKey, network string, forbidden ...*btcec.PublicKey) (*Built, error) {
-	return NewSavingsWithPolicy(externalOwner, recovery, network, fixture.SavingsCSV(), forbidden...)
+// NewSavingsForNetwork builds the v4 Savings template for network.
+func NewSavingsForNetwork(phoneRoutine, externalOwner *btcec.PublicKey, network string, forbidden ...*btcec.PublicKey) (*Built, error) {
+	return NewSavingsWithPolicy(phoneRoutine, externalOwner, network, fixture.OperationalCSV(), fixture.SavingsCSV(), forbidden...)
 }
 
-// NewSavingsWithPolicy makes the deployment CSV delay explicit.
-func NewSavingsWithPolicy(externalOwner, recovery *btcec.PublicKey, network string, csv arklib.RelativeLocktime, forbidden ...*btcec.PublicKey) (*Built, error) {
+// NewSavingsWithPolicy makes both CSV delays explicit.
+func NewSavingsWithPolicy(phoneRoutine, externalOwner *btcec.PublicKey, network string, phoneCSV, hardwareCSV arklib.RelativeLocktime, forbidden ...*btcec.PublicKey) (*Built, error) {
 	rec := Record{
 		Kind:                Savings,
+		PhoneRoutineBIP340:  phoneRoutine,
 		ExternalOwnerWallet: externalOwner,
-		RecoveryKey:         recovery,
-		CSV:                 csv,
+		CSV:                 phoneCSV,
+		HardwareCSV:         hardwareCSV,
 		Network:             network,
 	}
 	b, err := NewFromRecord(rec)
@@ -164,14 +168,11 @@ func NewSavingsWithPolicy(externalOwner, recovery *btcec.PublicKey, network stri
 // hash that differs from the derived values is rejected; empty fields are
 // filled with the derived values.
 func NewFromRecord(rec Record) (*Built, error) {
-	if rec.ExternalOwnerWallet == nil || rec.RecoveryKey == nil {
-		return nil, fmt.Errorf("external owner wallet and recovery key required")
+	if rec.ExternalOwnerWallet == nil {
+		return nil, fmt.Errorf("external owner wallet required")
 	}
-	if err := requireIndependentXOnly(rec.ExternalOwnerWallet, rec.RecoveryKey); err != nil {
-		return nil, err
-	}
-	if rec.CSV.Value == 0 {
-		return nil, fmt.Errorf("csv required")
+	if rec.CSV.Value == 0 || rec.HardwareCSV.Value == 0 {
+		return nil, fmt.Errorf("csv delays required")
 	}
 	if rec.Network == "" {
 		rec.Network = fixture.Network
@@ -188,7 +189,7 @@ func NewFromRecord(rec Record) (*Built, error) {
 			return nil, fmt.Errorf("arkade cosigner base required")
 		}
 		if err := requireIndependentXOnly(
-			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet, rec.RecoveryKey,
+			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet,
 			rec.VaultCosignerBase, rec.ArkadeCosignerBase,
 		); err != nil {
 			return nil, err
@@ -207,6 +208,12 @@ func NewFromRecord(rec Record) (*Built, error) {
 		rec.AuthScript = append([]byte(nil), auth...)
 		rec.AuthScriptHash = append([]byte(nil), wantHash...)
 	case Savings:
+		if rec.PhoneRoutineBIP340 == nil {
+			return nil, fmt.Errorf("phone routine bip340 key required")
+		}
+		if err := requireIndependentXOnly(rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("invalid vault kind %d", rec.Kind)
 	}
@@ -218,10 +225,14 @@ func build(rec Record) (*Built, error) {
 	if err != nil {
 		return nil, err
 	}
-	admin := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.ExternalOwnerWallet, rec.RecoveryKey}}
-	recovery := &arkscript.CSVMultisigClosure{
-		MultisigClosure: arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.RecoveryKey}},
+	admin := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet}}
+	phoneCSV := &arkscript.CSVMultisigClosure{
+		MultisigClosure: arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.PhoneRoutineBIP340}},
 		Locktime:        rec.CSV,
+	}
+	hardwareCSV := &arkscript.CSVMultisigClosure{
+		MultisigClosure: arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.ExternalOwnerWallet}},
+		Locktime:        rec.HardwareCSV,
 	}
 
 	var closures []arkscript.Closure
@@ -234,16 +245,16 @@ func build(rec Record) (*Built, error) {
 			return nil, fmt.Errorf("arkade tweak is degenerate")
 		}
 		if err := requireIndependentXOnly(
-			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet, rec.RecoveryKey,
+			rec.PhoneRoutineBIP340, rec.ExternalOwnerWallet,
 			rec.VaultCosignerBase, rec.ArkadeCosignerBase,
 			tweakedVaultCosigner, tweakedArkadeCosigner,
 		); err != nil {
 			return nil, err
 		}
 		routine := &arkscript.MultisigClosure{PubKeys: []*btcec.PublicKey{rec.PhoneRoutineBIP340, tweakedVaultCosigner, tweakedArkadeCosigner}}
-		closures = []arkscript.Closure{routine, admin, recovery}
+		closures = []arkscript.Closure{routine, admin, phoneCSV, hardwareCSV}
 	case Savings:
-		closures = []arkscript.Closure{admin, recovery}
+		closures = []arkscript.Closure{admin, phoneCSV, hardwareCSV}
 	default:
 		return nil, fmt.Errorf("invalid vault kind %d", rec.Kind)
 	}
@@ -292,7 +303,11 @@ func build(rec Record) (*Built, error) {
 		if err != nil {
 			return nil, err
 		}
-		leaves.Recovery, err = leafOf("recovery", closures[2])
+		leaves.PhoneCSV, err = leafOf("phone-csv", closures[2])
+		if err != nil {
+			return nil, err
+		}
+		leaves.HardwareCSV, err = leafOf("hardware-csv", closures[3])
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +316,11 @@ func build(rec Record) (*Built, error) {
 		if err != nil {
 			return nil, err
 		}
-		leaves.Recovery, err = leafOf("recovery", closures[1])
+		leaves.PhoneCSV, err = leafOf("phone-csv", closures[1])
+		if err != nil {
+			return nil, err
+		}
+		leaves.HardwareCSV, err = leafOf("hardware-csv", closures[2])
 		if err != nil {
 			return nil, err
 		}
@@ -365,7 +384,7 @@ func (b *Built) ContainsKey(pub *btcec.PublicKey) bool {
 		return false
 	}
 	want := schnorr.SerializePubKey(pub)
-	for _, leaf := range []*Leaf{b.Leaves.Routine, b.Leaves.Admin, b.Leaves.Recovery} {
+	for _, leaf := range []*Leaf{b.Leaves.Routine, b.Leaves.Admin, b.Leaves.PhoneCSV, b.Leaves.HardwareCSV, b.Leaves.Recovery} {
 		if leafContainsKey(leaf, want) {
 			return true
 		}

@@ -512,8 +512,10 @@ func validateCredential(c Credential) error {
 	if err := requireCompressedKey(c.ExternalOwnerWallet, "external owner wallet pubkey"); err != nil {
 		return err
 	}
-	if err := requireCompressedKey(c.RecoveryKey, "recovery key pubkey"); err != nil {
-		return err
+	if len(c.RecoveryKey) > 0 {
+		if err := requireCompressedKey(c.RecoveryKey, "recovery key pubkey"); err != nil {
+			return err
+		}
 	}
 	if err := requireCompressedKey(c.VaultCosignerBase, "vault cosigner base pubkey"); err != nil {
 		return err
@@ -527,11 +529,11 @@ func validateCredential(c Credential) error {
 	if err := requireCompressedKey(c.TweakedArkadeCosigner, "tweaked arkade cosigner pubkey"); err != nil {
 		return err
 	}
-	if err := requireIndependentXOnlyKeys(
-		c.PhoneRoutineBIP340, c.ExternalOwnerWallet, c.RecoveryKey,
-		c.VaultCosignerBase, c.TweakedVaultCosigner,
-		c.ArkadeCosignerBase, c.TweakedArkadeCosigner,
-	); err != nil {
+	independents := [][]byte{c.PhoneRoutineBIP340, c.ExternalOwnerWallet, c.VaultCosignerBase, c.TweakedVaultCosigner, c.ArkadeCosignerBase, c.TweakedArkadeCosigner}
+	if len(c.RecoveryKey) > 0 {
+		independents = [][]byte{c.PhoneRoutineBIP340, c.ExternalOwnerWallet, c.RecoveryKey, c.VaultCosignerBase, c.TweakedVaultCosigner, c.ArkadeCosignerBase, c.TweakedArkadeCosigner}
+	}
+	if err := requireIndependentXOnlyKeys(independents...); err != nil {
 		return err
 	}
 	if c.Network != "regtest" && (c.ArkadeCosignerOrigin == "" || c.ArkadeCosignerVersion == "") {

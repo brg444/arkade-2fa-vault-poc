@@ -49,7 +49,6 @@ func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 		PhoneRoutineBIP340:  phoneRoutine.PubKey(),
 		PhoneDirectP256:     webauthn.CompressedP256(p256),
 		ExternalOwnerWallet: externalOwner.PubKey(),
-		RecoveryKey:         recovery.PubKey(),
 		VaultCosignerBase:   vaultCosigner.PubKey(),
 		ArkadeCosignerBase:  arkadeCosigner.PubKey(),
 	})
@@ -57,7 +56,7 @@ func newSecurityVaultFixture(t *testing.T) *securityVaultFixture {
 		t.Fatalf("build Operational vault: %v", err)
 	}
 	savings, err := NewSavings(
-		externalOwner.PubKey(), recovery.PubKey(),
+		phoneRoutine.PubKey(), externalOwner.PubKey(),
 		vaultCosigner.PubKey(), operational.TweakedVaultCosigner,
 		arkadeCosigner.PubKey(), operational.TweakedArkadeCosigner,
 	)
