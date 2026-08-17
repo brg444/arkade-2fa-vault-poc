@@ -83,8 +83,9 @@ func TestPreV5BackupRequiresV4LegacyIssuanceAndRefusesRecreation(t *testing.T) {
 	if err := os.Remove(dest); err != nil {
 		t.Fatal(err)
 	}
-	if err := led.BackupGenerationIfAbsent(dest, BackupGenerationPreV5); err != nil {
-		t.Fatalf("missing pre-v5 after v5 must skip, not fail start: %v", err)
+	if err := led.BackupGenerationIfAbsent(dest, BackupGenerationPreV5); err == nil ||
+		!strings.Contains(err.Error(), "already advanced") {
+		t.Fatalf("recreated pre-v5 after live advanced: %v", err)
 	}
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Fatal("advanced live invented a historical backup")

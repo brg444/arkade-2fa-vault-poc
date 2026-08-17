@@ -257,20 +257,13 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 		t.Fatal("runtime close did not zero and release credential integrity key")
 	}
 
-	// A restart with a persisted enrollment neither requires nor reads the
-	// one-time token. Pointing at an absent file makes that invariant explicit.
+	// Empty boot seals issuance and now lands on schema 5 with no .pre-v5.
+	// Restarting a singleton credential without that snapshot must fail closed.
+	// Fresh-tenant reopen is TestFreshOnlyReopenAfterEmptyBootAndTenantEnroll.
 	cfg.EnrollmentTokenFile = filepath.Join(dir, "already-removed-token")
-	restarted, err := openWithDialers(context.Background(), cfg, dial, emulatorDial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
-	if len(restarted.service.EnrollmentTokenHash) != 0 {
-		t.Fatal("restart reloaded an enrollment token hash")
-	}
-	status, err := restarted.service.Status(context.Background())
-	if err != nil || !status.Enrolled || status.Network != deployment.NetworkMutinynet {
-		t.Fatalf("restart status = %+v, %v", status, err)
+	if _, err := openWithDialers(context.Background(), cfg, dial, emulatorDial); err == nil ||
+		!strings.Contains(err.Error(), "already advanced") {
+		t.Fatalf("singleton restart without pre-v5: %v", err)
 	}
 }
 
@@ -346,18 +339,10 @@ func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *te
 		t.Fatal(err)
 	}
 
-	// Persisted public roles, not optional environment text, are authoritative
-	// after the first winner commits the singleton credential row.
-	restarted, err := openWithDialers(context.Background(), cfg, dial, emulatorDial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.Close(); err != nil {
-		t.Fatal(err)
-	}
-	wrong, _ := btcec.NewPrivateKey()
-	cfg.ExternalOwnerWalletPubHex = hex.EncodeToString(wrong.PubKey().SerializeCompressed())
-	if _, err := openWithDialers(context.Background(), cfg, dial, emulatorDial); err == nil || !strings.Contains(err.Error(), "does not match the persisted vault") {
-		t.Fatalf("post-enrollment environment override accepted: %v", err)
+	// Persisted public roles were committed in-process above. Restarting this
+	// sealed v5 singleton without a historical .pre-v5 must fail closed.
+	if _, err := openWithDialers(context.Background(), cfg, dial, emulatorDial); err == nil ||
+		!strings.Contains(err.Error(), "already advanced") {
+		t.Fatalf("singleton restart without pre-v5: %v", err)
 	}
 }

@@ -90,6 +90,11 @@ func TestFreshOnlyReopenAfterEmptyBootAndTenantEnroll(t *testing.T) {
 	if err := reopened.MigrateLegacySingleton(key); err != nil {
 		t.Fatal(err)
 	}
+	// Runtime always calls this before MigrateIssuanceIntegrity. Fresh tenants
+	// have no singleton credential, so a missing .pre-v5 is a no-op, not skip-via-sealed.
+	if err := reopened.BackupGenerationIfAbsent(path+".pre-v5", policy.BackupGenerationPreV5); err != nil {
+		t.Fatalf("reopen pre-v5 backup: %v", err)
+	}
 	if err := reopened.MigrateIssuanceIntegrity(key); err != nil {
 		t.Fatal(err)
 	}

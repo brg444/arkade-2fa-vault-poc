@@ -75,11 +75,6 @@ func (l *Ledger) BackupGenerationIfAbsent(dest string, gen BackupGeneration) err
 	}
 	if !liveGen.canCreate(gen) {
 		if gen == BackupGenerationPreV5 && liveGen.HasMeta && liveGen.MetaVersion >= schemaVersionIssuanceMAC {
-			// Never invent a historical .pre-v5. Sealed-from-birth empty boots
-			// never had that generation, so missing dest is skip, not start-fail.
-			if liveGen.IssuanceSealed {
-				return nil
-			}
 			return fmt.Errorf("cannot create %s backup: live database has already advanced past this generation", gen)
 		}
 		// A historical snapshot cannot be invented from a later generation.
