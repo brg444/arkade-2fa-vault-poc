@@ -6,7 +6,7 @@ services:
     container_name: emulator
     restart: unless-stopped
     ports:
-      - 7073:7073
+      - 127.0.0.1:7073:7073
     environment:
        # public key has odd y
       - EMULATOR_SECRET_KEY=5646b2e23bbb82491fb4ef262079ff17594d5e873fc6bcea5f1453edbe1029b1
@@ -19,7 +19,7 @@ services:
     image: postgres:16
     container_name: pgnbxplorer
     ports:
-      - 5433:5432
+      - 127.0.0.1:5433:5432
     environment:
       - POSTGRES_HOST_AUTH_METHOD=trust
     volumes:
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
     container_name: nbxplorer
     ports:
-      - 32838:32838
+      - 127.0.0.1:32838:32838
     image: nicolasdorier/nbxplorer:2.5.30
     environment:
       - NBXPLORER_NETWORK=regtest
@@ -64,7 +64,7 @@ services:
     depends_on:
       - nbxplorer
     ports:
-      - "6060:6060"
+      - "127.0.0.1:6060:6060"
     environment:
       - ARKD_WALLET_LOG_LEVEL=5
       - ARKD_WALLET_NBXPLORER_URL=http://nbxplorer:32838
@@ -81,8 +81,8 @@ services:
     depends_on:
       - arkd-wallet
     ports:
-      - "7070:7070"
-      - "7071:7071"
+      - "127.0.0.1:7070:7070"
+      - "127.0.0.1:7071:7071"
     environment:
       - ARKD_LOG_LEVEL=6
       - ARKD_NO_MACAROONS=true

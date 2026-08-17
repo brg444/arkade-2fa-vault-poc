@@ -8,15 +8,18 @@ on:
     branches:
       - '*'
 
+permissions:
+  contents: read
+
 jobs:
   format:
     name: format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       - name: Check formatting
         run: |
@@ -27,10 +30,10 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       - name: Run linter
         uses: golangci/golangci-lint-action@v7

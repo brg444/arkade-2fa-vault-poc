@@ -28,6 +28,7 @@ import {
   stagePending,
   promotePending,
   assertDescriptorIdentity,
+  assertPinnedDepositOutputs,
 } from "./enrollstore.js";
 import { createAuthorizeRetryState } from "./authorizeretry.js";
 import { compressedES256PublicKey } from "./webauthnkey.js";
@@ -166,24 +167,27 @@ function intentKey(intent) {
 async function refresh() {
   const st = await api("/v1/status");
   const demo = await demoInfo();
-  st.savingsExcludesRoutineCosigners = !!st.savingsExcludesRoutineCosigners;
-  $("status").textContent = JSON.stringify({
-    ...st,
-    savingsExcludesRoutineCosigners: st.savingsExcludesRoutineCosigners,
-    preflightChallengeTrust: "browser independently recomputes the witness-masked Arkade sighash and requires an exact preflight match",
-  }, null, 2);
-  if ($("savings-note")) {
-    $("savings-note").textContent = st.savingsAddress
-      ? (st.savingsExcludesRoutineCosigners
-        ? "Savings excludes PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner."
-        : "Savings routine-cosigner exclusion check failed.")
-      : "";
-  }
-  toggleDemo(demo);
   const rec = loadRec();
   if (rec?.phoneRoutineBip340Pub && st.phoneRoutineBip340Pub) assertPhoneRoutineBIP340Pub(rec.phoneRoutineBip340Pub, rec.phoneRoutineBip340Pub, st.phoneRoutineBip340Pub);
   if (rec?.phoneDirectP256) assertDirectP256(rec.phoneDirectP256, rec.phoneDirectP256, st.phoneDirectP256);
   if (rec) reconcileSignerIdentity(rec, st);
+  const deposits = rec?.operationalAddress ? assertPinnedDepositOutputs(rec, st) : null;
+  if (deposits) {
+    st.operationalAddress = deposits.operationalAddress;
+    st.operationalScript = deposits.operationalScript;
+    st.savingsAddress = deposits.savingsAddress;
+  }
+  $("status").textContent = JSON.stringify({
+    ...st,
+    savingsExcludesRoutineCosigners: Boolean(deposits?.savingsAddress),
+    preflightChallengeTrust: "browser independently recomputes the witness-masked Arkade sighash and requires an exact preflight match",
+  }, null, 2);
+  if ($("savings-note")) {
+    $("savings-note").textContent = deposits?.savingsAddress
+      ? "Savings excludes PhoneRoutineBIP340, VaultCosigner, and ArkadeCosigner."
+      : "";
+  }
+  toggleDemo(demo);
   return st;
 }
 
@@ -280,7 +284,7 @@ async function enroll() {
     if (bytesToHex(webauthnP256) === bytesToHex(derivedAuth.pub)) {
       throw new Error("direct-auth P-256 collided with WebAuthn credential P-256");
     }
-    phoneRoutineSecret = crypto.getRandomValues(new Uint8Array(32));
+    phoneRoutineSecret = randomPhoneRoutineSecret();
     const phoneRoutineBip340Pub = secp256k1.getPublicKey(phoneRoutineSecret, true);
     const derived = bytesToHex(phoneRoutineBip340Pub);
     const kek = await deriveKEK(prf);
@@ -310,9 +314,11 @@ async function enroll() {
     Object.assign(rec, reconcileSignerIdentity(null, st));
     rec.operationalAddress = st.operationalAddress || "";
     rec.operationalScript = st.operationalScript || "";
+    rec.savingsAddress = st.savingsAddress || "";
     stagePending(localStorage, rec);
     promotePending(localStorage);
-    $("out").textContent = "enrolled; fund the Operational address shown in status";
+    await refresh();
+    $("out").textContent = "enrolled; fund the pinned Operational address";
   } finally {
     zeroBytes(prf, scalar, phoneRoutineSecret);
   }
@@ -365,10 +371,12 @@ async function recoverPendingEnrollment(rec) {
       ...rec,
       operationalAddress: st.operationalAddress || "",
       operationalScript: st.operationalScript || "",
+      savingsAddress: st.savingsAddress || "",
       ...signerIdentity,
     };
     stagePending(localStorage, next);
     promotePending(localStorage);
+    await refresh();
     $("out").textContent = "pending enrollment recovered after fresh user verification";
   } finally {
     zeroBytes(prf, scalar, phoneRoutineSecret);
@@ -616,6 +624,18 @@ async function demoReject(kind) {
   } catch (err) {
     $("out").textContent = err.message;
   }
+}
+
+function randomPhoneRoutineSecret() {
+  if (secp256k1.utils && typeof secp256k1.utils.randomPrivateKey === "function") {
+    return secp256k1.utils.randomPrivateKey();
+  }
+  for (let i = 0; i < 256; i++) {
+    const scalar = crypto.getRandomValues(new Uint8Array(32));
+    if (secp256k1.utils.isValidPrivateKey(scalar)) return scalar;
+    zeroBytes(scalar);
+  }
+  throw new Error("phone routine scalar out of range");
 }
 
 function toUint8(value) {

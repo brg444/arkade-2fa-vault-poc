@@ -8,27 +8,35 @@ on:
     branches:
       - '*'
 
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       - name: Run unit tests
         run: make test
+
+      - name: govulncheck authorizer
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./poc/2fa-vault/cmd/authorizer
 
   integration:
     name: integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
 
       - name: Run Nigiri
         uses: vulpemventures/nigiri-github-action@v1

@@ -4,6 +4,7 @@ import {
   STORE_PENDING,
   assertArkadeCosignerIdentity,
   assertDescriptorIdentity,
+  assertPinnedDepositOutputs,
   loadMain,
   loadPending,
   promotePending,
@@ -48,6 +49,7 @@ function rec(over = {}) {
     policyVersion: "mandatory-change-onchain-v3",
     operationalAddress: "bcrt1ptest-v3",
     operationalScript: "5120" + "77".repeat(32),
+    savingsAddress: "bcrt1psavings-v3",
     ...over,
   };
 }
@@ -170,6 +172,23 @@ test("main enrollment records require the full v3 descriptor identity", () => {
     storage.setItem(STORE, JSON.stringify(broken));
     expect(() => loadMain(storage)).toThrow(/descriptor.*incomplete/);
   }
+});
+
+test("pinned deposit outputs reject a substituted status address", () => {
+  const persisted = rec();
+  expect(assertPinnedDepositOutputs(persisted, persisted)).toEqual({
+    operationalAddress: persisted.operationalAddress,
+    operationalScript: persisted.operationalScript,
+    savingsAddress: persisted.savingsAddress,
+  });
+  expect(() => assertPinnedDepositOutputs(persisted, {
+    ...persisted,
+    operationalAddress: "bcrt1p-attacker",
+  })).toThrow(/deposit outputs/);
+  expect(() => assertPinnedDepositOutputs(persisted, {
+    ...persisted,
+    savingsAddress: "bcrt1p-attacker-savings",
+  })).toThrow(/deposit outputs/);
 });
 
 test("descriptor reconciliation pins ExternalOwnerWallet, RecoveryKey, and both routine cosigners", () => {

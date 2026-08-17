@@ -12,10 +12,15 @@
 		}
 	}
 
+	request_body {
+		max_size 1MB
+	}
+
 	header {
 		-Server
+		Cache-Control "no-store"
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'none'"
-		Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=()"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=(), publickey-credentials-get=(self)"
 		Referrer-Policy "no-referrer"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"

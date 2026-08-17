@@ -207,6 +207,9 @@ func decodeMutation(r *http.Request, dst any, expectedOrigin string) error {
 	if expectedOrigin == "" || r.Header.Get("Origin") != expectedOrigin {
 		return &mutationError{http.StatusForbidden, "origin"}
 	}
+	if r.ContentLength > maxJSONBody {
+		return &mutationError{http.StatusRequestEntityTooLarge, "request too large"}
+	}
 	r.Body = http.MaxBytesReader(nil, r.Body, maxJSONBody)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -248,15 +251,36 @@ func writeJSON(w http.ResponseWriter, v any, err error) {
 			log.Printf("provider error: %s", redact(err.Error()))
 		}
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": publicErrorMessage(err)})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func publicErrorMessage(err error) string {
+	if err == nil {
+		return "request rejected"
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	for _, leak := range []string{
+		"http ", "esplora", "sqlite", "sql:", "public arkade", "/app/",
+		"panic", "stack", "goroutine", "\n",
+	} {
+		if strings.Contains(lower, leak) {
+			return "request rejected"
+		}
+	}
+	return msg
+}
+
 func withCORS(next http.Handler, origin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", ContentSecurityPolicy)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+EnrollmentTokenHeader)
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")

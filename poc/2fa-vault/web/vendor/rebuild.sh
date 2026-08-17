@@ -8,7 +8,7 @@ trap cleanup EXIT
 
 cd "$WORKDIR"
 bun init -y >/dev/null
-bun add @noble/curves@1.8.1 @scure/btc-signer@1.6.0
+bun add @noble/curves@1.8.1 @scure/btc-signer@1.6.0 @noble/hashes@1.7.1 @scure/base@1.2.6 micro-packed@0.7.3
 
 cat > secp256k1.entry.js <<'EOF'
 export { secp256k1, schnorr } from "@noble/curves/secp256k1.js";

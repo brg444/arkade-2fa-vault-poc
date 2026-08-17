@@ -68,19 +68,21 @@ context. Restrict it to the operator account.
 
 ```bash
 install -d -m 700 /absolute/operator/path/vault-secrets
+umask 077
 openssl rand -hex 32 > /absolute/operator/path/vault-secrets/vault-cosigner-key
 openssl rand -hex 32 > /absolute/operator/path/vault-secrets/enrollment-token
-chmod 0444 /absolute/operator/path/vault-secrets/vault-cosigner-key
-chmod 0444 /absolute/operator/path/vault-secrets/enrollment-token
+chmod 0600 /absolute/operator/path/vault-secrets/vault-cosigner-key
+chmod 0600 /absolute/operator/path/vault-secrets/enrollment-token
 ```
 
 The `0700` parent directory prevents other host users from traversing to the
-files. The immutable files themselves use mode `0444` so the dedicated
-container UID 10001 can read the file-backed Compose secret after it is bind
-mounted. A normal owner-only mode 0600 file may be unreadable to that non-root
-UID on Linux. Compose `uid/gid/mode` fields are not a portable fix for `file:`
-sources because engines may ignore them. Do not make the authorizer root to
-work around this. The VaultCosigner key remains mounted only into the authorizer.
+files. Host secret files stay owner-only mode `0600`. Compose `file:` secrets
+are remounted inside the container for UID 10001 (engines typically present
+them as `0444` in that mount namespace); do not chmod the host files world-
+readable to compensate, and do not make the authorizer root. Compose
+`uid/gid/mode` fields are not a portable fix for `file:` sources because
+engines may ignore them. The VaultCosigner key remains mounted only into the
+authorizer.
 
 The VaultCosigner-key file must contain exactly one valid 32-byte secp256k1 scalar
 as 64 hex characters, with an optional final LF. Startup rejects zero,

@@ -29,10 +29,16 @@ func ComputeArkadeScriptPublicKey(pubKey *btcec.PublicKey, scriptHash []byte) *b
 		resultJacobian btcec.JacobianPoint
 	)
 	tweakKey, _ := btcec.PrivKeyFromBytes(scriptHash)
+	if tweakKey.Key.IsZero() {
+		return nil
+	}
 	btcec.ScalarBaseMultNonConst(&tweakKey.Key, &tweakJacobian)
 
 	pubKey.AsJacobian(&pubKeyJacobian)
 	btcec.AddNonConst(&pubKeyJacobian, &tweakJacobian, &resultJacobian)
+	if resultJacobian.Z.IsZero() {
+		return nil
+	}
 
 	resultJacobian.ToAffine()
 	return btcec.NewPublicKey(&resultJacobian.X, &resultJacobian.Y)
@@ -47,8 +53,14 @@ func ComputeArkadeScriptPrivateKey(privKey *btcec.PrivateKey, scriptHash []byte)
 
 	tweakScalar := new(btcec.ModNScalar)
 	tweakScalar.SetByteSlice(scriptHash)
+	if tweakScalar.IsZero() {
+		return nil
+	}
 
 	tweakScalar.Add(&privKeyScalar)
+	if tweakScalar.IsZero() {
+		return nil
+	}
 
 	return &btcec.PrivateKey{Key: *tweakScalar}
 }

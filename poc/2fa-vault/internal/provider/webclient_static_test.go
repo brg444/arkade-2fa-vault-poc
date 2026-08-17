@@ -37,6 +37,12 @@ func TestReviewerDirectP256BrowserBundleIsVendoredAndPinned(t *testing.T) {
 	if !bytes.Contains(app, []byte("assertArkadeChallenge(reviewed.parsed.arkadeChallenge, pre.challenge)")) {
 		t.Fatal("browser ceremony must compare its independent Arkade digest to preflight")
 	}
+	if !bytes.Contains(app, []byte("assertPinnedDepositOutputs(rec, st)")) {
+		t.Fatal("browser must pin displayed deposit addresses to the local enrollment record")
+	}
+	if !bytes.Contains(app, []byte("randomPhoneRoutineSecret()")) {
+		t.Fatal("browser must rejection-sample the PhoneRoutineBIP340 scalar")
+	}
 	recoveryStart := bytes.Index(app, []byte("async function recoverPendingEnrollment"))
 	recoveryEnd := bytes.Index(app, []byte("function operationalFrom"))
 	if recoveryStart < 0 || recoveryEnd <= recoveryStart {
@@ -125,35 +131,39 @@ func TestReviewerDirectP256BrowserBundleIsVendoredAndPinned(t *testing.T) {
 	}
 
 	vendorDir := filepath.Join(webDir, "vendor")
-	artifact, err := os.ReadFile(filepath.Join(vendorDir, "p256.js"))
-	if err != nil {
-		t.Fatalf("vendored P-256 bundle: %v", err)
-	}
-	if len(artifact) == 0 {
-		t.Fatal("vendored P-256 bundle is empty")
-	}
-
 	rebuild, err := os.ReadFile(filepath.Join(vendorDir, "rebuild.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(rebuild, []byte(`export { p256 } from "@noble/curves/p256.js"`)) ||
 		!bytes.Contains(rebuild, []byte(`bun build ./p256.entry.js --outfile "$OUT/p256.js"`)) ||
-		!bytes.Contains(rebuild, []byte(`"$OUT/p256.js"`)) {
-		t.Fatal("vendor rebuild recipe does not export, bun-build, and hash p256.js")
+		!bytes.Contains(rebuild, []byte(`"$OUT/p256.js"`)) ||
+		!bytes.Contains(rebuild, []byte(`@noble/hashes@1.7.1`)) ||
+		!bytes.Contains(rebuild, []byte(`@scure/base@1.2.6`)) ||
+		!bytes.Contains(rebuild, []byte(`micro-packed@0.7.3`)) {
+		t.Fatal("vendor rebuild recipe does not pin, export, bun-build, and hash the signing artifacts")
 	}
 
 	notice, err := os.ReadFile(filepath.Join(vendorDir, "NOTICE.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pinned := regexp.MustCompile("`p256\\.js` \\| `([0-9a-f]{64})`").FindSubmatch(notice)
-	if len(pinned) != 2 {
-		t.Fatal("NOTICE.md does not pin the p256.js artifact SHA-256")
-	}
-	sum := sha256.Sum256(artifact)
-	if got, want := hex.EncodeToString(sum[:]), string(pinned[1]); got != want {
-		t.Fatalf("p256.js SHA-256 = %s, NOTICE.md pins %s", got, want)
+	for _, name := range []string{"p256.js", "secp256k1.js", "btc-signer.js"} {
+		artifact, err := os.ReadFile(filepath.Join(vendorDir, name))
+		if err != nil {
+			t.Fatalf("vendored %s: %v", name, err)
+		}
+		if len(artifact) == 0 {
+			t.Fatalf("vendored %s is empty", name)
+		}
+		pinned := regexp.MustCompile("`"+regexp.QuoteMeta(name)+"` \\| `([0-9a-f]{64})`").FindSubmatch(notice)
+		if len(pinned) != 2 {
+			t.Fatalf("NOTICE.md does not pin the %s artifact SHA-256", name)
+		}
+		sum := sha256.Sum256(artifact)
+		if got, want := hex.EncodeToString(sum[:]), string(pinned[1]); got != want {
+			t.Fatalf("%s SHA-256 = %s, NOTICE.md pins %s", name, got, want)
+		}
 	}
 }
 

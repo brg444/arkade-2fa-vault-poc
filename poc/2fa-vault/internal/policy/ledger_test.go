@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -40,11 +41,19 @@ func (c *manualClock) Set(now time.Time) {
 	c.mu.Unlock()
 }
 
+func testIntegrityKey() []byte {
+	sum := sha256.Sum256([]byte("arkade-2fa-vault/test-issuance-integrity"))
+	return sum[:]
+}
+
 func openTestLedger(t *testing.T, clock Clock) *Ledger {
 	t.Helper()
 	led, err := OpenLedger(filepath.Join(t.TempDir(), "ledger.sqlite"), clock)
 	if err != nil {
 		t.Fatalf("open ledger: %v", err)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatalf("issuance integrity key: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := led.Close(); err != nil {
@@ -195,6 +204,7 @@ func TestCredentialIntegrityAuthenticatesEveryCanonicalFieldAndRestart(t *testin
 		{"operational script", func(c *Credential) { c.OperationalScript[0] ^= 1 }},
 		{"savings address", func(c *Credential) { c.SavingsAddress += "x" }},
 		{"savings script", func(c *Credential) { c.SavingsScript[0] ^= 1 }},
+		{"webauthn sign count", func(c *Credential) { c.WebAuthnSignCount++ }},
 		{"recipient dust", func(c *Credential) { c.RecipientDustSats++ }},
 		{"transaction cap", func(c *Credential) { c.TxRecipientCapSats++ }},
 		{"period allowance", func(c *Credential) { c.PeriodAllowanceSats++ }},
@@ -311,6 +321,9 @@ func TestConcurrentFirstEnrollmentHasOneAtomicDurableWinner(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open ledger handle %d: %v", i, err)
 		}
+		if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+			t.Fatalf("integrity key %d: %v", i, err)
+		}
 		ledgers[i] = led
 		t.Cleanup(func() { _ = led.Close() })
 	}
@@ -389,21 +402,26 @@ func TestPeriodStartAndAllowanceRolloverAtUTCMidnight(t *testing.T) {
 
 	clock.Set(time.Date(2026, 8, 16, 8, 0, 0, 0, utcPlusEight))
 	if got, want := led.PeriodStart(), "2026-08-16"; got != want {
-		t.Fatalf("period after rollover = %q, want %q", got, want)
+		t.Fatalf("period label after midnight = %q, want %q", got, want)
 	}
 	if _, _, err := led.Issue(ctx, "vault-a", digest(0x02), 90, 3, 100,
-		func(context.Context) (string, error) { return "signed-day-two", nil }); err != nil {
-		t.Fatalf("new UTC period did not reset allowance: %v", err)
+		func(context.Context) (string, error) { return "signed-day-two", nil }); err == nil {
+		t.Fatal("calendar-day rollover must not reset a rolling 24h allowance")
 	}
 
-	for period, want := range map[string]int64{"2026-08-15": 93, "2026-08-16": 93} {
-		got, err := led.SpentInPeriod(ctx, "vault-a", period)
-		if err != nil {
-			t.Fatalf("spent in %s: %v", period, err)
-		}
-		if got != want {
-			t.Fatalf("spent in %s = %d, want %d", period, got, want)
-		}
+	spent, err := led.SpentInPeriod(ctx, "vault-a", led.PeriodStart())
+	if err != nil || spent != 93 {
+		t.Fatalf("spent just after midnight = %d, err=%v; want 93", spent, err)
+	}
+
+	clock.Set(time.Date(2026, 8, 17, 8, 0, 0, 0, utcPlusEight))
+	if _, _, err := led.Issue(ctx, "vault-a", digest(0x02), 90, 3, 100,
+		func(context.Context) (string, error) { return "signed-after-window", nil }); err != nil {
+		t.Fatalf("issue after 24h window: %v", err)
+	}
+	spent, err = led.SpentInPeriod(ctx, "vault-a", led.PeriodStart())
+	if err != nil || spent != 93 {
+		t.Fatalf("spent after 24h window = %d, err=%v; want 93", spent, err)
 	}
 }
 
@@ -509,6 +527,9 @@ func TestConcurrentLedgerHandlesCannotInterleaveBudgetCheckAndReservation(t *tes
 		led, err := OpenLedger(path, clock.Now)
 		if err != nil {
 			t.Fatalf("open ledger handle %d: %v", i, err)
+		}
+		if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+			t.Fatalf("integrity key %d: %v", i, err)
 		}
 		ledgers[i] = led
 		t.Cleanup(func() {
@@ -719,6 +740,9 @@ func TestExactIdempotentRetryReturnsPersistedOutputWithoutResigning(t *testing.T
 	if err != nil {
 		t.Fatalf("open ledger: %v", err)
 	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	d := digest(0x50)
 	var signerCalls atomic.Int32
@@ -738,6 +762,9 @@ func TestExactIdempotentRetryReturnsPersistedOutputWithoutResigning(t *testing.T
 	led, err = OpenLedger(path, clock.Now)
 	if err != nil {
 		t.Fatalf("reopen ledger: %v", err)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		if err := led.Close(); err != nil {
@@ -813,16 +840,10 @@ func TestReservedIssuanceCountsAgainstAllowanceAndCannotBeReissued(t *testing.T)
 	led := openTestLedger(t, clock.Now)
 	ctx := context.Background()
 	reservedDigest := digest(0x70)
-	_, err := led.db.Exec(
-		`INSERT INTO issuance
-		 (vault_id, arkade_sighash, period_start, recipient_amount, fee, state, request_psbt, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"vault-a", reservedDigest, led.PeriodStart(), 60, 1, stateReserved,
-		"legacy-external-signer:"+fmt.Sprintf("%x", reservedDigest),
-		clock.Now().UTC().Format(time.RFC3339), clock.Now().UTC().Format(time.RFC3339),
-	)
-	if err != nil {
-		t.Fatalf("seed reserved issuance: %v", err)
+	if _, _, err := led.Issue(ctx, "vault-a", reservedDigest, 60, 1, 100, func(context.Context) (string, error) {
+		return "", fmt.Errorf("ambiguous signer")
+	}); err == nil {
+		t.Fatal("expected reserved issuance after signer failure")
 	}
 
 	spent, err := led.SpentInPeriod(ctx, "vault-a", led.PeriodStart())
@@ -860,6 +881,9 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 	clock := newManualClock(time.Date(2026, 8, 16, 1, 2, 3, 0, time.UTC))
 	led, err := OpenLedger(path, clock.Now)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := led.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -924,6 +948,9 @@ func TestSequentialIssuancePersistsEachStageAndResumesExactRequestAfterRestart(t
 
 	reopened, err := OpenLedger(path, clock.Now)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.SetIntegrityKey(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
@@ -1095,5 +1122,44 @@ func TestAllowanceAdditionCannotOverflow(t *testing.T) {
 	}
 	if got := signerCalls.Load(); got != 0 {
 		t.Fatalf("overflowing allowance request reached signer %d times", got)
+	}
+}
+
+func TestIssuanceMACRejectsTamperedReservation(t *testing.T) {
+	led := openTestLedger(t, nil)
+	ctx := context.Background()
+	if _, _, err := led.Issue(ctx, "vault-a", digest(0xaa), 40, 2, 100,
+		func(context.Context) (string, error) { return "signed", nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.db.Exec(`UPDATE issuance SET recipient_amount = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := led.SpentInPeriod(ctx, "vault-a", led.PeriodStart()); err == nil {
+		t.Fatal("tampered issuance row was accepted")
+	}
+}
+
+func TestWebAuthnSignCountRejectsRegression(t *testing.T) {
+	led := openTestLedger(t, nil)
+	cred := validCredential(0x41)
+	key := bytes.Repeat([]byte{0x42}, 32)
+	if err := SealCredential(&cred, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.Enroll(cred); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.UpdateWebAuthnSignCount(&cred, 7, key); err != nil {
+		t.Fatal(err)
+	}
+	if cred.WebAuthnSignCount != 7 {
+		t.Fatalf("sign count = %d, want 7", cred.WebAuthnSignCount)
+	}
+	if err := led.UpdateWebAuthnSignCount(&cred, 7, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := led.UpdateWebAuthnSignCount(&cred, 3, key); err == nil {
+		t.Fatal("decreased sign count accepted")
 	}
 }

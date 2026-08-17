@@ -46,6 +46,7 @@ export function sameEnrollmentTuple(a, b) {
     hexEq(a?.ciphertext, b?.ciphertext) &&
     optionalHexEq(a?.operationalScript, b?.operationalScript) &&
     String(a?.operationalAddress || "") === String(b?.operationalAddress || "") &&
+    String(a?.savingsAddress || "") === String(b?.savingsAddress || "") &&
     optionalHexEq(a?.externalOwnerWalletPub, b?.externalOwnerWalletPub) &&
     optionalHexEq(a?.recoveryKeyPub, b?.recoveryKeyPub) &&
     optionalHexEq(a?.vaultCosignerBasePub, b?.vaultCosignerBasePub) &&
@@ -83,6 +84,7 @@ function requireCompleteRecord(rec) {
   requireDescriptorIdentity(rec, "persisted descriptor", true);
   requireHex(rec.operationalScript, "operational script", 1, 10_000);
   requireIdentityString(rec.operationalAddress, "operational address", 256, true);
+  requireIdentityString(rec.savingsAddress, "savings address", 256, true);
 }
 
 function requireRegistrationRecord(rec) {
@@ -187,6 +189,24 @@ export function assertDescriptorIdentity(persisted, status) {
     }
   }
   return live;
+}
+
+export function assertPinnedDepositOutputs(persisted, status) {
+  if (!persisted) throw new Error("persisted deposit outputs required");
+  const storedAddress = requireIdentityString(persisted.operationalAddress, "persisted operational address", 256, true);
+  const storedScript = requireHex(persisted.operationalScript, "persisted operational script", 1, 10_000);
+  const storedSavings = requireIdentityString(persisted.savingsAddress, "persisted savings address", 256, true);
+  const liveAddress = requireIdentityString(status?.operationalAddress, "status operational address", 256, true);
+  const liveScript = requireHex(status?.operationalScript, "status operational script", 1, 10_000);
+  const liveSavings = requireIdentityString(status?.savingsAddress, "status savings address", 256, true);
+  if (storedAddress !== liveAddress || storedScript !== liveScript || storedSavings !== liveSavings) {
+    throw new Error("persisted deposit outputs do not match vault status");
+  }
+  return {
+    operationalAddress: storedAddress,
+    operationalScript: storedScript,
+    savingsAddress: storedSavings,
+  };
 }
 
 function requireDescriptorIdentity(value, name, required) {
