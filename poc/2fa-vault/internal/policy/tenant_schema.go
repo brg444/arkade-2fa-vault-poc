@@ -207,6 +207,14 @@ func schemaMetaState(q queryRower) (version, rows int, err error) {
 	return version, rows, nil
 }
 
+// SchemaVersion reports the persisted schema_meta version, or 0 if unset.
+func (l *Ledger) SchemaVersion() (int, error) {
+	if l == nil || l.db == nil {
+		return 0, nil
+	}
+	return schemaVersion(l.db)
+}
+
 func schemaVersion(db *sql.DB) (int, error) {
 	ver, n, err := schemaMetaState(db)
 	if err != nil {
