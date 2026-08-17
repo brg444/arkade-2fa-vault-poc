@@ -47,6 +47,28 @@ func TestValidateCreateRequiresAttestedES256Key(t *testing.T) {
 	if _, err := ValidateCreate(cd, badCOSE, challenge, origin, rpID); err == nil {
 		t.Fatal("accepted unsupported cose key")
 	}
+
+	prfAuth, err := AttestedAuthenticatorDataPRF(rpID, credID, compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotPRF, err := ValidateCreate(cd, prfAuth, challenge, origin, rpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotPRF.CredentialID, credID) || !bytes.Equal(gotPRF.WebAuthnP256, compressed) {
+		t.Fatal("PRF/hmac-secret extensions changed the attested credential")
+	}
+
+	edNoMap := append(append([]byte{}, auth...), 0x01)
+	edNoMap[32] |= flagED
+	if _, err := ValidateCreate(cd, edNoMap, challenge, origin, rpID); err == nil {
+		t.Fatal("accepted ED without an extension map")
+	}
+	trailing := append(append([]byte{}, prfAuth...), 0xa0)
+	if _, err := ValidateCreate(cd, trailing, challenge, origin, rpID); err == nil {
+		t.Fatal("accepted trailing bytes after extension map")
+	}
 }
 
 func TestParseAttestationObjectRequiresFmtNone(t *testing.T) {

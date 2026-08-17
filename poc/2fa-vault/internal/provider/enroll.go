@@ -145,7 +145,13 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 		return nil, fmt.Errorf("invite not available")
 	}
 	pending, err := s.Ledger.GetPendingByHandle(req.Handle)
-	if err != nil || pending == nil {
+	if err != nil {
+		return nil, fmt.Errorf("pending enrollment not found")
+	}
+	if pending == nil {
+		if status, ok := s.acceptDuplicateFinishFromToken(hash, req); ok {
+			return status, nil
+		}
 		return nil, fmt.Errorf("pending enrollment not found")
 	}
 	if subtle.ConstantTimeCompare(pending.TokenHash, hash) != 1 {
@@ -199,7 +205,10 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 	if req.ExternalOwnerWalletXOnly == "" || req.RecoveryKeyXOnly == "" {
 		return nil, fmt.Errorf("tenant owner and recovery pubs required")
 	}
-	err = s.CreateTenantVault(pending.VaultID, pending.TokenHash, req.RegisterRequest)
+	if s.afterLoadPending != nil {
+		s.afterLoadPending()
+	}
+	err = s.createTenantVault(pending.VaultID, pending.TokenHash, req.RegisterRequest, pending)
 	if err != nil {
 		if status, ok := s.acceptDuplicateFinish(pending.VaultID, req.RegisterRequest); ok {
 			return status, nil
@@ -211,6 +220,18 @@ func (s *Service) FinishEnrollment(ctx context.Context, token string, req Enroll
 		return nil, err
 	}
 	return &st, nil
+}
+
+func (s *Service) acceptDuplicateFinishFromToken(tokenHash []byte, req EnrollFinishRequest) (*Status, bool) {
+	inv, err := s.Ledger.GetInvite(tokenHash)
+	if err != nil || inv == nil || inv.ConsumedVaultID == "" {
+		return nil, false
+	}
+	userHandle, err := decodeHex(req.UserHandle)
+	if err != nil || !bytesEqualConst([]byte(inv.ConsumedVaultID), userHandle) {
+		return nil, false
+	}
+	return s.acceptDuplicateFinish(inv.ConsumedVaultID, req.RegisterRequest)
 }
 
 func (s *Service) acceptDuplicateFinish(vaultID string, req RegisterRequest) (*Status, bool) {

@@ -8,11 +8,12 @@ import (
 const maxCBORBytes = 4096
 
 type cborValue struct {
-	kind   cborKind
-	intVal int64
-	bytes  []byte
-	text   string
-	mapVal []cborPair
+	kind    cborKind
+	intVal  int64
+	boolVal bool
+	bytes   []byte
+	text    string
+	mapVal  []cborPair
 }
 
 type cborKind int
@@ -22,6 +23,7 @@ const (
 	cborBytes
 	cborText
 	cborMap
+	cborBool
 )
 
 type cborPair struct {
@@ -58,6 +60,15 @@ func decodeCBOR(in []byte) (cborValue, []byte, error) {
 			return cborValue{}, nil, fmt.Errorf("truncated cbor text")
 		}
 		return cborValue{kind: cborText, text: string(rest[:n])}, rest[n:], nil
+	case 7:
+		switch ai {
+		case 20:
+			return cborValue{kind: cborBool, boolVal: false}, rest, nil
+		case 21:
+			return cborValue{kind: cborBool, boolVal: true}, rest, nil
+		default:
+			return cborValue{}, nil, fmt.Errorf("unsupported cbor simple value")
+		}
 	case 5:
 		if n > 16 {
 			return cborValue{}, nil, fmt.Errorf("cbor map too large")
@@ -161,4 +172,11 @@ func encodeCBORMap(pairs [][]byte) []byte {
 		hdr = append(hdr, p...)
 	}
 	return hdr
+}
+
+func encodeCBORBool(v bool) []byte {
+	if v {
+		return []byte{0xf5}
+	}
+	return []byte{0xf4}
 }

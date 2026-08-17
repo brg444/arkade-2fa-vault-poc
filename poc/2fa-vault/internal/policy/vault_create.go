@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
@@ -14,6 +15,9 @@ type CreateVaultInput struct {
 	Credential VaultCredential
 	Envelope   *CredentialEnvelope
 	TokenHash  []byte
+	// Pending, when set, is consumed in the same transaction as the invite.
+	// The row must still match handle, token hash, vault id, challenge, and expiry.
+	Pending *PendingEnrollment
 }
 
 // CreateVault inserts vault, credential, and envelope and consumes the invite
@@ -45,6 +49,9 @@ func (l *Ledger) CreateVault(in CreateVaultInput) error {
 	}
 	if expires != "" && expires < l.clock().UTC().Format(time.RFC3339) {
 		return fmt.Errorf("invite expired")
+	}
+	if err := consumePendingEnrollmentTx(tx, in.Pending, l.clock().UTC()); err != nil {
+		return err
 	}
 
 	if err := insertVaultTx(tx, in.Record, in.Credential, in.Envelope); err != nil {
@@ -102,6 +109,42 @@ func validateCreateVaultInput(in CreateVaultInput) error {
 	}
 	if len(in.Record.IntegrityMAC) != sha256.Size || len(in.Credential.IntegrityMAC) != sha256.Size {
 		return fmt.Errorf("vault and credential integrity MACs required")
+	}
+	if in.Pending != nil {
+		if in.Pending.Handle == "" || in.Pending.VaultID != in.Record.VaultID {
+			return fmt.Errorf("pending enrollment does not match vault")
+		}
+		if len(in.Pending.Challenge) == 0 || len(in.Pending.TokenHash) != sha256.Size {
+			return fmt.Errorf("pending enrollment challenge required")
+		}
+		if !bytes.Equal(in.Pending.TokenHash, in.TokenHash) {
+			return fmt.Errorf("pending enrollment token mismatch")
+		}
+	}
+	return nil
+}
+
+func consumePendingEnrollmentTx(tx *sql.Tx, pending *PendingEnrollment, now time.Time) error {
+	if pending == nil {
+		return nil
+	}
+	if pending.ExpiresAt != "" && pending.ExpiresAt < now.Format(time.RFC3339) {
+		return fmt.Errorf("pending enrollment expired")
+	}
+	res, err := tx.Exec(`
+DELETE FROM pending_enrollment
+ WHERE handle = ? AND token_hash = ? AND vault_id = ? AND challenge = ? AND expires_at = ?`,
+		pending.Handle, pending.TokenHash, pending.VaultID, pending.Challenge, pending.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("consume pending enrollment: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("pending enrollment changed")
 	}
 	return nil
 }

@@ -80,6 +80,7 @@ type Service struct {
 	sessionMu                  sync.Mutex
 	sessionChallenges          map[string]passkeyChallenge
 	SessionNow                 func() time.Time
+	afterLoadPending           func()
 }
 
 const defaultConcurrentVerifications = 4
@@ -220,6 +221,10 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 // CreateTenantVault atomically persists a new HKDF-derived vault and consumes
 // the invite. HTTP enrollment remains gated; this is the PR1 service primitive.
 func (s *Service) CreateTenantVault(vaultID string, tokenHash []byte, req RegisterRequest) error {
+	return s.createTenantVault(vaultID, tokenHash, req, nil)
+}
+
+func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req RegisterRequest, pending *policy.PendingEnrollment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.runtimeConfig().Validate(); err != nil {
@@ -273,7 +278,7 @@ func (s *Service) CreateTenantVault(vaultID string, tokenHash []byte, req Regist
 		return err
 	}
 	if err := s.Ledger.CreateVault(policy.CreateVaultInput{
-		Record: rec, Credential: vcred, TokenHash: tokenHash,
+		Record: rec, Credential: vcred, TokenHash: tokenHash, Pending: pending,
 	}); err != nil {
 		return err
 	}
