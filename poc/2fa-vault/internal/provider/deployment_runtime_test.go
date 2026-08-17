@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
@@ -29,7 +31,11 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	hot, _ := btcec.NewPrivateKey()
 	passkey, _ := webauthn.NewP256()
 	direct, _ := webauthn.NewP256()
-	bootstrap := sha256.Sum256([]byte("a sufficiently long enrollment bootstrap token"))
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5c}, 32))
+	bootstrap, err := HashEnrollmentToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
 	integrityKey := bytes.Repeat([]byte{0x5a}, sha256.Size)
 
 	ledger, err := policy.OpenLedger(dbPath, nil)
@@ -42,14 +48,15 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 		ArkadeCosignerPub: arkadeKey.PubKey(), ArkadeCosignerOrigin: deployment.MutinynetArkadeCosignerOrigin,
 		ArkadeCosignerVersion: deployment.MutinynetArkadeCosignerVersion,
 		VaultSigner:           LocalSigner{Priv: providerKey}, ArkadeCosignerSigner: LocalSigner{Priv: arkadeKey},
-		EnrollmentTokenHash: bootstrap[:],
+		EnrollmentTokenHash: bootstrap,
+		EnrollmentDeadline:  time.Now().Add(time.Hour),
 	}
 	if err := svc.RegisterWithBootstrap(RegisterRequest{
 		CredentialID:          hex.EncodeToString([]byte("mutinynet-credential")),
 		WebAuthnP256:          hex.EncodeToString(webauthn.CompressedP256(passkey)),
 		PhoneDirectP256:       hex.EncodeToString(webauthn.CompressedP256(direct)),
 		PhoneRoutineBIP340Pub: hex.EncodeToString(hot.PubKey().SerializeCompressed()),
-	}, "a sufficiently long enrollment bootstrap token"); err != nil {
+	}, token); err != nil {
 		t.Fatal(err)
 	}
 	status, err := svc.Status(context.Background())

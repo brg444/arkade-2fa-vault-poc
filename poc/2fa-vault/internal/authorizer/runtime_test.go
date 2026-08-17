@@ -3,6 +3,7 @@ package authorizer
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"math/big"
@@ -10,12 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/provider"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 )
 
@@ -170,7 +173,7 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	if err := os.WriteFile(vaultCosignerPath, []byte(hex.EncodeToString(vaultCosignerKey.Serialize())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const token = "one-time enrollment secret with enough entropy"
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x6d}, 32))
 	tokenPath := filepath.Join(dir, "enrollment-token")
 	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -268,5 +271,93 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	status, err := restarted.service.Status(context.Background())
 	if err != nil || !status.Enrolled || status.Network != deployment.NetworkMutinynet {
 		t.Fatalf("restart status = %+v, %v", status, err)
+	}
+}
+
+func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *testing.T) {
+	dir := t.TempDir()
+	vaultCosignerKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultCosignerPath := filepath.Join(dir, "vault-cosigner-key")
+	if err := os.WriteFile(vaultCosignerPath, []byte(hex.EncodeToString(vaultCosignerKey.Serialize())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Deployment: deployment.Config{
+			ClientOrigin: "https://portable.example.com", RPID: "portable.example.com",
+			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
+		},
+		DatabasePath:         filepath.Join(dir, "vault.sqlite"),
+		VaultCosignerKeyFile: vaultCosignerPath,
+		OpenEnrollment:       true,
+		EsploraURL:           "https://mempool.mutinynet.arkade.sh/api",
+	}
+	dial := func(context.Context, string, string) (provider.Broadcaster, error) {
+		return stubPublisher{}, nil
+	}
+	emulatorDial := func(_ context.Context, origin string, expected *btcec.PublicKey, versions []string, _ bool) (provider.Signer, provider.PublicEmulatorIdentity, error) {
+		return stubEmulatorSigner{}, provider.PublicEmulatorIdentity{Origin: origin, Version: versions[0], BasePub: expected}, nil
+	}
+	runtime, err := openWithDialers(context.Background(), cfg, dial, emulatorDial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.service.ExternalOwnerWallet != nil || runtime.service.RecoveryKey != nil {
+		t.Fatal("fresh portable runtime preselected claimant public keys")
+	}
+	initial, err := runtime.service.Status(context.Background())
+	if err != nil || initial.EnrollmentMode != "open" || initial.EnrollmentExpiresAt == "" {
+		t.Fatalf("open enrollment status = %+v, %v", initial, err)
+	}
+	runtime.service.EnrollmentNow = func() time.Time { return runtime.service.EnrollmentDeadline }
+	expired, err := runtime.service.Status(context.Background())
+	if err != nil || expired.EnrollmentMode != "expired" {
+		t.Fatalf("expired enrollment status = %+v, %v", expired, err)
+	}
+	runtime.service.EnrollmentNow = nil
+	owner, _ := btcec.NewPrivateKey()
+	recovery, _ := btcec.NewPrivateKey()
+	phone, _ := btcec.NewPrivateKey()
+	passkey, _ := webauthn.NewP256()
+	direct, _ := webauthn.NewP256()
+	req := provider.RegisterRequest{
+		CredentialID:             hex.EncodeToString([]byte("portable-credential")),
+		WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(passkey)),
+		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub:    hex.EncodeToString(phone.PubKey().SerializeCompressed()),
+		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
+		RecoveryKeyXOnly:         hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
+	}
+	if err := runtime.service.RegisterWithBootstrap(req, ""); err != nil {
+		t.Fatal(err)
+	}
+	status, err := runtime.service.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Enrolled || status.EnrollmentMode != "closed" || status.PasskeyLoginAvailable ||
+		status.ExternalOwnerWalletPub[2:] != req.ExternalOwnerWalletXOnly ||
+		status.RecoveryKeyPub[2:] != req.RecoveryKeyXOnly {
+		t.Fatalf("portable enrollment status = %+v", status)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Persisted public roles, not optional environment text, are authoritative
+	// after the first winner commits the singleton credential row.
+	restarted, err := openWithDialers(context.Background(), cfg, dial, emulatorDial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wrong, _ := btcec.NewPrivateKey()
+	cfg.ExternalOwnerWalletPubHex = hex.EncodeToString(wrong.PubKey().SerializeCompressed())
+	if _, err := openWithDialers(context.Background(), cfg, dial, emulatorDial); err == nil || !strings.Contains(err.Error(), "does not match the persisted vault") {
+		t.Fatalf("post-enrollment environment override accepted: %v", err)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
@@ -27,8 +28,9 @@ import (
 )
 
 // Config contains only deployment inputs for the protected authorizer. The
-// VaultCosigner key and first-enrollment token are file-backed secrets; neither may
-// be supplied through environment text or a network signer.
+// The VaultCosigner key is a file-backed secret and cannot be supplied through
+// environment text or a network signer. Optional token-gated enrollment uses
+// a second file-backed secret; explicitly armed open enrollment uses none.
 type Config struct {
 	Deployment                deployment.Config
 	DatabasePath              string
@@ -36,6 +38,8 @@ type Config struct {
 	ExternalOwnerWalletPubHex string
 	RecoveryKeyPubHex         string
 	EnrollmentTokenFile       string
+	EnrollmentWindow          time.Duration
+	OpenEnrollment            bool
 	EsploraURL                string
 }
 
@@ -112,26 +116,8 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 	if err != nil {
 		return nil, err
 	}
-	externalOwner, err := parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
-	if err != nil {
-		return nil, err
-	}
-	recovery, err := parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
-	if err != nil {
-		return nil, err
-	}
 	arkadeBase, err := parseCanonicalCompressedPub("ArkadeCosigner", deployment.MutinynetArkadeCosignerPubHex)
 	if err != nil {
-		return nil, err
-	}
-	if err := requirePairwiseIndependent(
-		map[string]*btcec.PublicKey{
-			"VaultCosigner":       vaultCosignerKey.PubKey(),
-			"ExternalOwnerWallet": externalOwner,
-			"RecoveryKey":         recovery,
-			"ArkadeCosigner":      arkadeBase,
-		},
-	); err != nil {
 		return nil, err
 	}
 	ledger, err := policy.OpenLedger(cfg.DatabasePath, nil)
@@ -148,13 +134,53 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 	if err != nil {
 		return nil, err
 	}
+	if err := ledger.SetIntegrityKey(credentialIntegrityKey); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, err
+	}
+	if err := ledger.BackupSQLiteIfAbsent(cfg.DatabasePath + ".pre-v4"); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, fmt.Errorf("pre-v4 backup: %w", err)
+	}
+	if err := ledger.MigrateLegacySingleton(credentialIntegrityKey); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, fmt.Errorf("multi-tenant migration: %w", err)
+	}
 
 	persisted, err := ledger.GetCredential()
 	if err != nil {
 		zero(credentialIntegrityKey)
 		return nil, err
 	}
+	if persisted != nil {
+		rec, cred, err := ledger.LoadVerifiedVault(persisted.VaultID, credentialIntegrityKey)
+		if err != nil {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("stored v4 vault: %w", err)
+		}
+		if rec == nil || cred == nil {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("v4 vault row missing after migration; restore %s.pre-v4 or a verified backup", cfg.DatabasePath)
+		}
+		if rec.OperationalAddress != persisted.OperationalAddress ||
+			!bytes.Equal(rec.OperationalScript, persisted.OperationalScript) ||
+			!bytes.Equal(rec.SavingsScript, persisted.SavingsScript) ||
+			!bytes.Equal(rec.VaultCosignerBase, persisted.VaultCosignerBase) ||
+			rec.CosignerMode != policy.CosignerModeLegacyDirectV0 {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("v4 migration changed the first vault descriptor")
+		}
+		if !bytes.Equal(cred.CredentialID, persisted.ID) {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("v4 migration changed the first vault credential id")
+		}
+		if err := policy.VerifyVaultCosignerPub(vaultCosignerKey, *rec); err != nil {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("stored vault cosigner: %w", err)
+		}
+	}
 	allowActiveDeprecated := false
+	var externalOwner, recovery *btcec.PublicKey
 	if persisted != nil {
 		if err := policy.VerifyCredentialIntegrity(persisted, credentialIntegrityKey); err != nil {
 			zero(credentialIntegrityKey)
@@ -165,23 +191,88 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 			zero(credentialIntegrityKey)
 			return nil, fmt.Errorf("stored public arkade emulator base key is invalid")
 		}
+		externalOwner, err = btcec.ParsePubKey(persisted.ExternalOwnerWallet)
+		if err != nil || !bytes.Equal(externalOwner.SerializeCompressed(), persisted.ExternalOwnerWallet) {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("stored ExternalOwnerWallet is invalid")
+		}
+		recovery, err = btcec.ParsePubKey(persisted.RecoveryKey)
+		if err != nil || !bytes.Equal(recovery.SerializeCompressed(), persisted.RecoveryKey) {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("stored RecoveryKey is invalid")
+		}
+		if cfg.ExternalOwnerWalletPubHex != "" {
+			configured, parseErr := parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
+			if parseErr != nil || !sameXOnly(configured, externalOwner) {
+				zero(credentialIntegrityKey)
+				return nil, fmt.Errorf("configured ExternalOwnerWallet does not match the persisted vault")
+			}
+		}
+		if cfg.RecoveryKeyPubHex != "" {
+			configured, parseErr := parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
+			if parseErr != nil || !sameXOnly(configured, recovery) {
+				zero(credentialIntegrityKey)
+				return nil, fmt.Errorf("configured RecoveryKey does not match the persisted vault")
+			}
+		}
 		allowActiveDeprecated = true
+	} else {
+		// A portable deployment deliberately leaves both keys unset so the
+		// first enrollee chooses their x-only identities in the first enrollment.
+		// Legacy/operator-pinned deployments may still precommit both.
+		if (cfg.ExternalOwnerWalletPubHex == "") != (cfg.RecoveryKeyPubHex == "") {
+			zero(credentialIntegrityKey)
+			return nil, fmt.Errorf("fresh deployment must configure both ExternalOwnerWallet and RecoveryKey or neither")
+		}
+		if cfg.ExternalOwnerWalletPubHex != "" {
+			externalOwner, err = parseDeploymentPub("ExternalOwnerWallet", cfg.ExternalOwnerWalletPubHex)
+			if err != nil {
+				zero(credentialIntegrityKey)
+				return nil, err
+			}
+			recovery, err = parseDeploymentPub("RecoveryKey", cfg.RecoveryKeyPubHex)
+			if err != nil {
+				zero(credentialIntegrityKey)
+				return nil, err
+			}
+		}
+	}
+	roles := map[string]*btcec.PublicKey{
+		"VaultCosigner":  vaultCosignerKey.PubKey(),
+		"ArkadeCosigner": arkadeBase,
+	}
+	if externalOwner != nil {
+		roles["ExternalOwnerWallet"] = externalOwner
+		roles["RecoveryKey"] = recovery
+	}
+	if err := requirePairwiseIndependent(roles); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, err
 	}
 
 	var enrollmentTokenHash []byte
 	if persisted == nil {
-		if cfg.EnrollmentTokenFile == "" {
+		if cfg.OpenEnrollment && cfg.EnrollmentTokenFile != "" {
 			zero(credentialIntegrityKey)
-			return nil, fmt.Errorf("unenrolled authorizer requires an enrollment token file")
+			return nil, fmt.Errorf("open enrollment and enrollment token are mutually exclusive")
 		}
-		token, err := readBoundedSecret(cfg.EnrollmentTokenFile, "enrollment token", 32, 256)
-		if err != nil {
+		if !cfg.OpenEnrollment && cfg.EnrollmentTokenFile == "" {
 			zero(credentialIntegrityKey)
-			return nil, err
+			return nil, fmt.Errorf("unenrolled authorizer requires explicit open enrollment or an enrollment token file")
 		}
-		digest := sha256.Sum256(token)
-		enrollmentTokenHash = append([]byte(nil), digest[:]...)
-		zero(token)
+		if !cfg.OpenEnrollment {
+			token, err := readBoundedSecret(cfg.EnrollmentTokenFile, "enrollment token", 43, 43)
+			if err != nil {
+				zero(credentialIntegrityKey)
+				return nil, err
+			}
+			enrollmentTokenHash, err = provider.HashEnrollmentToken(string(token))
+			zero(token)
+			if err != nil {
+				zero(credentialIntegrityKey)
+				return nil, fmt.Errorf("enrollment token: %w", err)
+			}
+		}
 	}
 
 	arkadeSigner, arkadeIdentity, err := dialArkade(
@@ -209,6 +300,19 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 		VaultSigner:            provider.LocalSigner{Priv: vaultCosignerKey},
 		ArkadeCosignerSigner:   arkadeSigner,
 		EnrollmentTokenHash:    enrollmentTokenHash,
+		OpenEnrollment:         cfg.OpenEnrollment,
+	}
+	if persisted == nil {
+		window := cfg.EnrollmentWindow
+		if window == 0 {
+			window = 30 * time.Minute
+		}
+		if window < time.Minute || window > 24*time.Hour {
+			zero(svc.EnrollmentTokenHash)
+			zero(svc.CredentialIntegrityKey)
+			return nil, fmt.Errorf("enrollment window must be between 1 minute and 24 hours")
+		}
+		svc.EnrollmentDeadline = time.Now().Add(window)
 	}
 	defer func() {
 		if closeOnError {

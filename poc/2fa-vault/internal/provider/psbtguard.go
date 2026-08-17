@@ -17,6 +17,17 @@ import (
 // only its single valid expected signature, and discards every other response
 // mutation. This wrapper protects both the in-process primitive and the
 // hostile public Emulator response with the same delta invariant.
+type expectedKeySigner interface {
+	SignExpected(ctx context.Context, ptx *psbt.Packet, expectedXOnly []byte) (*psbt.Packet, error)
+}
+
+func signWithExpected(ctx context.Context, signer Signer, ptx *psbt.Packet, expectedXOnly []byte) (*psbt.Packet, error) {
+	if es, ok := signer.(expectedKeySigner); ok {
+		return es.SignExpected(ctx, ptx, expectedXOnly)
+	}
+	return signer.Sign(ctx, ptx)
+}
+
 func signExactStage(
 	ctx context.Context,
 	stored string,
@@ -35,7 +46,7 @@ func signExactStage(
 	if err != nil {
 		return "", err
 	}
-	response, err := signer.Sign(ctx, work)
+	response, err := signWithExpected(ctx, signer, work, expectedXOnly)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", role, err)
 	}
