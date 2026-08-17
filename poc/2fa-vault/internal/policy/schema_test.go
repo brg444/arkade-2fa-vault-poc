@@ -2,6 +2,7 @@ package policy
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,6 +158,60 @@ func TestEmptyLegacyIssuanceMigratesToMAC(t *testing.T) {
 	if !sameColumns(cols, issuanceColumns) {
 		t.Fatalf("v5 issuance columns %v, want %v", cols, issuanceColumns)
 	}
+}
+
+func TestOpenLedgerDoesNotRewriteALegacyRailwaySnapshot(t *testing.T) {
+	src := os.Getenv("VAULT_RAILWAY_SNAPSHOT")
+	if src == "" {
+		src = "/Users/alexb./tmp/vault-mutinynet-secrets/vault.railway.pr1.live.pre-v4.c5285c7.sqlite"
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Skip("railway snapshot not present")
+	}
+	dst := filepath.Join(t.TempDir(), "rehearse.sqlite")
+	in, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, in, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := tableColumns(mustOpenRaw(t, dst), "issuance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameColumns(before, issuanceColumnsLegacy) {
+		t.Fatalf("fixture issuance already sealed: %v", before)
+	}
+	led, err := OpenLedger(dst, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	after, err := tableColumns(led.db, "issuance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameColumns(after, issuanceColumnsLegacy) {
+		t.Fatalf("OpenLedger mutated issuance: %v", after)
+	}
+	cred, err := led.GetCredential()
+	if err != nil || cred == nil {
+		t.Fatal(err)
+	}
+	if cred.OperationalAddress != "tb1p9llcrjjkzr57py6vffwveztm0hn0hezj7wzrq5mat6nh07j37g4qh8jl0l" {
+		t.Fatalf("funded address changed: %s", cred.OperationalAddress)
+	}
+}
+
+func mustOpenRaw(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestNonEmptyLegacyIssuanceFailsClosed(t *testing.T) {
