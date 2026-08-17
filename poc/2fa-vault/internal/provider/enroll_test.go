@@ -84,7 +84,7 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 		VaultSigner: LocalSigner{Priv: master}, ArkadeCosignerSigner: LocalSigner{Priv: arkade},
 		Deployment: deployment.Config{
 			ClientOrigin: fixture.Origin, RPID: fixture.RPID, Network: deployment.NetworkRegtest,
-			OperationalCSVBlocks: 6, SavingsCSVBlocks: 144,
+			OperationalCSVBlocks: 144, SavingsCSVBlocks: 6,
 		},
 		MultiTenantEnrollment: true,
 	}
@@ -220,7 +220,7 @@ func TestFinishDoesNotInheritProcessOwnerPubs(t *testing.T) {
 		VaultSigner: LocalSigner{Priv: master}, ArkadeCosignerSigner: LocalSigner{Priv: arkade},
 		Deployment: deployment.Config{
 			ClientOrigin: fixture.Origin, RPID: fixture.RPID, Network: deployment.NetworkRegtest,
-			OperationalCSVBlocks: 6, SavingsCSVBlocks: 144,
+			OperationalCSVBlocks: 144, SavingsCSVBlocks: 6,
 		},
 		MultiTenantEnrollment: true,
 	}
@@ -604,8 +604,8 @@ func TestPublicStatusStaysTokenWhenMultiTenantPastSingletonDeadline(t *testing.T
 	svc.Deployment.Network = deployment.NetworkMutinynet
 	svc.Deployment.ClientOrigin = "https://arkade-vault-demo.vercel.app"
 	svc.Deployment.RPID = "arkade-vault-demo.vercel.app"
-	svc.Deployment.OperationalCSVBlocks = 288
-	svc.Deployment.SavingsCSVBlocks = 4032
+	svc.Deployment.OperationalCSVBlocks = 4032
+	svc.Deployment.SavingsCSVBlocks = 288
 	svc.EnrollmentDeadline = time.Now().UTC().Add(-time.Minute)
 	svc.EnrollmentTokenHash = bytes.Repeat([]byte{0x11}, 32)
 	st, err := svc.PublicStatus()
@@ -634,7 +634,7 @@ func enrollService(t *testing.T, led *policy.Ledger) *Service {
 		VaultSigner: LocalSigner{Priv: master}, ArkadeCosignerSigner: LocalSigner{Priv: arkade},
 		Deployment: deployment.Config{
 			ClientOrigin: fixture.Origin, RPID: fixture.RPID, Network: deployment.NetworkRegtest,
-			OperationalCSVBlocks: 6, SavingsCSVBlocks: 144,
+			OperationalCSVBlocks: 144, SavingsCSVBlocks: 6,
 		},
 		MultiTenantEnrollment: true,
 	}

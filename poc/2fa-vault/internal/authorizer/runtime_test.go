@@ -182,7 +182,7 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 	cfg := Config{
 		Deployment: deployment.Config{
 			ClientOrigin: "https://vault.example.com", RPID: "vault.example.com",
-			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
+			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 4032, SavingsCSVBlocks: 288,
 		},
 		DatabasePath:              filepath.Join(dir, "vault.sqlite"),
 		VaultCosignerKeyFile:      vaultCosignerPath,
@@ -281,7 +281,7 @@ func TestPortableOpenEnrollmentLetsFirstClaimantChooseImmutablePublicRoles(t *te
 	cfg := Config{
 		Deployment: deployment.Config{
 			ClientOrigin: "https://portable.example.com", RPID: "portable.example.com",
-			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
+			Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 4032, SavingsCSVBlocks: 288,
 		},
 		DatabasePath:         filepath.Join(dir, "vault.sqlite"),
 		VaultCosignerKeyFile: vaultCosignerPath,

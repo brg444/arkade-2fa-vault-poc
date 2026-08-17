@@ -138,8 +138,8 @@ func (c Config) Validate() error {
 	if c.OperationalCSVBlocks > MaxCSVBlockDelay || c.SavingsCSVBlocks > MaxCSVBlockDelay {
 		return fmt.Errorf("operational and savings CSV block delays must not exceed %d", MaxCSVBlockDelay)
 	}
-	if c.SavingsCSVBlocks <= c.OperationalCSVBlocks {
-		return fmt.Errorf("savings CSV blocks must exceed operational CSV blocks")
+	if c.OperationalCSVBlocks <= c.SavingsCSVBlocks {
+		return fmt.Errorf("device-only CSV blocks must exceed hardware-only CSV blocks")
 	}
 	return nil
 }

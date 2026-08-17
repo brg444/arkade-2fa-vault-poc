@@ -231,7 +231,7 @@ func TestVeteranFixturePubsCannotRegisterMutinynetTenant(t *testing.T) {
 		VaultSigner: LocalSigner{Priv: master}, ArkadeCosignerSigner: LocalSigner{Priv: arkade},
 		Deployment: deployment.Config{
 			ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: deployment.NetworkMutinynet,
-			OperationalCSVBlocks: 6, SavingsCSVBlocks: 144,
+			OperationalCSVBlocks: 144, SavingsCSVBlocks: 6,
 		},
 		CredentialIntegrityKey: bytes.Repeat([]byte{0x11}, 32),
 		ArkadeCosignerOrigin:   deployment.MutinynetArkadeCosignerOrigin,

@@ -33,8 +33,8 @@ type Record struct {
 	RecoveryKey         *btcec.PublicKey // unused on v4 trees; kept for v3 rebuilds
 	VaultCosignerBase   *btcec.PublicKey
 	ArkadeCosignerBase  *btcec.PublicKey
-	CSV                 arklib.RelativeLocktime // device-only delay (6)
-	HardwareCSV         arklib.RelativeLocktime // hardware-only delay (144)
+	CSV                 arklib.RelativeLocktime // device-only delay (144)
+	HardwareCSV         arklib.RelativeLocktime // hardware-only delay (6)
 	AuthorizationPolicy AuthorizationPolicy
 	AuthScript          []byte
 	AuthScriptHash      []byte

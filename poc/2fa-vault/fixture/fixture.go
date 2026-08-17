@@ -15,9 +15,10 @@ const (
 	Origin = "http://localhost:8787"
 
 	// OperationalCSVBlocks is the device-only delay (lost hardware).
-	OperationalCSVBlocks uint32 = 6
+	// Longer than hardware-only so a stolen device cannot beat hardware.
+	OperationalCSVBlocks uint32 = 144
 	// SavingsCSVBlocks is the hardware-only delay (lost device).
-	SavingsCSVBlocks uint32 = 144
+	SavingsCSVBlocks uint32 = 6
 
 	TxRecipientCapSats  int64 = 50_000
 	PeriodAllowanceSats int64 = 100_000

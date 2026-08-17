@@ -105,8 +105,8 @@ func TestVaultClosuresHaveExpectedKeysAndDelays(t *testing.T) {
 	assertSecurityMultisigKeys(t, savings.Leaves.Admin, f.phoneRoutine.PubKey(), f.externalOwner.PubKey())
 	assertSecurityCSVKeyAndDelay(t, savings.Leaves.PhoneCSV, f.phoneRoutine.PubKey(), savings.Record.CSV.Value)
 	assertSecurityCSVKeyAndDelay(t, savings.Leaves.HardwareCSV, f.externalOwner.PubKey(), savings.Record.HardwareCSV.Value)
-	if savings.Record.HardwareCSV.Value <= op.Record.CSV.Value {
-		t.Fatalf("hardware delay %d must exceed device delay %d", savings.Record.HardwareCSV.Value, op.Record.CSV.Value)
+	if op.Record.CSV.Value <= savings.Record.HardwareCSV.Value {
+		t.Fatalf("device delay %d must exceed hardware delay %d", op.Record.CSV.Value, savings.Record.HardwareCSV.Value)
 	}
 }
 

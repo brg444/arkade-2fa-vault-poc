@@ -9,7 +9,7 @@ func TestConfigValidatesRegtestAndMutinynet(t *testing.T) {
 	mutiny := func(origin, rp string) Config {
 		return Config{
 			ClientOrigin: origin, RPID: rp, Network: NetworkMutinynet,
-			OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
+			OperationalCSVBlocks: 4032, SavingsCSVBlocks: 288,
 		}
 	}
 	tests := []struct {
@@ -30,10 +30,12 @@ func TestConfigValidatesRegtestAndMutinynet(t *testing.T) {
 		{name: "empty port rejected", config: mutiny("https://vault.example.com:", "vault.example.com"), wantErr: "empty"},
 		{name: "zero padded port rejected", config: mutiny("https://vault.example.com:0443", "vault.example.com"), wantErr: "canonical decimal"},
 		{name: "unicode hostname rejected", config: mutiny("https://v\u00e4ult.example.com", "v\u00e4ult.example.com"), wantErr: "ASCII"},
-		{name: "mainnet rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: "mainnet", OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032}, wantErr: "unsupported"},
+		{name: "mainnet rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: "mainnet", OperationalCSVBlocks: 4032, SavingsCSVBlocks: 288}, wantErr: "unsupported"},
 		{name: "mutinynet delays explicit", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet}, wantErr: "CSV"},
-		{name: "savings delay longer", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 288}, wantErr: "exceed"},
-		{name: "maximum encodable delay", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 65534, SavingsCSVBlocks: 65535}},
+		{name: "device delay must exceed hardware", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 288}, wantErr: "exceed"},
+		{name: "inverted race rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 6, SavingsCSVBlocks: 144}, wantErr: "exceed"},
+		{name: "aligned mutinynet clocks", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 144, SavingsCSVBlocks: 6}},
+		{name: "maximum encodable delay", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 65535, SavingsCSVBlocks: 65534}},
 		{name: "sixteen bit overflow rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 65536}, wantErr: "65535"},
 		{name: "time unit bit rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 1 << 22}, wantErr: "65535"},
 		{name: "disable bit rejected", config: Config{ClientOrigin: "https://vault.example.com", RPID: "vault.example.com", Network: NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 1 << 31}, wantErr: "65535"},

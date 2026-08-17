@@ -39,7 +39,7 @@ func TestMutinynetDeploymentIdentityAndDelaysPersistAcrossRestart(t *testing.T) 
 	dbPath := filepath.Join(t.TempDir(), "mutinynet.sqlite")
 	cfg := deployment.Config{
 		ClientOrigin: "https://vault.example.com", RPID: "vault.example.com",
-		Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 288, SavingsCSVBlocks: 4032,
+		Network: deployment.NetworkMutinynet, OperationalCSVBlocks: 4032, SavingsCSVBlocks: 288,
 	}
 	providerKey, _ := btcec.NewPrivateKey()
 	arkadeKey, _ := btcec.NewPrivateKey()
