@@ -170,7 +170,7 @@ curl --fail --show-error https://$VAULT_DOMAIN/v1/status
 
 Open `https://$VAULT_DOMAIN` in a PRF-capable browser. Paste the contents of
 the enrollment-token file into **One-time enrollment token**, then choose
-**Create passkey + encrypted PhoneRoutine key**. Verify status reports:
+**Create passkey**. Verify status reports:
 
 - `enrolled: true`;
 - `network: "mutinynet"`;
@@ -251,7 +251,7 @@ p.bytesToHex(p.scriptFromAddress("tb1_REPLACE_WITH_RECIPIENT", "mutinynet"));
 ```
 
 Choose **Review**, verify the input, recipient, change, fee, and allowance,
-then choose **Phone approval + routine signature**. The page binds
+then choose **Approve**. The page binds
 PhoneDirectP256, decrypts and uses PhoneRoutineBIP340 locally, and submits the
 phone-signed request. The authorizer first persists the VaultCosigner
 signature, then asks the pinned public ArkadeCosigner for its signature. The
@@ -269,7 +269,7 @@ The returned txid must equal the txid independently derived by the browser.
 
 If `/v1/authorize` fails because the public signer or network is temporarily
 unavailable, leave the reviewed fields and page unchanged and choose
-**Phone approval + routine signature** again. The page keeps the exact serialized authorize body
+**Approve** again. The page keeps the exact serialized authorize body
 only in memory and resubmits those identical bytes; it does not generate a new
 WebAuthn assertion, PhoneDirectP256 signature, or PhoneRoutine signature for the reserved
 challenge. Reloading the page loses this retry material. A verified success or
