@@ -1,3 +1,5 @@
+// Live trees are github.com/brg444/arkade-vault-server/internal/vault/v5.
+// This copy remains for leftover regtest cmds.
 package v5
 
 import (

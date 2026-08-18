@@ -1,8 +1,9 @@
 # Mutinynet deployment runbook
 
-**Live enroll is v5** (`phone-hww-recovery-staged-v5`). Recovery is
-optional. Leftover v4 rows still load. This runbook stands up the
-validating cosigner, not the PWA. See wallet `docs/v5-overview.md`.
+**Moved.** Live enroll is v5 on
+[arkade-vault-server](https://github.com/brg444/arkade-vault-server).
+This runbook is leftover compose for the old emulator-context image.
+Do not deploy `cmd/authorizer` from this tree.
 
 This brings up the demonstrable Mutinynet POC as:
 

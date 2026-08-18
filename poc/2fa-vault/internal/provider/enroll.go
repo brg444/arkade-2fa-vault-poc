@@ -1,3 +1,5 @@
+// Live enroll is github.com/brg444/arkade-vault-server. This copy remains
+// for leftover cmd/provider. Do not mint Mutinynet from here.
 package provider
 
 import (

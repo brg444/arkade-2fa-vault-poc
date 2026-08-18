@@ -1,18 +1,14 @@
-# Arkade emulator + vault authorizer
+# Arkade emulator
 
-This tree is the public Arkade **emulator** and `poc/2fa-vault/cmd/authorizer`.
-It is Go source. It is not the product architecture home.
+This tree is the public Arkade **emulator**. It is not the vault signer.
+
+The Mutinynet authorizer lives in
+[arkade-vault-server](https://github.com/brg444/arkade-vault-server)
+(`cmd/authorizer`). Edit enroll and trees there.
 
 - Product client: [arkade-wallet-vault](https://github.com/brg444/arkade-wallet-vault)
-- Protocol / docs map: [docs/architecture.md](https://github.com/brg444/arkade-wallet-vault/blob/vault-mode/docs/architecture.md)
-- Deployable packaging: [arkade-vault-server](https://github.com/brg444/arkade-vault-server)
+- Leftover in this tree: `poc/2fa-vault/cmd/provider`, `cmd/demo`, `web/` (regtest only)
 
-New enrolls are v5 only. Recovery is optional. Leftover v4 coins still
-load; recover those out of band. Mutinynet only. Not an HSM. Not
-`poc/2fa-vault/web`.
-
-Operate this binary: [poc/2fa-vault/README.md](poc/2fa-vault/README.md)
-
-```bash
-go test ./poc/2fa-vault/...
-```
+`pkg/arkade` is the script engine the signer depends on. Do not treat
+`poc/2fa-vault/cmd/authorizer` as a deployable. It exits and points at
+vault-server.
