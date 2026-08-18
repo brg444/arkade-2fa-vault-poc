@@ -84,6 +84,17 @@ func TestAuthorizerRequiresGatewaySecretOnV1WhenConfigured(t *testing.T) {
 	}
 }
 
+func TestAuthorizerDoesNotServeRegister(t *testing.T) {
+	e := newBoundaryEnv(t)
+	handler := AuthorizerHandler(e.service)
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodOptions} {
+		rec := boundaryHTTPCall(t, handler, method, "/v1/register", "application/json", fixture.Origin, `{}`)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s /v1/register = %d %s, want 404", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestAuthorizerHTTPBoundaryHasNoGenericSigningOrStaticSurface(t *testing.T) {
 	e := newBoundaryEnv(t)
 	handler := AuthorizerHandler(e.service)
@@ -112,7 +123,7 @@ func TestAuthorizerHTTPBoundaryHasNoGenericSigningOrStaticSurface(t *testing.T) 
 	}{
 		{method: http.MethodGet, path: "/v1/authorize"},
 		{method: http.MethodPost, path: "/v1/status"},
-		{method: http.MethodGet, path: "/v1/register"},
+		{method: http.MethodGet, path: "/v1/enroll/start"},
 		{method: http.MethodPost, path: "/health"},
 	} {
 		response := boundaryHTTPCall(t, handler, request.method, request.path, "application/json", fixture.Origin, `{}`)
@@ -130,11 +141,12 @@ func TestAuthorizerRouteAllowlistIsExact(t *testing.T) {
 		"/v1/enroll/start":      {http.MethodOptions, http.MethodPost},
 		"/v1/enroll/propose":    {http.MethodOptions, http.MethodPost},
 		"/v1/enroll/finish":     {http.MethodOptions, http.MethodPost},
-		"/v1/register":          {http.MethodOptions, http.MethodPost},
 		"/v1/preflight":         {http.MethodOptions, http.MethodPost},
 		"/v1/draft":             {http.MethodOptions, http.MethodPost},
 		"/v1/bind":              {http.MethodOptions, http.MethodPost},
 		"/v1/authorize":         {http.MethodOptions, http.MethodPost},
+		"/v1/initiate":          {http.MethodOptions, http.MethodPost},
+		"/v1/clawback":          {http.MethodOptions, http.MethodPost},
 		"/v1/publish":           {http.MethodOptions, http.MethodPost},
 		"/v1/tx":                {http.MethodGet, http.MethodOptions},
 		"/v1/passkey/challenge": {http.MethodOptions, http.MethodPost},

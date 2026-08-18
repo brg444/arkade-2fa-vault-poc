@@ -17,6 +17,7 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
+	v5 "github.com/arkade-os/emulator/poc/2fa-vault/internal/vault/v5"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -35,11 +36,26 @@ func withPoP(vaultID string, owner, recovery *btcec.PrivateKey, req RegisterRequ
 
 func proposedPoP(t *testing.T, svc *Service, vaultID string, owner, recovery *btcec.PrivateKey, req RegisterRequest) RegisterRequest {
 	t.Helper()
+	return proposedPoPHandle(t, svc, vaultID, "", owner, recovery, req)
+}
+
+func proposedPoPHandle(t *testing.T, svc *Service, vaultID, handle string, owner, recovery *btcec.PrivateKey, req RegisterRequest) RegisterRequest {
+	t.Helper()
+	if recovery != nil && req.RecoveryXOnly == "" && req.RecoveryKeyXOnly != "" {
+		req.RecoveryXOnly = req.RecoveryKeyXOnly
+	}
 	preview, err := svc.previewTenantDescriptor(vaultID, req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.DescriptorHash = preview.DescriptorHash
+	if recovery != nil && (req.RecoveryXOnly != "" || req.RecoveryKeyXOnly != "") {
+		pop, err := v5.SignRecoveryPoP(recovery, vaultID, handle, preview.DescriptorHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.RecoveryPoP = pop
+	}
 	return withPoP(vaultID, owner, recovery, req)
 }
 
@@ -132,14 +148,16 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 	if _, err := svc.FinishEnrollment(context.Background(), token, missing); err == nil {
 		t.Fatal("finish accepted a tenant without owner pub")
 	}
-	legacy := req
-	legacy.RecoveryKeyXOnly = hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey()))
-	if _, err := svc.FinishEnrollment(context.Background(), token, legacy); err == nil || !strings.Contains(err.Error(), "retired") {
-		t.Fatalf("v3 recovery key accepted: %v", err)
+	withRec := req
+	withRec.RecoveryXOnly = hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey()))
+	withRec.RecoveryPoP = ""
+	if _, err := svc.FinishEnrollment(context.Background(), token, withRec); err == nil {
+		t.Fatal("finish accepted recovery without a PoP")
 	}
 	unsigned := req
 	unsigned.ExternalOwnerProof = ""
 	unsigned.RecoveryProof = ""
+	unsigned.RecoveryPoP = ""
 	if _, err := svc.FinishEnrollment(context.Background(), token, unsigned); err != nil {
 		t.Fatalf("finish without ownership proofs: %v", err)
 	}
@@ -263,7 +281,7 @@ func TestFinishAcceptsPRFShapedAuthenticatorExtensions(t *testing.T) {
 		ClientDataJSON:    hex.EncodeToString([]byte(`{"type":"webauthn.create","challenge":"` + webauthn.EncodeChallenge(challenge) + `","origin":"` + fixture.Origin + `","crossOrigin":false}`)),
 		AuthenticatorData: hex.EncodeToString(auth),
 		AttestationObject: hex.EncodeToString(webauthn.EncodeNoneAttestationObject(auth)),
-		RegisterRequest: proposedPoP(t, svc, start.VaultID, owner, recovery, RegisterRequest{
+		RegisterRequest: proposedPoPHandle(t, svc, start.VaultID, start.Handle, owner, recovery, RegisterRequest{
 			CredentialID:             hex.EncodeToString(credID),
 			WebAuthnP256:             hex.EncodeToString(webauthn.CompressedP256(pass)),
 			PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
@@ -331,6 +349,44 @@ func TestFinishCannotConsumeAfterConcurrentChallengeRotation(t *testing.T) {
 	}
 }
 
+func TestProposeMintsRebuiltV5Descriptor(t *testing.T) {
+	svc, token, start := enrollReady(t)
+	pass, _ := webauthn.NewP256()
+	direct, _ := webauthn.NewP256()
+	hot, _ := btcec.NewPrivateKey()
+	owner, _ := btcec.NewPrivateKey()
+	recovery, _ := btcec.NewPrivateKey()
+	req := attestedFinish(t, svc, start, pass, []byte("cred-v5"), RegisterRequest{
+		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
+		RecoveryXOnly:            hex.EncodeToString(schnorr.SerializePubKey(recovery.PubKey())),
+	}, owner, recovery)
+	proposed, err := svc.ProposeEnrollment(token, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc, ok := proposed.Descriptor.(v5.PublicDescriptor)
+	if !ok || desc.Schema != v5.Schema || desc.TemplateVersion != v5.Template {
+		t.Fatalf("propose did not mint v5: %+v", proposed.Descriptor)
+	}
+	if desc.Daily.Address == "" || desc.Savings.Address == "" || desc.Keys.Recovery == "" {
+		t.Fatalf("v5 descriptor missing trees: %+v", desc)
+	}
+	st, err := svc.FinishEnrollment(context.Background(), token, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TemplateVersion != v5.Template || st.RecoveryKeyPub == "" || st.OperationalAddr != desc.Daily.Address {
+		t.Fatalf("finish status: %+v", st)
+	}
+	if _, err := svc.SignTransition(context.Background(), TransitionRequest{
+		VaultID: start.VaultID, Purpose: "claim", PSBT: "00",
+	}); err == nil {
+		t.Fatal("signed a claim")
+	}
+}
+
 func TestCredentialCannotOperateAnotherVault(t *testing.T) {
 	svc := &Service{}
 	svc.publishEnrollmentAt("vault-a", []byte("cred-a"), nil, nil, nil)
@@ -358,7 +414,7 @@ func attestedFinish(t *testing.T, svc *Service, start *EnrollStartResponse, pass
 	extra.CredentialID = hex.EncodeToString(credID)
 	extra.WebAuthnP256 = hex.EncodeToString(compressed)
 	if len(keys) >= 2 && keys[0] != nil && keys[1] != nil {
-		extra = proposedPoP(t, svc, start.VaultID, keys[0], keys[1], extra)
+		extra = proposedPoPHandle(t, svc, start.VaultID, start.Handle, keys[0], keys[1], extra)
 	}
 	return EnrollFinishRequest{
 		Handle:            start.Handle,

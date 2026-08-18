@@ -36,7 +36,6 @@ type Config struct {
 	DatabasePath              string
 	VaultCosignerKeyFile      string
 	ExternalOwnerWalletPubHex string
-	RecoveryKeyPubHex         string
 	EnrollmentTokenFile       string
 	EnrollmentWindow          time.Duration
 	OpenEnrollment            bool
@@ -160,6 +159,10 @@ func openWithDialers(ctx context.Context, cfg Config, dial publisherDialer, dial
 	if err := ledger.MigrateIssuanceIntegrity(credentialIntegrityKey); err != nil {
 		zero(credentialIntegrityKey)
 		return nil, fmt.Errorf("issuance integrity migration: %w", err)
+	}
+	if err := ledger.MigrateRecoverySessions(); err != nil {
+		zero(credentialIntegrityKey)
+		return nil, fmt.Errorf("recovery session migration: %w", err)
 	}
 
 	persisted, err := ledger.GetCredential()

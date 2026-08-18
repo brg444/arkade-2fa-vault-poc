@@ -43,9 +43,12 @@ func TestEmptyBootSealedIssuanceLandsOnSchemaV5(t *testing.T) {
 	if err := led.MigrateIssuanceIntegrity(testIntegrityKey()); err != nil {
 		t.Fatal(err)
 	}
+	if err := led.MigrateRecoverySessions(); err != nil {
+		t.Fatal(err)
+	}
 	ver, err := schemaVersion(led.db)
-	if err != nil || ver != schemaVersionIssuanceMAC {
-		t.Fatalf("empty boot schema = %d, %v want %d", ver, err, schemaVersionIssuanceMAC)
+	if err != nil || ver != schemaVersionSessions {
+		t.Fatalf("empty boot schema = %d, %v want %d", ver, err, schemaVersionSessions)
 	}
 	cols, err := tableColumns(led.db, "issuance")
 	if err != nil || !sameColumns(cols, issuanceColumns) {

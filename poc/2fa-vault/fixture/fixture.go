@@ -16,9 +16,13 @@ const (
 
 	// OperationalCSVBlocks is the device-only delay (lost hardware).
 	// Longer than hardware-only so a stolen device cannot beat hardware.
+	// JSON/SQL wire name remains operationalCsvBlocks.
 	OperationalCSVBlocks uint32 = 144
+	DeviceCSVBlocks      = OperationalCSVBlocks
 	// SavingsCSVBlocks is the hardware-only delay (lost device).
+	// JSON/SQL wire name remains savingsCsvBlocks.
 	SavingsCSVBlocks uint32 = 6
+	HardwareCSVBlocks       = SavingsCSVBlocks
 
 	TxRecipientCapSats  int64 = 50_000
 	PeriodAllowanceSats int64 = 100_000
@@ -40,12 +44,10 @@ const (
 	HKDFInfo           = "arkade-2fa-vault/kek/v1"
 	DirectP256HKDFInfo = "arkade-2fa-vault/direct-p256/v1"
 	HKDFHashName       = "SHA-256"
-	// RecoveryKeyPubHex is the public deterministic regtest-only generator-G
-	// fixture with known scalar 1. The regtest provider never holds that scalar;
-	// Mutinynet startup rejects this x-only identity in either parity.
+	// RecoveryKeyPubHex is generator G (scalar 1). It is not a vault role.
+	// Mutinynet rejects this x-only identity on every on-chain key.
 	RecoveryKeyPubHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-	// ExternalOwnerWalletPubHex is the equally public regtest-only scalar-2
-	// fixture. Mutinynet startup rejects this x-only identity too.
+	// ExternalOwnerWalletPubHex is generator 2G (scalar 2). Same denylist.
 	ExternalOwnerWalletPubHex = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 
 	HTTPAddr = "localhost:8787"
@@ -53,8 +55,11 @@ const (
 	// TemplateVersion / PolicyVersion / Network are persisted at enrollment.
 	// A restart with different values must refuse to rebuild the trees.
 	TemplateVersion = "phone-direct-p256-routine-3of3-admin-phone-hww-v4"
-	PolicyVersion   = "mandatory-change-tx50k-day100k-fee5k-feerate10-onchain-v3"
-	Network         = "regtest"
+	// LeftoverV3TemplateVersion is the only retired template that a
+	// multi-tenant authorizer may quarantine. Any other mismatch fails closed.
+	LeftoverV3TemplateVersion = "phone-direct-p256-routine-3of3-admin-2of2-v3"
+	PolicyVersion             = "mandatory-change-tx50k-day100k-fee5k-feerate10-onchain-v3"
+	Network                   = "regtest"
 )
 
 func OperationalCSV() arklib.RelativeLocktime {

@@ -303,6 +303,37 @@ func (l *Ledger) MigrateIssuanceIntegrity(integrityKey []byte) error {
 	return nil
 }
 
+// MigrateRecoverySessions is the schema 5→6 step. Adds MAC'd initiate/clawback rows.
+func (l *Ledger) MigrateRecoverySessions() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, err := l.db.Exec(`CREATE TABLE IF NOT EXISTS recovery_session (
+  vault_id TEXT NOT NULL REFERENCES vault(vault_id),
+  purpose TEXT NOT NULL CHECK (purpose IN ('initiate', 'clawback')),
+  input_txid TEXT NOT NULL,
+  input_vout INTEGER NOT NULL,
+  dest_script TEXT NOT NULL,
+  last_sighash TEXT,
+  signature BLOB,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32),
+  PRIMARY KEY (vault_id, input_txid, input_vout, purpose)
+)`); err != nil {
+		return fmt.Errorf("recovery session table: %w", err)
+	}
+	ver, n, err := schemaMetaState(l.db)
+	if err != nil {
+		return err
+	}
+	if n == 1 && ver == schemaVersionIssuanceMAC {
+		if _, err := l.db.Exec(`UPDATE schema_meta SET version = ? WHERE version = ?`, schemaVersionSessions, schemaVersionIssuanceMAC); err != nil {
+			return fmt.Errorf("session schema version: %w", err)
+		}
+	}
+	return nil
+}
+
 func ensureIssuanceIntegrity(db *sql.DB, path string) error {
 	cols, err := tableColumns(db, "issuance")
 	if err != nil {

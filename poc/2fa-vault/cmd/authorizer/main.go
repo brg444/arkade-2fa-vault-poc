@@ -29,19 +29,18 @@ func main() {
 	}
 
 	var (
-		addr        = flag.String("addr", envOr("VAULT_AUTHORIZER_ADDR", "127.0.0.1:8788"), "internal authorizer listen address")
-		dbPath      = flag.String("db", os.Getenv("VAULT_DB_PATH"), "absolute authoritative SQLite path")
-		keyFile     = flag.String("vault-cosigner-key-file", os.Getenv("VAULT_VAULT_COSIGNER_KEY_FILE"), "file containing the VaultCosigner private scalar")
-		ownerHex    = flag.String("external-owner-wallet", os.Getenv("VAULT_EXTERNAL_OWNER_WALLET_PUB"), "independent compressed ExternalOwnerWallet public key")
-		recoveryHex = flag.String("recovery-key", os.Getenv("VAULT_RECOVERY_KEY_PUB"), "independent compressed RecoveryKey public key")
-		tokenFile   = flag.String("enrollment-token-file", os.Getenv("VAULT_ENROLLMENT_TOKEN_FILE"), "one-time first-enrollment token file")
-		esploraURL  = flag.String("esplora-url", os.Getenv("VAULT_ESPLORA_URL"), "checkpoint-pinned Mutinynet Esplora base URL")
-		origin      = flag.String("client-origin", os.Getenv("VAULT_CLIENT_ORIGIN"), "exact HTTPS signing-client origin")
-		rpID        = flag.String("rp-id", os.Getenv("VAULT_RP_ID"), "exact WebAuthn relying-party ID")
-		network     = flag.String("network", envOr("VAULT_NETWORK", deployment.NetworkMutinynet), "must be mutinynet")
-		opCSV       = flag.Uint64("operational-csv-blocks", uint64(opDefault), "Operational recovery delay in blocks")
-		savingsCSV  = flag.Uint64("savings-csv-blocks", uint64(savingsDefault), "Savings recovery delay in blocks")
-		freshOnly   = flag.Bool("fresh-only", !envTruthy("VAULT_ALLOW_LEGACY"), "refuse legacy credential/database files before any backup or migrate")
+		addr       = flag.String("addr", envOr("VAULT_AUTHORIZER_ADDR", "127.0.0.1:8788"), "internal authorizer listen address")
+		dbPath     = flag.String("db", os.Getenv("VAULT_DB_PATH"), "absolute authoritative SQLite path")
+		keyFile    = flag.String("vault-cosigner-key-file", os.Getenv("VAULT_VAULT_COSIGNER_KEY_FILE"), "file containing the VaultCosigner private scalar")
+		ownerHex   = flag.String("external-owner-wallet", os.Getenv("VAULT_EXTERNAL_OWNER_WALLET_PUB"), "independent compressed ExternalOwnerWallet public key")
+		tokenFile  = flag.String("enrollment-token-file", os.Getenv("VAULT_ENROLLMENT_TOKEN_FILE"), "one-time first-enrollment token file")
+		esploraURL = flag.String("esplora-url", os.Getenv("VAULT_ESPLORA_URL"), "checkpoint-pinned Mutinynet Esplora base URL")
+		origin     = flag.String("client-origin", os.Getenv("VAULT_CLIENT_ORIGIN"), "exact HTTPS signing-client origin")
+		rpID       = flag.String("rp-id", os.Getenv("VAULT_RP_ID"), "exact WebAuthn relying-party ID")
+		network    = flag.String("network", envOr("VAULT_NETWORK", deployment.NetworkMutinynet), "must be mutinynet")
+		opCSV      = flag.Uint64("operational-csv-blocks", uint64(opDefault), "device-only CSV delay in blocks")
+		savingsCSV = flag.Uint64("savings-csv-blocks", uint64(savingsDefault), "hardware-only CSV delay in blocks")
+		freshOnly  = flag.Bool("fresh-only", !envTruthy("VAULT_ALLOW_LEGACY"), "refuse legacy credential/database files before any backup or migrate")
 	)
 	flag.Parse()
 	if *opCSV > uint64(deployment.MaxCSVBlockDelay) || *savingsCSV > uint64(deployment.MaxCSVBlockDelay) {
@@ -59,7 +58,6 @@ func main() {
 		DatabasePath:              *dbPath,
 		VaultCosignerKeyFile:      *keyFile,
 		ExternalOwnerWalletPubHex: *ownerHex,
-		RecoveryKeyPubHex:         *recoveryHex,
 		EnrollmentTokenFile:       *tokenFile,
 		MultiTenantEnrollment:     envTruthy("VAULT_MULTI_TENANT_ENROLLMENT"),
 		FreshOnly:                 *freshOnly,

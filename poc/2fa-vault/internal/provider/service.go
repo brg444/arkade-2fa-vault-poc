@@ -21,6 +21,7 @@ import (
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/deployment"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/vault"
+	v5 "github.com/arkade-os/emulator/poc/2fa-vault/internal/vault/v5"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
@@ -121,11 +122,13 @@ type RegisterRequest struct {
 	// These BIP340 x-only keys are chosen exactly once for a fresh portable
 	// deployment. A configured deployment may precommit the same identities.
 	ExternalOwnerWalletXOnly string `json:"externalOwnerWalletXOnly,omitempty"`
+	RecoveryXOnly            string `json:"recoveryXOnly,omitempty"`
 	RecoveryKeyXOnly         string `json:"recoveryKeyXOnly,omitempty"`
 	// Optional tenant identity. Extra fields must not 400 under
 	// DisallowUnknownFields; new enrollments should send them.
 	VaultID            string `json:"vaultId,omitempty"`
 	ExternalOwnerProof string `json:"externalOwnerProof,omitempty"`
+	RecoveryPoP        string `json:"recoveryPoP,omitempty"`
 	RecoveryProof      string `json:"recoveryProof,omitempty"`
 	DescriptorHash     string `json:"descriptorHash,omitempty"`
 }
@@ -191,6 +194,9 @@ func (s *Service) RegisterWithBootstrap(req RegisterRequest, bootstrap string) e
 	parsed, err := s.parseRegisterRequest(req, nil)
 	if err != nil {
 		return err
+	}
+	if recoveryField(req) != "" || recoveryProofField(req) != "" || parsed.recovery != nil {
+		return fmt.Errorf("recoveryKeyXOnly is retired")
 	}
 	op, sv, err := s.makeTrees(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner)
 	if err != nil {
@@ -265,17 +271,33 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, req); err != nil {
 		return err
 	}
-	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
-	if err != nil {
-		return err
+	var descriptor policy.Credential
+	var op, sv *vault.Built
+	if parsed.recovery != nil {
+		handle := ""
+		if pending != nil {
+			handle = pending.Handle
+		}
+		if err := v5.VerifyRecoveryPoP(parsed.recovery, vaultID, handle, proposed.DescriptorHash, recoveryProofField(req)); err != nil {
+			return err
+		}
+		descriptor, op, sv, err = s.mintV5Credential(vaultID, parsed, child.PubKey())
+		if err != nil {
+			return err
+		}
+	} else {
+		op, sv, err = s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
+		if err != nil {
+			return err
+		}
+		descriptor = descriptorFromTrees(
+			s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
+			parsed.phoneRoutine, parsed.externalOwner,
+			child.PubKey(), s.ArkadeCosignerPub,
+			s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
+		)
+		descriptor.VaultID = vaultID
 	}
-	descriptor := descriptorFromTrees(
-		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-		parsed.phoneRoutine, parsed.externalOwner,
-		child.PubKey(), s.ArkadeCosignerPub,
-		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
-	)
-	descriptor.VaultID = vaultID
 	if err := s.sealCredential(&descriptor); err != nil {
 		return err
 	}
@@ -462,11 +484,19 @@ func (s *Service) parseRegisterRequestWithKeys(
 	if err != nil {
 		return parsed, err
 	}
-	if strings.TrimSpace(req.RecoveryKeyXOnly) != "" {
-		return parsed, fmt.Errorf("recoveryKeyXOnly is retired")
+	var existingRecovery *btcec.PublicKey
+	if existing != nil && len(existing.RecoveryKey) > 0 {
+		if pub, err := btcec.ParsePubKey(existing.RecoveryKey); err == nil && !knownFixtureXOnly(schnorr.SerializePubKey(pub)) {
+			existingRecovery = pub
+		}
 	}
-	if strings.TrimSpace(req.RecoveryProof) != "" {
-		return parsed, fmt.Errorf("recoveryProof is retired")
+	if rec := recoveryField(req); rec != "" {
+		parsed.recovery, err = s.parseOnboardingKey("recoveryXOnly", rec, recoveryFallback, existingRecovery)
+		if err != nil {
+			return parsed, err
+		}
+	} else if existingRecovery != nil {
+		parsed.recovery = existingRecovery
 	}
 	parsed.vaultID = req.VaultID
 	return parsed, nil
@@ -506,13 +536,10 @@ func (s *Service) LoadVaults() error {
 		if cred == nil {
 			return nil
 		}
-		if err := s.publishStoredEnrollment(cred, true); err != nil {
-			if skipIncompatibleStoredVault(s, cred.VaultID, err) {
-				return nil
-			}
-			return err
+		if quarantineLegacyVault(s, cred.VaultID, cred.TemplateVersion) {
+			return nil
 		}
-		return nil
+		return s.publishStoredEnrollment(cred, true)
 	}
 	key, err := s.credentialIntegrityKey()
 	if err != nil {
@@ -528,10 +555,10 @@ func (s *Service) LoadVaults() error {
 			return fmt.Errorf("vault %s missing credential", id)
 		}
 		cred := rec.ToCredential(*vcred)
+		if quarantineLegacyVault(s, id, cred.TemplateVersion) {
+			continue
+		}
 		if err := s.publishStoredEnrollment(&cred, true && id == fixture.VaultID); err != nil {
-			if skipIncompatibleStoredVault(s, id, err) {
-				continue
-			}
 			return err
 		}
 	}
@@ -568,6 +595,9 @@ func (s *Service) rebuildFromCredential(cred *policy.Credential) (
 ) {
 	if err = s.requireCompatible(cred); err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, err
+	}
+	if isV5Template(cred.TemplateVersion) {
+		return s.rebuildV5(cred)
 	}
 	phoneRoutine, err = btcec.ParsePubKey(cred.PhoneRoutineBIP340)
 	if err != nil {
@@ -736,22 +766,10 @@ func authorizationPolicyFromCredential(cred *policy.Credential) vault.Authorizat
 	}
 }
 
-func skipIncompatibleStoredVault(s *Service, vaultID string, err error) bool {
-	if s == nil || !s.MultiTenantEnrollment || !incompatibleStoredVault(err) {
-		return false
-	}
-	log.Printf("skipping stored vault %s: %v", vaultID, err)
-	return true
-}
-
-func incompatibleStoredVault(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "incompatible with runtime")
-}
-
 func (s *Service) requireCompatible(cred *policy.Credential) error {
 	cfg := s.runtimeConfig()
-	if cred.TemplateVersion != fixture.TemplateVersion {
-		return fmt.Errorf("stored template %q incompatible with runtime %q", cred.TemplateVersion, fixture.TemplateVersion)
+	if !knownTemplate(cred.TemplateVersion) {
+		return fmt.Errorf("stored template %q incompatible with runtime", cred.TemplateVersion)
 	}
 	if cred.PolicyVersion != fixture.PolicyVersion {
 		return fmt.Errorf("stored policy %q incompatible with runtime %q", cred.PolicyVersion, fixture.PolicyVersion)
@@ -783,7 +801,15 @@ func (s *Service) requireCompatible(cred *policy.Credential) error {
 		cred.FeerateCapSatPerV != fixture.FeerateCeilingSatPerV {
 		return fmt.Errorf("stored economic policy incompatible with runtime")
 	}
-	if cred.ArkadeCosignerOrigin != s.ArkadeCosignerOrigin {
+	wantOrigin, wantVersion := s.arkadeIdentity()
+	if isV5Template(cred.TemplateVersion) {
+		if cred.ArkadeCosignerOrigin != wantOrigin {
+			return fmt.Errorf("stored ArkadeCosigner origin %q incompatible with runtime %q", cred.ArkadeCosignerOrigin, wantOrigin)
+		}
+		if cred.ArkadeCosignerVersion != wantVersion {
+			return fmt.Errorf("stored ArkadeCosigner version %q incompatible with runtime %q", cred.ArkadeCosignerVersion, wantVersion)
+		}
+	} else if cred.ArkadeCosignerOrigin != s.ArkadeCosignerOrigin {
 		return fmt.Errorf("stored ArkadeCosigner origin %q incompatible with runtime %q", cred.ArkadeCosignerOrigin, s.ArkadeCosignerOrigin)
 	}
 	if cfg.Network != deployment.NetworkRegtest && (cred.ArkadeCosignerVersion == "" || s.ArkadeCosignerVersion == "") {
@@ -1106,7 +1132,7 @@ func (s *Service) PublicStatus() (PublicStatus, error) {
 		Network:              cfg.Network,
 		ClientOrigin:         cfg.ClientOrigin,
 		RPID:                 cfg.RPID,
-		TemplateVersion:      fixture.TemplateVersion,
+		TemplateVersion:      publicEnrollTemplate(s),
 		PolicyVersion:        fixture.PolicyVersion,
 		OperationalCSVBlocks: cfg.OperationalCSVBlocks,
 		SavingsCSVBlocks:     cfg.SavingsCSVBlocks,
@@ -1174,7 +1200,7 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 		ClientOrigin:         cfg.ClientOrigin,
 		RPID:                 cfg.RPID,
 		VaultID:              vaultID,
-		TemplateVersion:      fixture.TemplateVersion,
+		TemplateVersion:      publicEnrollTemplate(s),
 		PolicyVersion:        fixture.PolicyVersion,
 		OperationalCSVBlocks: cfg.OperationalCSVBlocks,
 		SavingsCSVBlocks:     cfg.SavingsCSVBlocks,
@@ -1205,6 +1231,10 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 	if cred != nil {
 		// Report the persisted descriptor inputs, not merely mutable runtime
 		// fields. LoadVaults/Register already require these to match runtime.
+		st.TemplateVersion = cred.TemplateVersion
+		if isV5Template(cred.TemplateVersion) && len(cred.RecoveryKey) > 0 {
+			st.RecoveryKeyPub = hex.EncodeToString(cred.RecoveryKey)
+		}
 		st.ExternalOwnerWalletPub = hex.EncodeToString(cred.ExternalOwnerWallet)
 		st.VaultCosignerBasePub = hex.EncodeToString(cred.VaultCosignerBase)
 		st.ArkadeCosignerBasePub = hex.EncodeToString(cred.ArkadeCosignerBase)

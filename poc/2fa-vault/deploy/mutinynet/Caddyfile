@@ -45,7 +45,7 @@
 
 	@api_post {
 		method POST
-		path /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
+		path /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/propose /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
 	}
 	handle @api_post {
 		reverse_proxy vault-authorizer:8788
@@ -53,14 +53,14 @@
 
 	@api_options {
 		method OPTIONS
-		path /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
+		path /v1/status /v1/invite /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/propose /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
 	}
 	handle @api_options {
 		reverse_proxy vault-authorizer:8788
 	}
 
 	@known_v1 {
-		path /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
+		path /v1/status /v1/invite /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/propose /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover
 	}
 	handle @known_v1 {
 		respond "method not allowed" 405

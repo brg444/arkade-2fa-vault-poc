@@ -126,6 +126,21 @@ var expectedV4Tables = map[string]struct {
 			{Name: "", Unique: true, Cols: []string{"token_hash"}},
 		},
 	},
+	"recovery_session": {
+		cols: []colSpec{
+			spec("vault_id", "TEXT", true, 1),
+			spec("purpose", "TEXT", true, 4),
+			spec("input_txid", "TEXT", true, 2),
+			spec("input_vout", "INTEGER", true, 3),
+			spec("dest_script", "TEXT", true, 0),
+			spec("last_sighash", "TEXT", false, 0),
+			spec("signature", "BLOB", false, 0),
+			spec("created_at", "TEXT", true, 0),
+			spec("updated_at", "TEXT", true, 0),
+			spec("integrity_mac", "BLOB", true, 0),
+		},
+		fks: []fkSpec{{Table: "vault", From: "vault_id", To: "vault_id"}},
+	},
 }
 
 type schemaQuerier interface {

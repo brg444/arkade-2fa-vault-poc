@@ -9,9 +9,11 @@ import (
 const (
 	schemaVersionMultiTenant = 4
 	schemaVersionIssuanceMAC = 5
-	schemaVersionCurrent     = schemaVersionIssuanceMAC
+	schemaVersionSessions    = 6
+	schemaVersionCurrent     = schemaVersionSessions
 	vaultRecordMACDomain     = "arkade-2fa-vault/vault-record/v4"
 	vaultCredentialMACDomain = "arkade-2fa-vault/vault-credential/v1"
+	sessionMACDomain         = "arkade-2fa-vault/recovery-session/v1"
 )
 
 var schemaMetaColumns = []string{"version"}
@@ -113,6 +115,19 @@ CREATE TABLE IF NOT EXISTS pending_enrollment (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS vault_credential_vault ON vault_credential(vault_id);
+CREATE TABLE IF NOT EXISTS recovery_session (
+  vault_id TEXT NOT NULL REFERENCES vault(vault_id),
+  purpose TEXT NOT NULL CHECK (purpose IN ('initiate', 'clawback')),
+  input_txid TEXT NOT NULL,
+  input_vout INTEGER NOT NULL,
+  dest_script TEXT NOT NULL,
+  last_sighash TEXT,
+  signature BLOB,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  integrity_mac BLOB NOT NULL CHECK (length(integrity_mac) = 32),
+  PRIMARY KEY (vault_id, input_txid, input_vout, purpose)
+);
 `
 
 func ensureMultiTenantSchema(db *sql.DB) error {

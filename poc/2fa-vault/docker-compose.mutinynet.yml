@@ -14,9 +14,8 @@ services:
       VAULT_CLIENT_ORIGIN: https://${VAULT_DOMAIN:?set VAULT_DOMAIN}
       VAULT_RP_ID: ${VAULT_DOMAIN:?set VAULT_DOMAIN}
       VAULT_EXTERNAL_OWNER_WALLET_PUB: ${VAULT_EXTERNAL_OWNER_WALLET_PUB:?set a real independent compressed ExternalOwnerWallet public key}
-      VAULT_RECOVERY_KEY_PUB: ${VAULT_RECOVERY_KEY_PUB:?set a real independent compressed RecoveryKey public key}
-      VAULT_OPERATIONAL_CSV_BLOCKS: ${VAULT_OPERATIONAL_CSV_BLOCKS:?set an explicit block delay}
-      VAULT_SAVINGS_CSV_BLOCKS: ${VAULT_SAVINGS_CSV_BLOCKS:?set an explicit longer block delay}
+      VAULT_OPERATIONAL_CSV_BLOCKS: ${VAULT_OPERATIONAL_CSV_BLOCKS:?set device-only CSV blocks}
+      VAULT_SAVINGS_CSV_BLOCKS: ${VAULT_SAVINGS_CSV_BLOCKS:?set hardware-only CSV blocks}
       VAULT_ESPLORA_URL: ${VAULT_ESPLORA_URL:-https://mempool.mutinynet.arkade.sh/api}
     secrets:
       - source: vault_cosigner_key

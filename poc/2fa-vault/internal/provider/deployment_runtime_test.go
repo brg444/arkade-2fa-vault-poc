@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,19 +18,19 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 )
 
-func TestLoadVaultsSkipsRetiredTemplateOnlyInMultiTenant(t *testing.T) {
-	err := fmt.Errorf("stored template %q incompatible with runtime %q", "phone-direct-p256-routine-3of3-admin-2of2-v3", fixture.TemplateVersion)
-	if !incompatibleStoredVault(err) {
-		t.Fatal("template mismatch should be skippable")
+func TestQuarantineIsExactLeftoverTemplateOnly(t *testing.T) {
+	mt := &Service{MultiTenantEnrollment: true}
+	if quarantineLegacyVault(&Service{}, "tenant-a", fixture.LeftoverV3TemplateVersion) {
+		t.Fatal("singleton authorizer must fail closed on a leftover template")
 	}
-	if skipIncompatibleStoredVault(&Service{}, "tenant-a", err) {
-		t.Fatal("singleton authorizer must still fail closed on a retired template")
+	if !quarantineLegacyVault(mt, "tenant-a", fixture.LeftoverV3TemplateVersion) {
+		t.Fatal("multi-tenant boot should quarantine the exact leftover v3 template")
 	}
-	if !skipIncompatibleStoredVault(&Service{MultiTenantEnrollment: true}, "tenant-a", err) {
-		t.Fatal("multi-tenant boot should skip a leftover v3 vault")
+	if quarantineLegacyVault(mt, "tenant-a", fixture.TemplateVersion) {
+		t.Fatal("current template must not be quarantined")
 	}
-	if skipIncompatibleStoredVault(&Service{MultiTenantEnrollment: true}, "tenant-a", fmt.Errorf("integrity mac")) {
-		t.Fatal("integrity failures must still fail closed")
+	if quarantineLegacyVault(mt, "tenant-a", "phone-direct-p256-routine-3of3-admin-phone-hww-v4-forged") {
+		t.Fatal("unknown template must fail closed, not quarantine")
 	}
 }
 

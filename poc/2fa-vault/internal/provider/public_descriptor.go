@@ -71,7 +71,7 @@ type publicSavings struct {
 type ProposedEnrollment struct {
 	VaultID        string                `json:"vaultId"`
 	DescriptorHash string                `json:"descriptorHash"`
-	Descriptor     PublicVaultDescriptor `json:"descriptor"`
+	Descriptor     any    `json:"descriptor"`
 }
 
 func publicDescriptorFromCredential(c policy.Credential) (PublicVaultDescriptor, error) {

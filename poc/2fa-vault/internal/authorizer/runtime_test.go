@@ -166,10 +166,10 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoveryKey, err := btcec.NewPrivateKey()
-	_ = recoveryKey
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = recoveryKey
 	vaultCosignerPath := filepath.Join(dir, "vault-cosigner-key")
 	if err := os.WriteFile(vaultCosignerPath, []byte(hex.EncodeToString(vaultCosignerKey.Serialize())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -187,7 +187,6 @@ func TestRuntimeOwnsKeyAndLedgerAndDropsEnrollmentSecret(t *testing.T) {
 		DatabasePath:              filepath.Join(dir, "vault.sqlite"),
 		VaultCosignerKeyFile:      vaultCosignerPath,
 		ExternalOwnerWalletPubHex: hex.EncodeToString(externalOwnerKey.PubKey().SerializeCompressed()),
-		RecoveryKeyPubHex:         hex.EncodeToString(recoveryKey.PubKey().SerializeCompressed()),
 		EsploraURL:                "https://mempool.mutinynet.arkade.sh/api",
 	}
 	dials := 0

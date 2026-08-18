@@ -1,5 +1,6 @@
-# Use this overlay only for first enrollment. After /v1/register succeeds,
-# restart from docker-compose.mutinynet.yml alone and remove this token file.
+# Use this overlay only for first invite-gated /v1/enroll/* enrollment.
+# After finish succeeds, restart from docker-compose.mutinynet.yml alone and
+# remove this token file. This overlay does not add /v1/register.
 services:
   vault-authorizer:
     environment:

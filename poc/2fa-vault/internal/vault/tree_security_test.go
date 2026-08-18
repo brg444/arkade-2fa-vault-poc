@@ -12,7 +12,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 )
 
-func TestRecoveryKeyRequiredOnAdminAndRecoveryPaths(t *testing.T) {
+func TestV4LeavesArePhoneAndHardwareWithoutRetiredRecovery(t *testing.T) {
 	t.Parallel()
 
 	f := newSecurityVaultFixture(t)
@@ -45,6 +45,16 @@ func TestRecoveryKeyRequiredOnAdminAndRecoveryPaths(t *testing.T) {
 	}
 	if sv.Leaves.Routine != nil {
 		t.Fatal("Savings must not have a provider routine path")
+	}
+	if op.Leaves.Recovery != nil || sv.Leaves.Recovery != nil {
+		t.Fatal("v4 trees must not expose a recovery leaf")
+	}
+	for _, built := range []*Built{op, sv} {
+		for _, leaf := range []*Leaf{built.Leaves.Routine, built.Leaves.Admin, built.Leaves.PhoneCSV, built.Leaves.HardwareCSV} {
+			if leaf != nil && leafContainsSecurityKey(leaf, f.recovery.PubKey()) {
+				t.Fatalf("%s unexpectedly contains the retired recovery key", leaf.Name)
+			}
+		}
 	}
 }
 
@@ -195,7 +205,7 @@ func assertSecurityCSVKeyAndDelay(t *testing.T, leaf *Leaf, want *btcec.PublicKe
 	}
 	if len(closure.PubKeys) != 1 ||
 		!bytes.Equal(schnorr.SerializePubKey(closure.PubKeys[0]), schnorr.SerializePubKey(want)) {
-		t.Fatalf("%s does not contain only the RecoveryKey", leaf.Name)
+		t.Fatalf("%s does not contain only the expected CSV key", leaf.Name)
 	}
 	if closure.Locktime.Value != delay {
 		t.Fatalf("%s delay = %d, want %d", leaf.Name, closure.Locktime.Value, delay)

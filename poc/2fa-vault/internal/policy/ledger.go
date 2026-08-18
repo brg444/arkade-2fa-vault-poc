@@ -223,7 +223,7 @@ func knownSchemaTable(table string) bool {
 	switch table {
 	case "credential", "issuance", "credential_envelope",
 		"vault", "vault_credential", "vault_envelope",
-		"invite", "pending_enrollment", "schema_meta":
+		"invite", "pending_enrollment", "recovery_session", "schema_meta":
 		return true
 	default:
 		return false

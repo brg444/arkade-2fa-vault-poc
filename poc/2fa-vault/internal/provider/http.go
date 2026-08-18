@@ -97,11 +97,12 @@ var authorizerRouteMethods = map[string]map[string]struct{}{
 	"/v1/enroll/start":      {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/enroll/propose":    {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/enroll/finish":     {http.MethodPost: {}, http.MethodOptions: {}},
-	"/v1/register":          {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/preflight":         {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/draft":             {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/bind":              {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/authorize":         {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/initiate":          {http.MethodPost: {}, http.MethodOptions: {}},
+	"/v1/clawback":          {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/publish":           {http.MethodPost: {}, http.MethodOptions: {}},
 	"/v1/tx":                {http.MethodGet: {}, http.MethodOptions: {}},
 	"/v1/passkey/challenge": {http.MethodPost: {}, http.MethodOptions: {}},
@@ -125,6 +126,7 @@ func NewHandler(svc *Service, webDir string, demo *Demo) http.Handler {
 	origin := serviceOrigin(svc)
 	mux := http.NewServeMux()
 	attachCoreRoutes(mux, svc, origin)
+	attachRegisterRoute(mux, svc, origin)
 	if demo != nil {
 		demo.attach(mux, origin)
 	} else {
@@ -191,15 +193,10 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		out, err := svc.FinishEnrollment(r.Context(), r.Header.Get(EnrollmentTokenHeader), req)
 		writeJSON(w, out, err)
 	})
-	mux.HandleFunc("POST /v1/register", func(w http.ResponseWriter, r *http.Request) {
-		var req RegisterRequest
-		if err := decodeMutation(r, &req, origin); err != nil {
-			writeMutationError(w, err)
-			return
-		}
-		err := svc.RegisterWithBootstrap(req, r.Header.Get(EnrollmentTokenHeader))
-		writeJSON(w, map[string]any{"ok": err == nil}, err)
-	})
+	attachSpendRoutes(mux, svc, origin)
+}
+
+func attachSpendRoutes(mux *http.ServeMux, svc *Service, origin string) {
 	mux.HandleFunc("POST /v1/preflight", func(w http.ResponseWriter, r *http.Request) {
 		var req PreflightRequest
 		if err := decodeMutation(r, &req, origin); err != nil {
@@ -235,6 +232,26 @@ func attachCoreRoutes(mux *http.ServeMux, svc *Service, origin string) {
 		}
 		signed, replay, err := svc.Authorize(r.Context(), req)
 		writeJSON(w, map[string]any{"signedPsbt": signed, "replay": replay}, err)
+	})
+	mux.HandleFunc("POST /v1/initiate", func(w http.ResponseWriter, r *http.Request) {
+		var req TransitionRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		req.Purpose = "initiate"
+		out, err := svc.SignTransition(r.Context(), req)
+		writeJSON(w, out, err)
+	})
+	mux.HandleFunc("POST /v1/clawback", func(w http.ResponseWriter, r *http.Request) {
+		var req TransitionRequest
+		if err := decodeMutation(r, &req, origin); err != nil {
+			writeMutationError(w, err)
+			return
+		}
+		req.Purpose = "clawback"
+		out, err := svc.SignTransition(r.Context(), req)
+		writeJSON(w, out, err)
 	})
 	mux.HandleFunc("POST /v1/publish", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

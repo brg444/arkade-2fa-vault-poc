@@ -1,5 +1,8 @@
 # Mutinynet deployment runbook
 
+**Live program is v4.** v5 is the next enroll (wallet `docs/v5-overview.md`).
+This runbook stands up the validating cosigner, not the PWA.
+
 This brings up the demonstrable Mutinynet POC as:
 
 ```text
@@ -14,13 +17,19 @@ wallet, funding route, or mining route. The authorizer does make one narrow
 outbound HTTPS call to the release-pinned public Arkade Emulator for the third
 routine signature; `/v1/onchain-tx` is never exposed through the gateway.
 
-The Routine Operational leaf is exact 3-of-3: browser-memory
-`PhoneRoutineBIP340`, tweaked private `VaultCosigner`, and tweaked public
-`ArkadeCosigner`. Phone approval also requires the separate WebAuthn and
-`PhoneDirectP256` authorization. Admin/full sweep/policy migration is an
-offline 2-of-2 `ExternalOwnerWallet + RecoveryKey` leaf; emergency recovery
-is CSV + `RecoveryKey`. Savings has only those two external admin/recovery
-paths and excludes every routine signer.
+The only live Mutinynet authorizer is Railway `authorizer-next`. The
+older Railway `authorizer` service and Fly `arkade-vault-demo-api` app
+are retired.
+
+The live tree is `phone-direct-p256-routine-3of3-admin-phone-hww-v4`.
+Routine Operational is exact 3-of-3: browser-memory `PhoneRoutineBIP340`,
+tweaked private `VaultCosigner`, and tweaked public `ArkadeCosigner`. Phone
+approval also requires the separate WebAuthn and `PhoneDirectP256`
+authorization. Admin/full sweep is 2-of-2 device + hardware
+(`PhoneRoutineBIP340 + ExternalOwnerWallet`). Device-only CSV is 144 blocks;
+hardware-only CSV is 6. Savings has admin plus those two CSV leaves and no
+routine path. There is no RecoveryKey. `/v1/register` is not on this
+deployment; enrollment is invite-gated `/v1/enroll/*`.
 
 Issuance is staged as:
 
@@ -50,16 +59,17 @@ does not provide an HSM or enclave security boundary.
 - `openssl`, `curl`, and optionally `jq` for the walkthrough.
 - Optionally `mutinynet-cli` with `mutinynet-cli login`; the hosted
   [Mutinynet faucet](https://faucet.mutinynet.com/) is the no-install path.
-- An ExternalOwnerWallet and an independent RecoveryKey wallet, each capable
-  of exporting a real compressed secp256k1 public key and signing a Taproot
-  script-path PSBT. Their key ceremonies are outside this repository.
+- An ExternalOwnerWallet hardware key capable of exporting a real compressed
+  secp256k1 public key and signing a Taproot script-path PSBT. That ceremony
+  is outside this repository. Do not use the public G or 2G fixtures.
 
 Run every Compose command below from the repository root.
 
-This v3 release does not reinterpret v1/v2 SQLite databases or funded outputs.
-Preserve the old database and keys and complete a reviewed old-tree
-spend/migration before enrolling and funding a fresh v3 instance. Do not test
-migration by overwriting the only custody state.
+This v4 release does not reinterpret leftover v3 SQLite rows as spendable
+trees. Multi-tenant boot quarantines the exact leftover template
+`phone-direct-p256-routine-3of3-admin-2of2-v3` and fails closed on any other
+stored mismatch. Schema 6, if it ever drops `recovery_key_compressed`, is a
+separate RFC. Do not test migration by overwriting the only custody state.
 
 ## 1. Prepare secrets outside the repository
 
@@ -94,19 +104,19 @@ browser for the first registration and is never logged or stored by the
 browser. Do not put either file in this repository or in a shell history as
 literal secret text.
 
-Export real 33-byte compressed public keys from ExternalOwnerWallet and
-RecoveryKey. They must be independent of each other, PhoneRoutineBIP340, and
-both cosigners. They must not be either known regtest fixture or its negation.
-Only public keys enter Compose; their private material remains in the external
-wallets.
+Export a real 33-byte compressed ExternalOwnerWallet (hardware) public key.
+It must be independent of PhoneRoutineBIP340 and both cosigners. It must not
+be either known public fixture (G or 2G) or its negation. Only that public
+key enters Compose; the hardware private material stays on the device.
 
 ## 2. Set deployment inputs
 
-The example CSV delays below are explicit **demo policy choices**, not a
+The example CSV delays below are the live Mutinynet demo clocks, not a
 general custody recommendation. Mutinynet targets roughly 30-second blocks,
-so 288 blocks is approximately 2.4 hours and 4032 blocks approximately 1.4
-days. Reorganizations and block-time variance make wall-clock estimates
-non-binding. Values must be in `1..65535`, and Savings must exceed Operational.
+so 144 blocks is about 72 minutes and 6 blocks about 3 minutes.
+Reorganizations and block-time variance make wall-clock estimates
+non-binding. Values must be in `1..65535`, and the device-only delay must
+exceed the hardware-only delay.
 
 Replace `YOUR_REAL_DOMAIN` and `YOUR_REAL_EMAIL` below before running the
 commands. The domain must be under DNS you control and resolve publicly to
@@ -120,9 +130,8 @@ export ACME_EMAIL="${YOUR_REAL_EMAIL}"
 export VAULT_VAULT_COSIGNER_KEY_FILE=/absolute/operator/path/vault-secrets/vault-cosigner-key
 export VAULT_ENROLLMENT_TOKEN_FILE=/absolute/operator/path/vault-secrets/enrollment-token
 export VAULT_EXTERNAL_OWNER_WALLET_PUB=02_REPLACE_WITH_REAL_66_HEX_EXTERNAL_OWNER_PUB
-export VAULT_RECOVERY_KEY_PUB=02_REPLACE_WITH_REAL_66_HEX_RECOVERY_PUB
-export VAULT_OPERATIONAL_CSV_BLOCKS=288
-export VAULT_SAVINGS_CSV_BLOCKS=4032
+export VAULT_OPERATIONAL_CSV_BLOCKS=144
+export VAULT_SAVINGS_CSV_BLOCKS=6
 export VAULT_ESPLORA_URL=https://mempool.mutinynet.arkade.sh/api
 ```
 
@@ -168,28 +177,26 @@ curl --fail --show-error https://$VAULT_DOMAIN/health
 curl --fail --show-error https://$VAULT_DOMAIN/v1/status
 ```
 
-Open `https://$VAULT_DOMAIN` in a PRF-capable browser. Paste the contents of
-the enrollment-token file into **One-time enrollment token**, then choose
-**Create passkey**. Verify status reports:
+Open the live wallet origin in a PRF-capable browser. Redeem an invite and
+complete `/v1/enroll/start` → `/propose` → `/finish`. Verify status reports:
 
 - `enrolled: true`;
 - `network: "mutinynet"`;
 - the exact HTTPS `clientOrigin` and RP ID;
 - `externalOwnerWalletPub` exactly equal to
   `VAULT_EXTERNAL_OWNER_WALLET_PUB`;
-- `recoveryKeyPub` exactly equal to `VAULT_RECOVERY_KEY_PUB`;
+- no `recoveryKeyPub` field;
 - the independently derived `vaultCosignerBasePub` for the mounted scalar;
 - `arkadeCosignerBasePub`, `arkadeCosignerOrigin`, and
   `arkadeCosignerVersion` exactly equal to the release pins above;
 - distinct `phoneRoutineBip340Pub`, `tweakedVaultCosignerXOnly`, and
   `tweakedArkadeCosignerXOnly` identities;
-- the intended template/policy versions and both CSV block delays;
+- template `phone-direct-p256-routine-3of3-admin-phone-hww-v4`, policy
+  `…onchain-v3`, and CSV 144/6;
 - both `tb1p...` addresses and the configured economic caps; and
 - `savingsExcludesRoutineCosigners: true`.
 
-Registration is first-write locked. Record this public status before funding.
-The current POC exposes the immutable inputs but does not yet derive the full
-descriptor independently in the browser; that remains a client milestone.
+Enrollment is first-write locked. Record this public status before funding.
 
 ## 4. Remove the enrollment token from the running topology
 
@@ -288,19 +295,21 @@ go run ./poc/2fa-vault/cmd/adminpsbt \
   -mode build -descriptor status.json -request admin-request.json \
   -out unsigned-admin.psbt
 
-# Transfer the PSBT to ExternalOwnerWallet and RecoveryKey and obtain both
-# signatures without changing any PSBT field.
+# Transfer the PSBT to the enrolled device + hardware and obtain both
+# signatures without changing any PSBT field. The live wallet Savings
+# spend/QR path is the supported product handoff.
 go run ./poc/2fa-vault/cmd/adminpsbt \
   -mode finalize -descriptor status.json -psbt signed-admin.psbt \
   -out final-admin.psbt -tx-out final-admin.tx
 ```
 
 The build request is JSON with `prevTxHex`, `vout`, `destinationScript`,
-`destinationAmount`, and `fee`. The tool pins and reconstructs the exact v3
+`destinationAmount`, and `fee`. The tool pins and reconstructs the exact v4
 descriptor and Mutinynet Arkade release identity, verifies the full prevout,
-requires exactly ExternalOwnerWallet+RecoveryKey BIP340 signatures, executes
-the finalized witness locally, opens no listener, and reads no private key.
-Broadcast is an explicit operator step after reviewing `final-admin.tx`.
+rejects any `recoveryKeyPub`, requires device + hardware BIP340 signatures,
+executes the finalized witness locally, opens no listener, and reads no
+private key. Broadcast is an explicit operator step after reviewing
+`final-admin.tx`.
 
 ## 7. Restart proof
 
@@ -314,7 +323,7 @@ docker compose \
 curl --fail --show-error https://$VAULT_DOMAIN/v1/status
 ```
 
-Changing the VaultCosigner key, ExternalOwnerWallet, RecoveryKey, network, CSV delays, client origin, RP
+Changing the VaultCosigner key, ExternalOwnerWallet, network, CSV delays, client origin, RP
 ID, template, or policy version must make restart fail rather than silently
 derive a different vault. The credential/descriptor row carries a versioned
 HMAC under a domain-separated key derived from the VaultCosigner scalar. A
@@ -331,9 +340,10 @@ still requires the signature under the stored tweak. Removing that deprecated
 key, changing the pinned origin, or using a non-allowlisted version makes
 startup fail closed.
 
-The current v3 credential and issuance schema is also exact. Pointing this
-binary at a v1/v2 database fails with migration/restore guidance; startup does
-not rewrite the old descriptor, ledger, or already funded legacy UTXOs.
+The current schema-5 credential and issuance schema is also exact. Pointing
+this binary at a v1/v2 database fails with migration/restore guidance;
+startup does not rewrite the old descriptor, ledger, or already funded
+legacy UTXOs. The one leftover v3 template is quarantined by exact match.
 
 ## Stop without deleting custody state
 
@@ -374,9 +384,10 @@ records before bringing the key-owning authorizer back online after restore.
   Esplora height-1 checkpoint pins Mutinynet.
 - The browser independently derives and reconciles the restricted POC Arkade
   sighash, but does not yet derive a complete versioned vault descriptor.
-- Friendly ExternalOwnerWallet/RecoveryKey pairing and transport UX is not
-  implemented; the file-only reference handoff is deliberately manual.
-- This is one vault per isolated authorizer, with code-pinned economic caps.
+- Friendly hardware pairing and transport UX is not implemented; the live
+  wallet Savings QR handoff is the supported product path.
+- This is invite-gated multi-tenant enrollment on the live authorizer, with
+  code-pinned economic caps.
 - Container/root compromise is outside the protected-key claim.
 - Database snapshots have no anti-rollback protection.
 

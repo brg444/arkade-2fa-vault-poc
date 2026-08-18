@@ -1,6 +1,14 @@
+# ARCHIVE — v3 frontend target, not the live product
+
+The live demo is wallet vault mode against template
+`phone-direct-p256-routine-3of3-admin-phone-hww-v4` (device CSV 144, hardware
+CSV 6, no RecoveryKey). The rest of this file is a historical v3 UI contract.
+
+---
+
 # Arkade Wallet Vault mode — v3 frontend requirements
 
-Status: architecture target, not implemented in this repository.
+Status: archived. Do not implement this as the current product.
 
 Freeze the first UI milestone to the audited candidate
 `arkade-os/wallet@ad691cf071080daf37607356ee47b7e4cc8ce34f`. Treat

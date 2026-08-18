@@ -45,7 +45,6 @@ func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 	for _, required := range []string{
 		"-vault-cosigner-key-file=/run/secrets/vault_cosigner_key",
 		"VAULT_EXTERNAL_OWNER_WALLET_PUB:",
-		"VAULT_RECOVERY_KEY_PUB:",
 		"vault-authorizer-data:/app/data",
 		"vault-boundary",
 		"ipv4_address: 172.30.44.10",
@@ -133,15 +132,15 @@ func TestMutinynetComposeSealsVaultCosignerKeyBehindGateway(t *testing.T) {
 		"Cache-Control \"no-store\"",
 		"request>headers>X-Vault-Enrollment-Token delete",
 		"method GET\n\t\tpath /v1/status /v1/tx /v1/invite",
-		"method POST\n\t\tpath /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover",
-		"method OPTIONS\n\t\tpath /v1/status /v1/invite /v1/register /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover",
+		"method POST\n\t\tpath /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/enroll/start /v1/enroll/propose /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover",
+		"method OPTIONS\n\t\tpath /v1/status /v1/invite /v1/preflight /v1/draft /v1/bind /v1/authorize /v1/publish /v1/tx /v1/enroll/start /v1/enroll/propose /v1/enroll/finish /v1/passkey/challenge /v1/passkey/binding /v1/passkey/install /v1/passkey/recover",
 		"@any_v1 {\n\t\tpath /v1/*\n\t}\n\thandle @any_v1 {\n\t\trespond \"not found\" 404",
 	} {
 		if !strings.Contains(caddy, required) {
 			t.Fatalf("gateway route allowlist missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"/v1/sign", "/v1/onchain-tx", "/v1/demo/"} {
+	for _, forbidden := range []string{"/v1/sign", "/v1/onchain-tx", "/v1/demo/", "/v1/register"} {
 		if strings.Contains(caddy, forbidden) {
 			t.Fatalf("gateway contains forbidden route %q", forbidden)
 		}
