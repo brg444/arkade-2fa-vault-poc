@@ -42,14 +42,27 @@ func pendingDelay(claimant string) uint32 {
 	}
 }
 
-func quarantineGuardians(claimant string) (string, string) {
+func familyClaimants(hasRecovery bool) []string {
+	if hasRecovery {
+		return []string{"phone", "hardware", "recovery"}
+	}
+	return []string{"phone", "hardware"}
+}
+
+func quarantineGuardians(claimant string, hasRecovery bool) []string {
 	switch claimant {
 	case "phone":
-		return "hardware", "recovery"
+		if hasRecovery {
+			return []string{"hardware", "recovery"}
+		}
+		return []string{"hardware"}
 	case "hardware":
-		return "phone", "recovery"
+		if hasRecovery {
+			return []string{"phone", "recovery"}
+		}
+		return []string{"phone"}
 	default:
-		return "phone", "hardware"
+		return []string{"phone", "hardware"}
 	}
 }
 
@@ -68,16 +81,16 @@ func BuildQuarantine(vaultID, kind, claimant, network string, phone, hardware, r
 		return "", nil, err
 	}
 	roles := map[string]*btcec.PublicKey{"phone": phone, "hardware": hardware, "recovery": recovery}
-	a, b := quarantineGuardians(claimant)
-	pa, err := rolePub(roles, a)
-	if err != nil {
-		return "", nil, err
+	names := quarantineGuardians(claimant, recovery != nil)
+	var pubs []*btcec.PublicKey
+	for _, name := range names {
+		p, err := rolePub(roles, name)
+		if err != nil {
+			return "", nil, err
+		}
+		pubs = append(pubs, p)
 	}
-	pb, err := rolePub(roles, b)
-	if err != nil {
-		return "", nil, err
-	}
-	script, err := checksig(pa, pb)
+	script, err := checksig(pubs...)
 	if err != nil {
 		return "", nil, err
 	}
@@ -100,7 +113,7 @@ func BuildPending(vaultID, kind, claimant, network string, phone, hardware, reco
 		return "", nil, err
 	}
 	var clawbacks [][]byte
-	for _, g := range []string{"phone", "hardware", "recovery"} {
+	for _, g := range familyClaimants(recovery != nil) {
 		if g == claimant {
 			continue
 		}

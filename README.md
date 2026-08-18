@@ -7,8 +7,8 @@ It is Go source. It is not the product architecture home.
 - Protocol / docs map: [docs/architecture.md](https://github.com/brg444/arkade-wallet-vault/blob/vault-mode/docs/architecture.md)
 - Deployable packaging: [arkade-vault-server](https://github.com/brg444/arkade-vault-server)
 
-Live default enroll is v4. v5 only if the tenant adds recovery. Recovery
-is never required. Mutinynet only. Not an HSM. Not `poc/2fa-vault/web`.
+New enrolls are v5 only. Recovery is optional. Leftover v4 coins still
+load until swept. Mutinynet only. Not an HSM. Not `poc/2fa-vault/web`.
 
 Operate this binary: [poc/2fa-vault/README.md](poc/2fa-vault/README.md)
 

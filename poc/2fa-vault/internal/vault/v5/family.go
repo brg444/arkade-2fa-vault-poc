@@ -16,6 +16,16 @@ var (
 // FamilyKey is kind-claimant, e.g. daily-phone.
 func FamilyKey(kind, claimant string) string { return kind + "-" + claimant }
 
+func familyKeyList(hasRecovery bool) []string {
+	var out []string
+	for _, kind := range kinds {
+		for _, claimant := range familyClaimants(hasRecovery) {
+			out = append(out, FamilyKey(kind, claimant))
+		}
+	}
+	return out
+}
+
 // Tree is one rebuilt address.
 type Tree struct {
 	Address  string
@@ -68,7 +78,7 @@ func BuildNormal(vaultID, kind, network string, phone, hardware, recovery *btcec
 		return "", nil, nil, err
 	}
 	var initiateScripts [][]byte
-	for _, claimant := range claimants {
+	for _, claimant := range familyClaimants(recovery != nil) {
 		pair, ok := initiate[claimant]
 		if !ok || pair.Vault == nil || pair.Arkade == nil {
 			return "", nil, nil, fmt.Errorf("missing %s initiate tweaks", claimant)
@@ -80,6 +90,9 @@ func BuildNormal(vaultID, kind, network string, phone, hardware, recovery *btcec
 		case "hardware":
 			claimantPub = hardware
 		default:
+			if recovery == nil {
+				return "", nil, nil, fmt.Errorf("recovery initiate without recovery key")
+			}
 			claimantPub = recovery
 		}
 		script, err := checksig(claimantPub, pair.Vault, pair.Arkade)
@@ -129,8 +142,9 @@ func BuildFamily(in FamilyInput) (*Family, error) {
 		InitiateSave:  map[string]TweakPair{},
 		PendingTweaks: map[string]TweakPair{},
 	}
+	roles := familyClaimants(in.Recovery != nil)
 	for _, kind := range kinds {
-		for _, claimant := range claimants {
+		for _, claimant := range roles {
 			key := FamilyKey(kind, claimant)
 			qAddr, qScript, err := BuildQuarantine(in.VaultID, kind, claimant, in.Network, in.Phone, in.Hardware, in.Recovery)
 			if err != nil {
@@ -156,14 +170,14 @@ func BuildFamily(in FamilyInput) (*Family, error) {
 			if claimant == "phone" {
 				phoneDirect = in.PhoneDirectP256
 			}
-			initAuth, err := BuildTransitionScript(pScript, phoneDirect, InitiateWitnessBytes(kind, claimant))
+			initAuth, err := BuildTransitionScript(pScript, phoneDirect, InitiateWitnessBytes(kind, claimant, in.Recovery != nil))
 			if err != nil {
 				return nil, fmt.Errorf("initiate auth %s: %w", key, err)
 			}
 			fam.InitiateAuth[key] = initAuth
 		}
 	}
-	for _, claimant := range claimants {
+	for _, claimant := range roles {
 		dv, da, err := tweakPair(in.VaultCosignerBase, in.ArkadeCosignerBase, fam.InitiateAuth[FamilyKey("daily", claimant)])
 		if err != nil {
 			return nil, err
@@ -193,8 +207,8 @@ func BuildFamily(in FamilyInput) (*Family, error) {
 }
 
 func assertFamilyBases(in FamilyInput) error {
-	if in.Phone == nil || in.Hardware == nil || in.Recovery == nil {
-		return fmt.Errorf("phone, hardware, and recovery required")
+	if in.Phone == nil || in.Hardware == nil {
+		return fmt.Errorf("phone and hardware required")
 	}
 	if in.VaultCosignerBase == nil || in.ArkadeCosignerBase == nil || in.RoutineVault == nil || in.RoutineArkade == nil {
 		return fmt.Errorf("cosigner bases and routine tweaks required")
@@ -202,25 +216,26 @@ func assertFamilyBases(in FamilyInput) error {
 	if err := parseCanonicalCompressedP256(in.PhoneDirectP256); err != nil {
 		return err
 	}
-	return requireDistinctRoleSet([]*btcec.PublicKey{
-		in.Phone, in.Hardware, in.Recovery,
-		in.VaultCosignerBase, in.ArkadeCosignerBase,
-		in.RoutineVault, in.RoutineArkade,
-	}, "family bases")
+	bases := []*btcec.PublicKey{in.Phone, in.Hardware}
+	if in.Recovery != nil {
+		bases = append(bases, in.Recovery)
+	}
+	bases = append(bases, in.VaultCosignerBase, in.ArkadeCosignerBase, in.RoutineVault, in.RoutineArkade)
+	return requireDistinctRoleSet(bases, "family bases")
 }
 
 func assertFamilyDistinct(in FamilyInput, fam *Family) error {
-	keys := []*btcec.PublicKey{
-		in.Phone, in.Hardware, in.Recovery,
-		in.VaultCosignerBase, in.ArkadeCosignerBase,
-		in.RoutineVault, in.RoutineArkade,
+	keys := []*btcec.PublicKey{in.Phone, in.Hardware}
+	if in.Recovery != nil {
+		keys = append(keys, in.Recovery)
 	}
-	for _, claimant := range claimants {
+	keys = append(keys, in.VaultCosignerBase, in.ArkadeCosignerBase, in.RoutineVault, in.RoutineArkade)
+	for _, claimant := range familyClaimants(in.Recovery != nil) {
 		keys = append(keys, fam.InitiateDaily[claimant].Vault, fam.InitiateDaily[claimant].Arkade)
 		keys = append(keys, fam.InitiateSave[claimant].Vault, fam.InitiateSave[claimant].Arkade)
 	}
 	for _, kind := range kinds {
-		for _, claimant := range claimants {
+		for _, claimant := range familyClaimants(in.Recovery != nil) {
 			pair := fam.PendingTweaks[FamilyKey(kind, claimant)]
 			keys = append(keys, pair.Vault, pair.Arkade)
 		}

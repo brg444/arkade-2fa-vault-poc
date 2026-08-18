@@ -43,7 +43,7 @@ type PublicKeys struct {
 	PhoneRoutineBip340 string `json:"phoneRoutineBip340"`
 	PhoneDirectP256    string `json:"phoneDirectP256"`
 	Hardware           string `json:"hardware"`
-	Recovery           string `json:"recovery"`
+	Recovery           string `json:"recovery,omitempty"`
 	VaultCosignerBase  string `json:"vaultCosignerBase"`
 	ArkadeCosignerBase string `json:"arkadeCosignerBase"`
 }
@@ -120,7 +120,6 @@ func BuildPublicDescriptor(in FamilyInput, origin, version string) (PublicDescri
 			PhoneRoutineBip340: hex.EncodeToString(in.Phone.SerializeCompressed()),
 			PhoneDirectP256:    hex.EncodeToString(in.PhoneDirectP256),
 			Hardware:           hex.EncodeToString(in.Hardware.SerializeCompressed()),
-			Recovery:           hex.EncodeToString(in.Recovery.SerializeCompressed()),
 			VaultCosignerBase:  hex.EncodeToString(in.VaultCosignerBase.SerializeCompressed()),
 			ArkadeCosignerBase: hex.EncodeToString(in.ArkadeCosignerBase.SerializeCompressed()),
 		},
@@ -155,20 +154,23 @@ func BuildPublicDescriptor(in FamilyInput, origin, version string) (PublicDescri
 		Pending:            map[string]PendingRef{},
 		Quarantine:         map[string]QuarantineRef{},
 	}
-	for _, key := range familyKeys {
-		kind, claimant, _ := strings.Cut(key, "-")
-		a, b := quarantineGuardians(claimant)
-		d.Pending[key] = PendingRef{
-			Script:  hex.EncodeToString(fam.Pending[key].PkScript),
-			Address: fam.Pending[key].Address,
-			Delay:   pendingDelay(claimant),
+	if in.Recovery != nil {
+		d.Keys.Recovery = hex.EncodeToString(in.Recovery.SerializeCompressed())
+	}
+	for _, kind := range kinds {
+		for _, claimant := range familyClaimants(in.Recovery != nil) {
+			key := FamilyKey(kind, claimant)
+			d.Pending[key] = PendingRef{
+				Script:  hex.EncodeToString(fam.Pending[key].PkScript),
+				Address: fam.Pending[key].Address,
+				Delay:   pendingDelay(claimant),
+			}
+			d.Quarantine[key] = QuarantineRef{
+				Script:    hex.EncodeToString(fam.Quarantine[key].PkScript),
+				Address:   fam.Quarantine[key].Address,
+				Guardians: quarantineGuardians(claimant, in.Recovery != nil),
+			}
 		}
-		d.Quarantine[key] = QuarantineRef{
-			Script:    hex.EncodeToString(fam.Quarantine[key].PkScript),
-			Address:   fam.Quarantine[key].Address,
-			Guardians: []string{a, b},
-		}
-		_ = kind
 	}
 	return d, fam, nil
 }
@@ -202,7 +204,20 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 		{d.Keys.PhoneRoutineBip340, "phone"},
 		{d.Keys.PhoneDirectP256, "phoneDirectP256"},
 		{d.Keys.Hardware, "hardware"},
-		{d.Keys.Recovery, "recovery"},
+	} {
+		if err := appendExactHex(&parts, field.hex, field.name, 33); err != nil {
+			return nil, err
+		}
+	}
+	if d.Keys.Recovery != "" {
+		if err := appendExactHex(&parts, d.Keys.Recovery, "recovery", 33); err != nil {
+			return nil, err
+		}
+	}
+	for _, field := range []struct {
+		hex  string
+		name string
+	}{
 		{d.Keys.VaultCosignerBase, "vaultCosignerBase"},
 		{d.Keys.ArkadeCosignerBase, "arkadeCosignerBase"},
 		{d.Tweaks.Routine.Vault, "routine.vault"},
@@ -212,8 +227,9 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 			return nil, err
 		}
 	}
+	hasRecovery := d.Keys.Recovery != ""
 	for _, kind := range []string{"daily", "savings"} {
-		for _, claimant := range claimants {
+		for _, claimant := range familyClaimants(hasRecovery) {
 			pair := d.Tweaks.Initiate[kind][claimant]
 			if err := appendExactHex(&parts, pair.Vault, "initiate."+kind+"."+claimant+".vault", 33); err != nil {
 				return nil, err
@@ -223,7 +239,7 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 			}
 		}
 	}
-	for _, key := range familyKeys {
+	for _, key := range familyKeyList(hasRecovery) {
 		pair := d.Tweaks.Pending[key]
 		if err := appendExactHex(&parts, pair.Vault, "pending."+key+".vault", 33); err != nil {
 			return nil, err
@@ -264,7 +280,7 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 	if err := appendCanonText(&parts, d.Savings.Address, "savings.address"); err != nil {
 		return nil, err
 	}
-	for _, key := range familyKeys {
+	for _, key := range familyKeyList(hasRecovery) {
 		p := d.Pending[key]
 		if err := appendExactHex(&parts, p.Script, key+".pending.script", len(p.Script)/2); err != nil {
 			return nil, err
@@ -274,7 +290,7 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 		}
 		appendU32(&parts, p.Delay)
 	}
-	for _, key := range familyKeys {
+	for _, key := range familyKeyList(hasRecovery) {
 		q := d.Quarantine[key]
 		if err := appendExactHex(&parts, q.Script, key+".quarantine.script", len(q.Script)/2); err != nil {
 			return nil, err
@@ -285,8 +301,10 @@ func encodePublicDescriptor(d PublicDescriptor) ([]byte, error) {
 		if err := appendCanonText(&parts, q.Guardians[0], key+".guardian0"); err != nil {
 			return nil, err
 		}
-		if err := appendCanonText(&parts, q.Guardians[1], key+".guardian1"); err != nil {
-			return nil, err
+		if len(q.Guardians) > 1 {
+			if err := appendCanonText(&parts, q.Guardians[1], key+".guardian1"); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return concatParts(parts), nil

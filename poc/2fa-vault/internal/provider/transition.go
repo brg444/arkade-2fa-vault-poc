@@ -146,8 +146,14 @@ func (s *Service) assertTransitionDest(cred *policy.Credential, purpose, destHex
 		for _, claimant := range []string{"phone", "hardware", "recovery"} {
 			key := v5.FamilyKey(kind, claimant)
 			if purpose == "initiate" {
+				if fam.Pending[key].PkScript == nil {
+					continue
+				}
 				want[key] = fam.Pending[key].PkScript
 			} else {
+				if fam.Quarantine[key].PkScript == nil {
+					continue
+				}
 				want[key] = fam.Quarantine[key].PkScript
 			}
 		}

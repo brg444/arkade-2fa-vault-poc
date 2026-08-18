@@ -7,10 +7,8 @@ The **client** is the wallet vault-mode PWA. This package is the signer:
 `cmd/authorizer` owns VaultCosigner and the SQLite ledger. The wallet is
 hostile. This process decides.
 
-**Default enroll:** `phone-direct-p256-routine-3of3-admin-phone-hww-v4`  
-**Optional recovery:** `phone-hww-recovery-staged-v5` when the tenant
-supplies a recovery key. Recovery is never required. Existing v4
-tenants still load.
+**Enroll:** `phone-hww-recovery-staged-v5` only. Recovery is optional.  
+Leftover v4 tenants still load until swept.
 
 Operate: [deploy/mutinynet/README.md](deploy/mutinynet/README.md)  
 Client spec: wallet `docs/README.md`  

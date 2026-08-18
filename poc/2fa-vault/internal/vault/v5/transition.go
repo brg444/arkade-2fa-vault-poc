@@ -28,9 +28,17 @@ var p2aProgram = []byte{0x4e, 0x73}
 
 // InitiateWitnessBytes is the OP_TXWEIGHT contribution for a 3-of-3
 // initiate leaf. Daily phone/hardware sit one merkle level deeper.
-func InitiateWitnessBytes(kind, claimant string) int64 {
-	if kind == "daily" && (claimant == "phone" || claimant == "hardware") {
-		return WitnessBytes431
+const WitnessBytes367 int64 = 367
+
+func InitiateWitnessBytes(kind, claimant string, hasRecovery bool) int64 {
+	if hasRecovery {
+		if kind == "daily" && (claimant == "phone" || claimant == "hardware") {
+			return WitnessBytes431
+		}
+		return WitnessBytes399
+	}
+	if kind == "savings" && claimant == "hardware" {
+		return WitnessBytes367
 	}
 	return WitnessBytes399
 }

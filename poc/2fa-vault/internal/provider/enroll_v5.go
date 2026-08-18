@@ -48,9 +48,7 @@ func (s *Service) previewV5Descriptor(vaultID string, req RegisterRequest) (*Pro
 	if err != nil {
 		return nil, err
 	}
-	if parsed.recovery == nil {
-		return nil, fmt.Errorf("recovery key required")
-	}
+	// Recovery is optional. Skip it and the family is phone+hardware only.
 	in, err := s.v5FamilyInput(vaultID, parsed, child.PubKey())
 	if err != nil {
 		return nil, err
@@ -68,7 +66,7 @@ func (s *Service) previewV5Descriptor(vaultID string, req RegisterRequest) (*Pro
 }
 
 func (s *Service) v5FamilyInput(vaultID string, parsed parsedRegisterRequest, vaultBase *btcec.PublicKey) (v5.FamilyInput, error) {
-	if s.ArkadeCosignerPub == nil || parsed.phoneRoutine == nil || parsed.externalOwner == nil || parsed.recovery == nil {
+	if s.ArkadeCosignerPub == nil || parsed.phoneRoutine == nil || parsed.externalOwner == nil {
 		return v5.FamilyInput{}, fmt.Errorf("v5 keys required")
 	}
 	auth, err := vault.AuthorizationScript(parsed.phoneDirectP256, configuredAuthorizationPolicy())
@@ -111,7 +109,12 @@ func (s *Service) mintV5Credential(vaultID string, parsed parsedRegisterRequest,
 		PhoneDirectP256:       append([]byte(nil), parsed.phoneDirectP256...),
 		PhoneRoutineBIP340:    parsed.phoneRoutine.SerializeCompressed(),
 		ExternalOwnerWallet:   parsed.externalOwner.SerializeCompressed(),
-		RecoveryKey:           parsed.recovery.SerializeCompressed(),
+		RecoveryKey: func() []byte {
+			if parsed.recovery == nil {
+				return retiredRecoveryPlaceholder()
+			}
+			return parsed.recovery.SerializeCompressed()
+		}(),
 		RPID:                  cfg.RPID,
 		Origin:                cfg.ClientOrigin,
 		VaultCosignerBase:     vaultBase.SerializeCompressed(),
@@ -213,7 +216,11 @@ func dailyScriptVector(in v5.FamilyInput, fam *v5.Family) ([][]byte, error) {
 		return nil, err
 	}
 	out := [][]byte{append([]byte(nil), fam.DailyRoutine...), admin}
-	for _, claimant := range []string{"phone", "hardware", "recovery"} {
+	claimants := []string{"phone", "hardware"}
+	if in.Recovery != nil {
+		claimants = append(claimants, "recovery")
+	}
+	for _, claimant := range claimants {
 		pair := fam.InitiateDaily[claimant]
 		var pub *btcec.PublicKey
 		switch claimant {
@@ -287,9 +294,14 @@ func (s *Service) rebuildV5(cred *policy.Credential) (
 	if err != nil {
 		return
 	}
-	recovery, err = btcec.ParsePubKey(cred.RecoveryKey)
-	if err != nil {
-		return
+	if len(cred.RecoveryKey) > 0 {
+		recovery, err = btcec.ParsePubKey(cred.RecoveryKey)
+		if err != nil {
+			return
+		}
+		if knownFixtureXOnly(schnorr.SerializePubKey(recovery)) {
+			recovery = nil
+		}
 	}
 	vaultBase, err = btcec.ParsePubKey(cred.VaultCosignerBase)
 	if err != nil {
@@ -349,5 +361,5 @@ func isV5Template(template string) bool {
 }
 
 func publicEnrollTemplate(s *Service) string {
-	return fixture.TemplateVersion
+	return v5.Template
 }

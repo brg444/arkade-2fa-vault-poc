@@ -271,8 +271,6 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 	if err := verifyEnrollmentPoP(vaultID, parsed.externalOwner, req); err != nil {
 		return err
 	}
-	var descriptor policy.Credential
-	var op, sv *vault.Built
 	if parsed.recovery != nil {
 		handle := ""
 		if pending != nil {
@@ -281,22 +279,10 @@ func (s *Service) createTenantVault(vaultID string, tokenHash []byte, req Regist
 		if err := v5.VerifyRecoveryPoP(parsed.recovery, vaultID, handle, proposed.DescriptorHash, recoveryProofField(req)); err != nil {
 			return err
 		}
-		descriptor, op, sv, err = s.mintV5Credential(vaultID, parsed, child.PubKey())
-		if err != nil {
-			return err
-		}
-	} else {
-		op, sv, err = s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
-		if err != nil {
-			return err
-		}
-		descriptor = descriptorFromTrees(
-			s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-			parsed.phoneRoutine, parsed.externalOwner,
-			child.PubKey(), s.ArkadeCosignerPub,
-			s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
-		)
-		descriptor.VaultID = vaultID
+	}
+	descriptor, op, sv, err := s.mintV5Credential(vaultID, parsed, child.PubKey())
+	if err != nil {
+		return err
 	}
 	if err := s.sealCredential(&descriptor); err != nil {
 		return err
@@ -1233,7 +1219,9 @@ func (s *Service) statusFor(ctx context.Context, vaultID string) (Status, error)
 		// fields. LoadVaults/Register already require these to match runtime.
 		st.TemplateVersion = cred.TemplateVersion
 		if isV5Template(cred.TemplateVersion) && len(cred.RecoveryKey) > 0 {
-			st.RecoveryKeyPub = hex.EncodeToString(cred.RecoveryKey)
+			if pub, err := btcec.ParsePubKey(cred.RecoveryKey); err == nil && !knownFixtureXOnly(schnorr.SerializePubKey(pub)) {
+				st.RecoveryKeyPub = hex.EncodeToString(cred.RecoveryKey)
+			}
 		}
 		st.ExternalOwnerWalletPub = hex.EncodeToString(cred.ExternalOwnerWallet)
 		st.VaultCosignerBasePub = hex.EncodeToString(cred.VaultCosignerBase)

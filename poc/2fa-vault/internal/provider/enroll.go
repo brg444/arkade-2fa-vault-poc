@@ -165,10 +165,7 @@ func (s *Service) ProposeEnrollment(token string, req EnrollFinishRequest) (*Pro
 }
 
 func (s *Service) previewTenantDescriptor(vaultID string, req RegisterRequest) (*ProposedEnrollment, error) {
-	if recoveryField(req) != "" {
-		return s.previewV5Descriptor(vaultID, req)
-	}
-	return s.previewV4Descriptor(vaultID, req)
+	return s.previewV5Descriptor(vaultID, req)
 }
 
 func (s *Service) previewV4Descriptor(vaultID string, req RegisterRequest) (*ProposedEnrollment, error) {
