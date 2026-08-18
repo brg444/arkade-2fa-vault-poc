@@ -1,5 +1,5 @@
-// Package fixture pins the v4 Phone/VaultCosigner/ArkadeCosigner routine
-// policy and the PhoneRoutine+ExternalOwnerWallet admin policy.
+// Package fixture pins leftover v4 identity strings, policy caps, and
+// the PhoneRoutine+ExternalOwnerWallet admin policy. New enrolls are v5.
 package fixture
 
 import (
@@ -18,11 +18,11 @@ const (
 	// Longer than hardware-only so a stolen device cannot beat hardware.
 	// JSON/SQL wire name remains operationalCsvBlocks.
 	OperationalCSVBlocks uint32 = 144
-	DeviceCSVBlocks      = OperationalCSVBlocks
+	DeviceCSVBlocks             = OperationalCSVBlocks
 	// SavingsCSVBlocks is the hardware-only delay (lost device).
 	// JSON/SQL wire name remains savingsCsvBlocks.
-	SavingsCSVBlocks uint32 = 6
-	HardwareCSVBlocks       = SavingsCSVBlocks
+	SavingsCSVBlocks  uint32 = 6
+	HardwareCSVBlocks        = SavingsCSVBlocks
 
 	TxRecipientCapSats  int64 = 50_000
 	PeriodAllowanceSats int64 = 100_000

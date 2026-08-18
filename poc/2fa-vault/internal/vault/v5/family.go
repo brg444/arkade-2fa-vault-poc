@@ -38,7 +38,8 @@ type TweakPair struct {
 	Arkade *btcec.PublicKey
 }
 
-// Family is the 14-tree v5 program: 2 normals, 6 pending, 6 quarantine.
+// Family is the v5 program: 2 normals plus pending/quarantine per claimant
+// (10 trees without recovery, 14 with).
 type Family struct {
 	Daily         Tree
 	Savings       Tree
@@ -52,8 +53,8 @@ type Family struct {
 	PendingTweaks map[string]TweakPair
 }
 
-// FamilyInput is the canonical mint tuple. Routine tweaks are the v4
-// AuthorizationScript tweaks of the two cosigner bases.
+// FamilyInput is the canonical mint tuple. Recovery may be nil. Routine
+// tweaks are the AuthorizationScript tweaks of the two cosigner bases.
 type FamilyInput struct {
 	VaultID            string
 	Network            string
@@ -67,7 +68,8 @@ type FamilyInput struct {
 	RoutineArkade      *btcec.PublicKey
 }
 
-// BuildNormal is Daily (routine+admin+3 initiate) or Savings (admin+3 initiate).
+// BuildNormal is Daily (routine+admin+initiates) or Savings (admin+initiates).
+// Initiate count is 2 without recovery and 3 with it.
 func BuildNormal(vaultID, kind, network string, phone, hardware, recovery *btcec.PublicKey, initiate map[string]TweakPair, routineVault, routineArkade *btcec.PublicKey) (addr string, pkScript []byte, routine []byte, err error) {
 	internal, err := ContextInternalKey(vaultID, kind, "")
 	if err != nil {

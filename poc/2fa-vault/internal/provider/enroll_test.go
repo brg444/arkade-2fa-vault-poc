@@ -168,6 +168,12 @@ func TestInviteStartFinishCASAndVaultScopedStatus(t *testing.T) {
 	if st.VaultID != replay.VaultID || st.OperationalAddr == "" {
 		t.Fatalf("finish status: %+v", st)
 	}
+	if st.TemplateVersion != v5.Template {
+		t.Fatalf("skip-recovery enroll minted %q, want v5", st.TemplateVersion)
+	}
+	if st.RecoveryKeyPub != "" {
+		t.Fatalf("skip-recovery status leaked recovery: %+v", st)
+	}
 	again, err := svc.FinishEnrollment(context.Background(), token, req)
 	if err != nil || again.VaultID != st.VaultID {
 		t.Fatalf("duplicate finish: %+v %v", again, err)
@@ -384,6 +390,44 @@ func TestProposeMintsRebuiltV5Descriptor(t *testing.T) {
 		VaultID: start.VaultID, Purpose: "claim", PSBT: "00",
 	}); err == nil {
 		t.Fatal("signed a claim")
+	}
+}
+
+func TestProposeMintsV5WithoutRecovery(t *testing.T) {
+	svc, token, start := enrollReady(t)
+	pass, _ := webauthn.NewP256()
+	direct, _ := webauthn.NewP256()
+	hot, _ := btcec.NewPrivateKey()
+	owner, _ := btcec.NewPrivateKey()
+	unused, _ := btcec.NewPrivateKey()
+	req := attestedFinish(t, svc, start, pass, []byte("cred-v5-skip"), RegisterRequest{
+		PhoneDirectP256:          hex.EncodeToString(webauthn.CompressedP256(direct)),
+		PhoneRoutineBIP340Pub:    hex.EncodeToString(hot.PubKey().SerializeCompressed()),
+		ExternalOwnerWalletXOnly: hex.EncodeToString(schnorr.SerializePubKey(owner.PubKey())),
+	}, owner, unused)
+	proposed, err := svc.ProposeEnrollment(token, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc, ok := proposed.Descriptor.(v5.PublicDescriptor)
+	if !ok || desc.Schema != v5.Schema || desc.TemplateVersion != v5.Template {
+		t.Fatalf("skip-recovery propose did not mint v5: %+v", proposed.Descriptor)
+	}
+	if desc.Keys.Recovery != "" {
+		t.Fatalf("skip-recovery descriptor included recovery: %+v", desc.Keys)
+	}
+	if _, ok := desc.Pending["daily-recovery"]; ok {
+		t.Fatal("skip-recovery descriptor included a recovery pending tree")
+	}
+	if len(desc.Pending) != 4 || len(desc.Quarantine) != 4 {
+		t.Fatalf("want 2-guardian pending/quarantine, got pending=%d quarantine=%d", len(desc.Pending), len(desc.Quarantine))
+	}
+	st, err := svc.FinishEnrollment(context.Background(), token, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TemplateVersion != v5.Template || st.RecoveryKeyPub != "" || st.OperationalAddr != desc.Daily.Address {
+		t.Fatalf("skip-recovery finish status: %+v", st)
 	}
 }
 

@@ -1,7 +1,8 @@
 # Mutinynet deployment runbook
 
-**Live program is v4.** v5 is the next enroll (wallet `docs/v5-overview.md`).
-This runbook stands up the validating cosigner, not the PWA.
+**Live enroll is v5** (`phone-hww-recovery-staged-v5`). Recovery is
+optional. Leftover v4 rows still load. This runbook stands up the
+validating cosigner, not the PWA. See wallet `docs/v5-overview.md`.
 
 This brings up the demonstrable Mutinynet POC as:
 
@@ -21,15 +22,15 @@ The only live Mutinynet authorizer is Railway `authorizer-next`. The
 older Railway `authorizer` service and Fly `arkade-vault-demo-api` app
 are retired.
 
-The live tree is `phone-direct-p256-routine-3of3-admin-phone-hww-v4`.
-Routine Operational is exact 3-of-3: browser-memory `PhoneRoutineBIP340`,
-tweaked private `VaultCosigner`, and tweaked public `ArkadeCosigner`. Phone
-approval also requires the separate WebAuthn and `PhoneDirectP256`
-authorization. Admin/full sweep is 2-of-2 device + hardware
-(`PhoneRoutineBIP340 + ExternalOwnerWallet`). Device-only CSV is 144 blocks;
-hardware-only CSV is 6. Savings has admin plus those two CSV leaves and no
-routine path. There is no RecoveryKey. `/v1/register` is not on this
-deployment; enrollment is invite-gated `/v1/enroll/*`.
+The live enroll tree is `phone-hww-recovery-staged-v5`. Routine Operational
+is exact 3-of-3: browser-memory `PhoneRoutineBIP340`, tweaked private
+`VaultCosigner`, and tweaked public `ArkadeCosigner`. Phone approval also
+requires the separate WebAuthn and `PhoneDirectP256` authorization.
+Admin/full sweep is 2-of-2 device + hardware
+(`PhoneRoutineBIP340 + ExternalOwnerWallet`). There is no singlesig CSV
+on Normal. Skip recovery and the family is two guardians. Add recovery
+and it is a third. `/v1/register` is not on this deployment; enrollment
+is invite-gated `/v1/enroll/*`. Do not mint v4.
 
 Issuance is staged as:
 

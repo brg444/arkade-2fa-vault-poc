@@ -65,6 +65,48 @@ func TestFamilyAddressesMatchClientGoldens(t *testing.T) {
 	}
 }
 
+func TestFamilyWithoutRecoveryHasTenTrees(t *testing.T) {
+	in := fixtureFamilyInput(t)
+	in.Recovery = nil
+	fam, err := BuildFamily(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fam.Pending["daily-recovery"]; ok {
+		t.Fatal("skip-recovery family included a recovery pending tree")
+	}
+	seen := map[string]struct{}{
+		fam.Daily.Address:   {},
+		fam.Savings.Address: {},
+	}
+	for _, kind := range kinds {
+		for _, claimant := range familyClaimants(false) {
+			key := FamilyKey(kind, claimant)
+			if _, ok := fam.Quarantine[key]; !ok {
+				t.Fatalf("missing quarantine %s", key)
+			}
+			if _, ok := fam.Pending[key]; !ok {
+				t.Fatalf("missing pending %s", key)
+			}
+			seen[fam.Quarantine[key].Address] = struct{}{}
+			seen[fam.Pending[key].Address] = struct{}{}
+		}
+	}
+	if len(seen) != 10 {
+		t.Fatalf("want 10 distinct addresses, got %d", len(seen))
+	}
+	d, _, err := BuildPublicDescriptor(in, "http://emulator.local", "v5-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Keys.Recovery != "" {
+		t.Fatalf("skip-recovery descriptor leaked recovery: %+v", d.Keys)
+	}
+	if len(d.Pending) != 4 || len(d.Quarantine) != 4 {
+		t.Fatalf("descriptor trees pending=%d quarantine=%d", len(d.Pending), len(d.Quarantine))
+	}
+}
+
 func TestFamilyRefusesForbiddenPoints(t *testing.T) {
 	in := fixtureFamilyInput(t)
 	g, err := parseCompressed("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")

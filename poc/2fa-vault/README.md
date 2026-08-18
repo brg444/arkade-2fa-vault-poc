@@ -8,7 +8,7 @@ The **client** is the wallet vault-mode PWA. This package is the signer:
 hostile. This process decides.
 
 **Enroll:** `phone-hww-recovery-staged-v5` only. Recovery is optional.  
-Leftover v4 tenants still load until swept.
+Leftover v4 tenants still load; recover those coins out of band.
 
 Operate: [deploy/mutinynet/README.md](deploy/mutinynet/README.md)  
 Client spec: wallet `docs/README.md`  
@@ -23,14 +23,16 @@ Archive: [docs/archive/](docs/archive/)
 
 Live deploy is Railway `authorizer-next`. `web/` is not the product client.
 
-## Live v4 trees
+## Live v5 trees
 
 Daily: routine 3-of-3 (PhoneRoutine + two tweaked cosigners); admin
-phone+hardware; CSV 144 device; CSV 6 hardware.  
-Savings: admin + those two CSV leaves. No routine. No RecoveryKey.
+phone+hardware; initiate per guardian.  
+Savings: admin + the same initiate leaves. No routine. No singlesig CSV
+on Normal.
 
-Hardware can move first on a mature Savings coin. That hatch is why v5
-exists. Do not mint new v4 after v5 enroll ships.
+Skip recovery → 10 trees (phone + hardware). Add recovery → 14 trees.
+Hardware cannot sweep a mature Savings coin after six confirms on that
+coin. Do not mint v4.
 
 Routine script ends with:
 
@@ -83,10 +85,10 @@ mismatch fails closed.
 
 ## v5 enroll (optional recovery)
 
-New invites mint v4 unless a recovery key is supplied. With recovery,
-propose rebuilds the 14-tree v5 family from phone, hardware, recovery,
-DirectP256, and the two cosigner bases. Skip recovery and the authorizer
-mints v4. Claim is never signed.
+New invites always mint v5. Propose rebuilds the family from phone,
+hardware, optional recovery, DirectP256, and the two cosigner bases.
+Skip recovery and the authorizer still mints v5 (two guardians). Claim
+is never signed.
 
 | Method | Path | Role |
 | --- | --- | --- |
@@ -111,7 +113,7 @@ in the vault-client repo.
 | Host/root cannot extract VaultCosigner | No. Process isolation, not an HSM |
 | Same-origin XSS is tolerated | No |
 | Browser reconciles the Arkade sighash | Yes, one-input Routine |
-| Browser / signer share a rebuilt v5 family | **In progress.** Client builds it; server executes fixture transitions and stores sessions. Enroll still mints v4. |
+| Browser / signer share a rebuilt v5 family | Yes. Propose/finish mint v5. Recovery optional. |
 | Hardware/recovery key gen is in this repo | No |
 | Cosigner stages are crash-atomic | Staged, not atomic |
 | Mainnet / one vault per process | No mainnet. Live is invite multi-tenant |

@@ -8,7 +8,8 @@ It is Go source. It is not the product architecture home.
 - Deployable packaging: [arkade-vault-server](https://github.com/brg444/arkade-vault-server)
 
 New enrolls are v5 only. Recovery is optional. Leftover v4 coins still
-load until swept. Mutinynet only. Not an HSM. Not `poc/2fa-vault/web`.
+load; recover those out of band. Mutinynet only. Not an HSM. Not
+`poc/2fa-vault/web`.
 
 Operate this binary: [poc/2fa-vault/README.md](poc/2fa-vault/README.md)
 

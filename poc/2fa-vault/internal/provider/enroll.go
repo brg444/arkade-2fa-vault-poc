@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arkade-os/emulator/poc/2fa-vault/fixture"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/policy"
 	"github.com/arkade-os/emulator/poc/2fa-vault/internal/webauthn"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -166,44 +165,6 @@ func (s *Service) ProposeEnrollment(token string, req EnrollFinishRequest) (*Pro
 
 func (s *Service) previewTenantDescriptor(vaultID string, req RegisterRequest) (*ProposedEnrollment, error) {
 	return s.previewV5Descriptor(vaultID, req)
-}
-
-func (s *Service) previewV4Descriptor(vaultID string, req RegisterRequest) (*ProposedEnrollment, error) {
-	if vaultID == "" || vaultID == fixture.VaultID {
-		return nil, fmt.Errorf("tenant vault id required")
-	}
-	master, err := s.vaultCosignerMaster()
-	if err != nil {
-		return nil, err
-	}
-	child, err := policy.DeriveVaultCosignerScalar(master, vaultID, policy.CosignerModeHKDFSHA256V1)
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := s.parseRegisterRequestIndependent(req)
-	if err != nil {
-		return nil, err
-	}
-	op, sv, err := s.makeTreesWithCosigner(parsed.phoneRoutine, parsed.phoneDirectP256, parsed.externalOwner, child.PubKey())
-	if err != nil {
-		return nil, err
-	}
-	cred := descriptorFromTrees(
-		s.runtimeConfig(), parsed.id, parsed.webauthnP256, parsed.phoneDirectP256,
-		parsed.phoneRoutine, parsed.externalOwner,
-		child.PubKey(), s.ArkadeCosignerPub,
-		s.ArkadeCosignerOrigin, s.ArkadeCosignerVersion, op, sv,
-	)
-	cred.VaultID = vaultID
-	pub, err := publicDescriptorFromCredential(cred)
-	if err != nil {
-		return nil, err
-	}
-	hash, err := hashPublicDescriptor(pub)
-	if err != nil {
-		return nil, err
-	}
-	return &ProposedEnrollment{VaultID: vaultID, DescriptorHash: hash, Descriptor: pub}, nil
 }
 
 // FinishEnrollment verifies the create ceremony and CAS-consumes the invite.
