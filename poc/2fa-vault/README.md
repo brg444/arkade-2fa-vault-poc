@@ -1,15 +1,12 @@
-# Leftover vault POC in the emulator tree
+# Leftover vault POC
 
-## About Arkade Vault
-
-See the client [docs](https://github.com/brg444/arkade-wallet-vault/tree/vault-mode/docs).
-
-## About this package
-
-The live Mutinynet signer is
+The live vault service is
 [arkade-vault-server](https://github.com/brg444/arkade-vault-server).
-`cmd/authorizer` here exits and points there. Do not edit enroll or trees
-in this package for production.
+Don’t edit enroll or trees here. The `cmd/authorizer` in this folder
+just exits and points there.
+
+What the product is:
+[arkade-wallet-vault](https://github.com/brg444/arkade-wallet-vault).
 
 What remains here:
 

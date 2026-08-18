@@ -13,25 +13,16 @@ browser -> public Caddy TLS/static gateway -> internal authorizer
                                              `-> checkpoint-pinned HTTPS Esplora
 ```
 
-The authorizer is the only process with the VaultCosigner key and authoritative
-SQLite ledger. Compose runs no local Emulator, generic inbound signer, demo
-wallet, funding route, or mining route. The authorizer does make one narrow
-outbound HTTPS call to the release-pinned public Arkade Emulator for the third
-routine signature; `/v1/onchain-tx` is never exposed through the gateway.
+The leftover authorizer in this tree is not what you run. The live
+service is vault-server. Compose here is leftover: no local signer
+demo, no funding route, no mining route.
 
 The only live Mutinynet authorizer is Railway `authorizer-next`. The
 older Railway `authorizer` service and Fly `arkade-vault-demo-api` app
 are retired.
 
-The live enroll tree is `phone-hww-recovery-staged-v5`. Routine Operational
-is exact 3-of-3: browser-memory `PhoneRoutineBIP340`, tweaked private
-`VaultCosigner`, and tweaked public `ArkadeCosigner`. Phone approval also
-requires the separate WebAuthn and `PhoneDirectP256` authorization.
-Admin/full sweep is 2-of-2 device + hardware
-(`PhoneRoutineBIP340 + ExternalOwnerWallet`). There is no singlesig CSV
-on Normal. Skip recovery and the family is two guardians. Add recovery
-and it is a third. `/v1/register` is not on this deployment; enrollment
-is invite-gated `/v1/enroll/*`. Do not mint v4.
+New vaults are v5. Recovery is optional. You need an invite. Do not
+mint v4. Do not run `cmd/authorizer` from this tree.
 
 Issuance is staged as:
 
@@ -380,10 +371,9 @@ records before bringing the key-owning authorizer back online after restore.
   an SPV client. Cross-check important funding and publication state with an
   independent Mutinynet source.
 - The public Arkade Emulator is an availability and transaction-privacy
-  dependency. Its signing response is treated as hostile and reconciled down
-  to the one expected signature, but an outage can stop the routine
-  path. Its `/v1/info` response has no network field; only the separate
-  Esplora height-1 checkpoint pins Mutinynet.
+  dependency. The service keeps only the one signature it expected. An
+  outage can stop daily spend. Its `/v1/info` response has no network
+  field; only the separate Esplora height-1 checkpoint pins Mutinynet.
 - The browser independently derives and reconciles the restricted POC Arkade
   sighash, but does not yet derive a complete versioned vault descriptor.
 - Friendly hardware pairing and transport UX is not implemented; the live

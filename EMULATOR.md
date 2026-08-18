@@ -1,12 +1,9 @@
 # Emulator
 
 This file is the vendored [arkade-os/emulator](https://github.com/arkade-os/emulator)
-documentation. This repository is the **Arkade 2FA vault proof of concept**;
-start at the [root README](README.md). Regtest uses two private Emulator
-instances. Mutinynet uses the hosted public Emulator only as its independent
-third cosigner through a release-pinned, narrow outbound HTTPS client; the
-private policy key never leaves `cmd/authorizer`. The Emulator itself is not
-the product of this repo.
+documentation. This repo is the script engine (`pkg/arkade`). The phone
+app is [arkade-wallet-vault](https://github.com/brg444/arkade-wallet-vault).
+The vault service is [arkade-vault-server](https://github.com/brg444/arkade-vault-server).
 
 [![test](https://github.com/arkade-os/emulator/actions/workflows/test.yaml/badge.svg)](https://github.com/arkade-os/emulator/actions/workflows/test.yaml)
 [![quality](https://github.com/arkade-os/emulator/actions/workflows/quality.yaml/badge.svg)](https://github.com/arkade-os/emulator/actions/workflows/quality.yaml)

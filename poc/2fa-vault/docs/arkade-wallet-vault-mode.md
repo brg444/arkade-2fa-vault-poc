@@ -1,8 +1,9 @@
-# ARCHIVE — v3 frontend target, not the live product
+# ARCHIVE — leftover v3 frontend notes, not the live product
 
-The live demo is wallet vault mode against template
-`phone-direct-p256-routine-3of3-admin-phone-hww-v4` (device CSV 144, hardware
-CSV 6, no RecoveryKey). The rest of this file is a historical v3 UI contract.
+The live product is v5 on
+[arkade-wallet-vault](https://github.com/brg444/arkade-wallet-vault)
+and [arkade-vault-server](https://github.com/brg444/arkade-vault-server).
+The rest of this file is leftover v3 UI notes. Do not implement it.
 
 ---
 

@@ -1,23 +1,17 @@
 # Arkade emulator
 
-## About Arkade Vault
-
-Mutinynet L1 Taproot vault. Architecture:
-[arkade-wallet-vault/docs](https://github.com/brg444/arkade-wallet-vault/tree/vault-mode/docs).
-
-## About this repo
-
-This tree is the public Arkade **emulator** and `pkg/arkade` (script
-opcodes). It is not the vault product.
+This repo is the Arkade **script engine** (`pkg/arkade`). It is not the
+vault app and not the vault service.
 
 | You want | Go here |
 | --- | --- |
 | Phone app | [arkade-wallet-vault](https://github.com/brg444/arkade-wallet-vault) |
-| Signer / enroll / trees | [arkade-vault-server](https://github.com/brg444/arkade-vault-server) |
-| Script engine | `pkg/arkade` in **this** repo |
+| Vault service | [arkade-vault-server](https://github.com/brg444/arkade-vault-server) |
+| Script opcodes | `pkg/arkade` here |
 
-`poc/2fa-vault/cmd/authorizer` exits and points at vault-server.
-Leftover here: `cmd/provider`, `cmd/demo`, `web/` (regtest only).
+The old `poc/2fa-vault/cmd/authorizer` just exits and tells you to use
+vault-server. What’s left here (`cmd/provider`, `cmd/demo`, `web/`) is
+regtest leftover.
 
 ```bash
 go test ./poc/2fa-vault/...
